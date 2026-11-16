@@ -1,0 +1,8 @@
+# Stable substrings expected in the oracle's pseudoxml output for test-basic.
+# Absolute source paths are normalized to <SOURCE> before comparison.
+<document
+<section ids="the-basic-sphinx-documentation-for-testing"
+<title>
+The basic Sphinx documentation for testing
+<paragraph>
+<bullet_list bullet="*">

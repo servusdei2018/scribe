@@ -1,0 +1,14 @@
+# Upstream Python Sphinx oracle (read-only reference checkout)
+/sphinx/
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Python oracle venv
+/.oracle-venv/
+
+# Local scratch / differential outputs
+/.scratch/
+*.pyc
+__pycache__/

@@ -1,0 +1,21 @@
+[package]
+name = "scribe-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line interface for scribe (sphinx-build compatible)"
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "scribe"
+path = "src/main.rs"

@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scribe-cli",
+    "crates/scribe-core",
+    "crates/scribe-ast",
+    "crates/scribe-rst",
+    "crates/scribe-myst",
+    "crates/scribe-config",
+    "crates/scribe-domains",
+    "crates/scribe-builders",
+    "crates/scribe-theme",
+    "crates/scribe-autodoc",
+    "crates/scribe-cache",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["The scribe contributors"]
+repository = "https://github.com/credo/scribe"
+description = "A production-grade Rust reimplementation of the Sphinx documentation engine"
+
+[workspace.dependencies]
+# CLI + diagnostics (used in Phase 01)
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+
+# Parallelism + concurrent registries (reserved for Phases 08-14)
+rayon = "1"
+dashmap = "6"
+parking_lot = "0.12"
+
+# Serialization + configuration (reserved for Phases 02, 08, 25)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Deterministic caching (reserved for Phases 08, 30)
+blake3 = "1"
+bincode = "1.3"
+rkyv = "0.8"
+
+# Shared utilities (reserved for later phases)
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indexmap = "2"
+walkdir = "2"
+once_cell = "1"
+smallvec = "1"
+regex = "1"
+chrono = "0.4"
+similar = "2"
+rustc-hash = "2"
+
+[workspace.lints.rust]
+rust_2018_idioms = "warn"
+unused = "warn"

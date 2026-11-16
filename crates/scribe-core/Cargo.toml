@@ -1,0 +1,15 @@
+[package]
+name = "scribe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared core types, errors and traits for scribe"
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
