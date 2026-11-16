@@ -1,12 +1,13 @@
 # scribe — Architecture
 
-**Status:** Phase 01 (workspace architecture, CLI skeleton, upstream oracle harness).
+**Status:** Phase 02 (configuration engine, `conf.py` bridge, CLI config wiring).
 **Oracle:** `/home/credo/code/scribe/sphinx` (Python Sphinx HEAD `035a07c3`), installed at
 `/home/credo/code/scribe/.oracle-venv/bin/sphinx-build` (reports `sphinx-build 9.3.0+/035a07c32`).
 
 All behavior claims in this document were taken from the upstream source
-(`sphinx/sphinx/cmd/build.py`, `sphinx/sphinx/cmd/make_mode.py`, `sphinx/sphinx/cmd/quickstart.py`)
-rather than guessed.
+(`sphinx/sphinx/cmd/build.py`, `sphinx/sphinx/cmd/make_mode.py`, `sphinx/sphinx/cmd/quickstart.py`,
+`sphinx/sphinx/config.py`, `sphinx/sphinx/util/tags.py` and the standard builder/extension `setup()`
+functions) rather than guessed.
 
 ---
 
@@ -164,3 +165,63 @@ These are owned by later phases and **must not change without orchestrator appro
   `scribe-domains`), shared with the Phase 10 transform engine.
 
 Phase 01 deliberately defines none of these types, so no premature shape can be baked in.
+
+---
+
+## 6. Phase 02 configuration API (`scribe-config`)
+
+### Dependencies opted in
+
+`serde` (derive), `serde_json`, `toml` and `thiserror` are now inherited with `.workspace = true`
+in `crates/scribe-config/Cargo.toml`. `scribe-cli` depends on `scribe-config` through a new
+`[workspace.dependencies]` entry (`scribe-config = { path = "crates/scribe-config" }`). No new
+external crates were added to the workspace.
+
+### Public types
+
+| Type | Purpose |
+|---|---|
+| `ConfigValue` | Tagged enum `Str / Bool / Int / Float / List / Dict / Path / None` with typed accessors (`get_str`, `get_bool`, `get_list`, `get_dict`, `get_path`, `get_strings`, `to_json`, `display_string`). `Float` is included because upstream registers numeric settings such as `linkcheck_timeout` with `float` in the valid-type set. |
+| `ConfigValueKind` | Discriminant of `ConfigValue`; implements `Display` (`str`, `bool`, `list`, ...). |
+| `ConfigType` | Declared type of a registry key: `Str`, `Bool`, `Int`, `Float`, `List`, `Dict`, `Path`, `Enum { candidates }`, `Any`. |
+| `ConfigDefault` | `Value(ConfigValue)` or `Computed(fn(&Config) -> ConfigValue)` for upstream callable defaults. |
+| `ConfigEntry` | `{ name, default, value_type, rebuild, description }` plus `is_list`/`is_dict`. |
+| `ConfigRegistry` | Ordered registry of known keys. `builtin()`, `get`, `contains`, `iter`, `register`, `coerce_override`. Defaults are transcribed from `sphinx/config.py` and the standard builder/extension `setup()` functions. |
+| `Config` | Resolved configuration. `get`/typed getters, `set`, `set_explicit`, `apply_override`, `refresh_computed_defaults`, `iter`, `warnings`, `source`, `master_doc`, `source_suffixes`. Maintains the `master_doc`/`root_doc` and `copyright`/`project_copyright` aliases. |
+| `Tags` | `new`, `with_tags`, `add`, `remove`, `has`, `contains`, `iter`, `eval_condition` (canonical, matching upstream), `eval` (alias). Evaluates `tag`, `not`, `and`, `or`, parentheses and Jinja conditional expressions with a hand-written tokenizer + recursive-descent parser; results are cached. |
+| `TagsError` | `UnexpectedToken`, `ExpectedToken`, `ChunkAfterExpression`, `EmptyCondition`, `InvalidNode`, `Internal`. |
+| `ConfigError` | `thiserror` enum: I/O, missing/unsupported config file, TOML/JSON parse, bridge failure/timeout, duplicate key, unknown override/key, dictionary override, invalid number/bool, static parse failure. |
+| `ConfigWarning` / `ConfigWarningKind` | Non-fatal diagnostics (`UnknownKey`, `TypeMismatch`, `OverrideIgnored`, `NoConfigFile`, `PythonUnavailable`, `PythonExecutionFailed`, `UnserializableValue`, `StaticParseIssue`, `LanguageFallback`). `Display` renders `path:line: warning [kind]: message`. |
+| `BridgeStrategy` | `Auto` (Python then static fallback), `Python`, `Static`. |
+| `PythonBridgeOptions` | Interpreter path and timeout (default 15s). `default_python_interpreter()` resolves `SCRIBE_PYTHON`, the workspace oracle venv, ancestor search, then `python3`. |
+| `BridgeOutcome` | Raw values + warnings + strategy actually used. |
+| `LoadRequest` | `conf_dir`, `overrides`, `config_file`, `tags`, `strategy`, `python`. |
+
+### Entry points
+
+- `load_config(conf_dir, overrides, config_file) -> Result<(Config, Vec<ConfigWarning>), ConfigError>`
+- `load_config_with(request) -> Result<(Config, Vec<ConfigWarning>), ConfigError>`
+- `load_toml(path, registry)` — flat top-level keys or a nested `[config]` table.
+- `parse_static_conf_py(path)` / `evaluate_conf_py(path, tags, options)` / `load_conf_values(...)`.
+
+Auto-discovery prefers `conf.py`, then `scribe.toml`, in the supplied configuration directory.
+Source suffix normalization mirrors `convert_source_suffix` (string/list → dict), and
+`language = None` is rewritten to `en` with a warning, as upstream does. `-D` coercion follows
+upstream `Config.convert_overrides`: booleans accept only `0`/`1`, lists are comma-split, integers
+are parsed, dictionaries reject whole-value overrides (use `name.key=value`), enums pass through
+except `0`/`1` when `False`/`True` are candidates, and callable defaults pass through as strings.
+
+### Fidelity note: Tags constants
+
+Upstream's `BooleanParser` recognises `true`/`True`, `false`/`False` and `none`/`None` as Jinja
+`Const` nodes, but `Tags._eval_node` has no `Const` branch and raises
+`TypeError: invalid node, check parsing`. The pinned oracle behaves identically, so scribe returns
+`TagsError::InvalidNode` for constants (and for a conditional expression whose omitted `else`
+branch is taken). `crates/scribe-config/tests/differential.rs` verifies this against the oracle.
+
+### CLI integration
+
+`scribe_cli::build_config(&BuildOptions)` converts `-D`, `-A` (as `html_context.<key>`), `-n`
+(as `nitpicky=1`) and `-t` into a `LoadRequest`. `run_build` calls it, prints a summary of the
+parsed values and warnings via `println!`/`eprintln!`, and surfaces load failures as the miette
+diagnostic `scribe::config::load_failed`. Builders remain unimplemented until Phases 17-25.

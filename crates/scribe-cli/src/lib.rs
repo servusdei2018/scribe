@@ -15,7 +15,9 @@ pub use options::{
 
 use clap::{Parser, Subcommand};
 use miette::{Diagnostic, IntoDiagnostic, Report, Result, WrapErr};
-use std::path::Path;
+use scribe_config::{load_config_with, Config, ConfigWarning, LoadRequest};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Display version emulated for the pinned upstream oracle (`035a07c3`).
@@ -77,6 +79,21 @@ pub struct UnimplementedBuilder {
     pub builder: String,
 }
 
+/// Diagnostic for a configuration file that could not be loaded.
+#[derive(Debug, Error, Diagnostic)]
+#[error("failed to load configuration from `{}`", .path.display())]
+#[diagnostic(
+    code(scribe::config::load_failed),
+    help("Point -c at a directory containing conf.py or scribe.toml, or pass -C to build without configuration.")
+)]
+pub struct ConfigLoadFailed {
+    /// Configuration directory that was searched.
+    pub path: PathBuf,
+    /// Underlying library error.
+    #[source]
+    pub source: scribe_config::ConfigError,
+}
+
 /// Diagnostic for subcommands that are still placeholders.
 #[derive(Debug, Error, Diagnostic)]
 #[error("`scribe {subcommand}` is not implemented yet")]
@@ -113,10 +130,80 @@ fn run_build(args: BuildArgs) -> Result<()> {
     // Conversion validates cross-field constraints (e.g. -a + filenames).
     let options = BuildOptions::try_from(args)?;
 
-    // Phase 01 intentionally loads no config and parses no documents.
+    // Phase 02 loads configuration (conf.py, scribe.toml and -D/-A/-n
+    // overrides) and reports the parsed values. Document parsing and output
+    // builders arrive in later phases.
+    let search_path = options.conf_dir().map(Path::to_path_buf).unwrap_or_default();
+    let (config, warnings) = build_config(&options).map_err(|error| {
+        Report::new(ConfigLoadFailed {
+            path: search_path,
+            source: error,
+        })
+    })?;
+
+    if !options.really_quiet {
+        print_config_summary(&config, &warnings);
+    }
+
     Err(Report::new(UnimplementedBuilder {
         builder: options.builder.clone(),
     }))
+}
+
+/// Assemble `-D`, `-A`, `-n` and `-t` inputs and load the effective config.
+pub fn build_config(
+    options: &BuildOptions,
+) -> Result<(Config, Vec<ConfigWarning>), scribe_config::ConfigError> {
+    let mut overrides: BTreeMap<String, String> = options
+        .define
+        .iter()
+        .map(|override_value| (override_value.key.clone(), override_value.value.clone()))
+        .collect();
+    for html_define in &options.htmldefine {
+        overrides.insert(
+            format!("html_context.{}", html_define.key),
+            html_define.value.clone(),
+        );
+    }
+    if options.nitpicky {
+        overrides.insert("nitpicky".to_owned(), "1".to_owned());
+    }
+
+    let request = LoadRequest {
+        conf_dir: options.conf_dir().map(Path::to_path_buf).unwrap_or_default(),
+        overrides,
+        tags: options.tags.clone(),
+        ..LoadRequest::default()
+    };
+    load_config_with(request)
+}
+
+fn print_config_summary(config: &Config, warnings: &[ConfigWarning]) {
+    match config.source() {
+        Some(path) => println!("scribe: loaded configuration from {}", path.display()),
+        None => println!("scribe: no configuration file found; using defaults"),
+    }
+    for key in [
+        "project",
+        "author",
+        "copyright",
+        "release",
+        "version",
+        "master_doc",
+        "extensions",
+        "source_suffix",
+        "html_theme",
+        "html_title",
+        "language",
+        "nitpicky",
+    ] {
+        if let Some(value) = config.get(key) {
+            println!("  {key:<16} = {}", value.display_string());
+        }
+    }
+    for warning in warnings {
+        eprintln!("scribe: {warning}");
+    }
 }
 
 fn run_quickstart(path: &Path) -> Result<()> {
@@ -152,8 +239,9 @@ fn run_clean(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{build_config, Cli, Command};
     use clap::{CommandFactory, Parser};
+    use std::path::PathBuf;
 
     #[test]
     fn all_subcommands_are_registered() {
@@ -204,6 +292,43 @@ mod tests {
         };
         assert!(args.show_version);
         assert!(super::BuildOptions::try_from(args).is_err());
+    }
+
+    #[test]
+    fn build_loads_real_config_and_applies_cli_overrides() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sphinx/tests/roots/test-basic");
+        let root_text = root.to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from([
+            "scribe",
+            "build",
+            root_text.as_str(),
+            "out",
+            "-c",
+            root_text.as_str(),
+            "-D",
+            "project=CLI Project",
+            "-A",
+            "answer=42",
+            "-n",
+            "-t",
+            "draft",
+        ])
+        .unwrap();
+        let Command::Build(args) = cli.command else {
+            panic!("expected build subcommand");
+        };
+        let options = super::BuildOptions::try_from(args).unwrap();
+        let (config, warnings) = build_config(&options).unwrap();
+
+        assert_eq!(config.get_str("project"), Some("CLI Project"));
+        assert_eq!(config.get_str("html_theme"), Some("basic"));
+        assert_eq!(config.get_bool("nitpicky"), Some(true));
+        assert_eq!(
+            config.get_dict("html_context").and_then(|context| context.get("answer")),
+            Some(&scribe_config::ConfigValue::Int(42))
+        );
+        let _ = warnings;
     }
 
     #[test]

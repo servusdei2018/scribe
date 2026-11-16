@@ -30,6 +30,9 @@ clap_complete = "4"
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 
+# Internal workspace crates (consumed via `.workspace = true`).
+scribe-config = { path = "crates/scribe-config" }
+
 # Parallelism + concurrent registries (reserved for Phases 08-14)
 rayon = "1"
 dashmap = "6"

@@ -12,6 +12,7 @@ description = "Command-line interface for scribe (sphinx-build compatible)"
 clap.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+scribe-config.workspace = true
 
 [lints]
 workspace = true

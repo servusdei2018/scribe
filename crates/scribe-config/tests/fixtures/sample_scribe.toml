@@ -1,0 +1,8 @@
+project = "TOML Project"
+release = "1.2.3"
+nitpicky = true
+extensions = ["sphinx.ext.autodoc"]
+
+[html_theme_options]
+sidebar_width = "300px"
+show_powered_by = false
