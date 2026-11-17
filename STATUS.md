@@ -17,7 +17,7 @@
 | 00 | Setup (git, workspace scaffold, oracle, harness) | DONE | Oracle `sphinx-build 9.3.0+/035a07c32`; harness test green (see below) | Repo initialized; workspace scaffold + harness delivered in Phase 01 |
 | 01 | Workspace Architecture, CLI Skeleton & Oracle Harness | DONE | check/clippy/test clean; CLI smoke tests + oracle differential green (see below) | 11 crates, 12 tests, 2 differential tests |
 | 02 | Configuration Engine & `conf.py` Bridge | DONE | check/clippy/test clean; CLI loads real `conf.py`; 14 roots + oracle differential green (see below) | Typed registry + `ConfigValue`, `Tags` parser, TOML loader, Python JSON bridge + static fallback; miette `scribe::config::load_failed` |
-| 03 | Unified Document AST & Doctree Model | PENDING | — | — |
+| 03 | Unified Document AST & Doctree Model | DONE | check/clippy/test clean; oracle pseudo-XML differential green (see below) | 29 scribe-ast tests (23 unit + 3 pseudo-XML + 3 round-trip) + 1 doctest; frozen `Document`/`NodeKind`/`NodeId`/`pending_xref` contract documented in `ARCHITECTURE.md` §7 |
 | 04 | RST Lexer & Indentation/Block Scanner | PENDING | — | — |
 | 05 | RST Inline Markup & Role Parser | PENDING | — | — |
 | 06 | Directive & Role Registry + Core Directives | PENDING | — | — |
@@ -48,10 +48,11 @@
 
 ## Frozen cross-phase contracts
 
-Defined in `ARCHITECTURE.md` §5. Phase 01 intentionally defines **none** of these types, so no
-premature shape is baked in.
+Defined in `ARCHITECTURE.md` §5 (full Phase 03 shapes in §7). Phase 01 intentionally defined
+**none** of these types, so no premature shape was baked in.
 
-- **Phase 03:** `scribe-ast::Document` node enum + `u32` arena `NodeId`; `pending_xref` node shape (FROZEN once Phase 03 lands).
+- **Phase 03: FROZEN.** `scribe-ast::Document` node enum (`NodeKind`) + `u32` arena `NodeId`;
+  `pending_xref` typed shape (`PendingXref`/`PendingXrefMut`). Documented exhaustively in §7.
 - **Phase 08:** `BuildEnvironment` public API.
 - **Phase 11:** `Domain` trait (`resolve_xref` / `resolve_any_xref`), shared with Phase 10 transform engine.
 
@@ -111,6 +112,26 @@ Differential comparison additionally runs the oracle's `Sphinx(...)` on `test-ba
 `texinfo_documents`/`htmlhelp_basename`). The `Tags` differential covers 33 expressions including
 parentheses, conditional expressions, constants and malformed inputs.
 
+## Phase 03 gate evidence (commands run, from `/home/credo/code/scribe`)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | `Finished dev profile`; **0 warnings, 0 errors** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | `Finished dev profile`; **clean** |
+| `cargo test --workspace` | **66 passed, 0 failed** (29 scribe-ast: 23 unit + 3 pseudo-XML + 3 round-trip; 36 from Phases 01–02; 1 doctest) |
+| `cargo test -p scribe-ast --test pseudoxml -- --nocapture` | 3 passed: hardcoded snapshot, `Python pformat` differential, real `sphinx-build -b pseudoxml` differential |
+| `.oracle-venv/bin/python crates/scribe-ast/tests/fixtures/gen_pseudoxml.py` | Builds canonical tree with `docutils.nodes` + `sphinx.addnodes`; prints `document.pformat()` identical to scribe `to_pseudoxml()` |
+| `.oracle-venv/bin/sphinx-build -b pseudoxml -E -q <tiny-src> <out>` | Produced `index.pseudoxml` (section, emphasis/literal paragraph, bullet list, note, plus an injected unresolved `pending_xref`); parsed → AST → re-emitted byte-for-byte equal (incl. `xmlns:*`, `translation_progress`, `names="a\ section"` escaping) |
+
+**Files changed:** `Cargo.toml` (workspace `scribe-ast` dep slot), `crates/scribe-ast/Cargo.toml`
+(thiserror/serde/serde_json), `crates/scribe-ast/src/{lib,error,node_id,node,document,visitor,mutator,serialize}.rs`,
+`crates/scribe-ast/tests/{pseudoxml,roundtrip}.rs`, `crates/scribe-ast/tests/common/mod.rs`,
+`crates/scribe-ast/tests/fixtures/gen_pseudoxml.py`, `ARCHITECTURE.md` (§1, §5, new §7), `STATUS.md`.
+
+**Frozen contract declared:** `ARCHITECTURE.md` §7 documents the exact public shapes of
+`Document`, `NodeId`, `Node`/`NodeKind`, `Attributes`/`AttributeValue`, `SourcePos`/`Span`,
+`Visitor`/`Mutator`, and the `pending_xref` typed views (`PendingXref`/`PendingXrefMut`).
+
 ## Risks / open items
 
 - **Tags constant fidelity (refinement divergence):** the Phase 02 refinement expected `true`/`True`/
@@ -135,4 +156,13 @@ parentheses, conditional expressions, constants and malformed inputs.
 - Upstream `--keep-going` is `argparse.SUPPRESS`ed, so `sphinx-build --help` does not list it; mirrored exactly (accepted, hidden).
 - `-M/--mode` and `-r/--release` are make-mode/quickstart flags, not `sphinx-build` parser flags; intentionally deferred until a compatibility shim is scoped.
 - Dependency slots for later phases (`rayon`, `dashmap`, `blake3`, etc.) are declared but unused until their owning phases; no MSRV issues observed with `rust-version = 1.85` on toolchain 1.99.0.
+- Pseudo-XML is a *lossy* format (no attribute type tags, indentation/text ambiguity). The AST →
+  pseudo-XML emitter is byte-exact against Docutils/Sphinx; the reverse (pseudo-XML → AST) test
+  parser handles only the documented subset (element tags, text lines, string/bool/list attributes
+  inferred from a fixed key table, text not starting with 4+ spaces). Full fidelity will come from
+  the real RST/MyST parsers (Phases 04–07), not from parsing pseudo-XML.
+- `NodeKind` has no third-party/custom variant (kept `Copy` for ergonomics); extension-defined nodes
+  (Phase 27) will need a contract amendment approved by the orchestrator.
+- `Document::fixture_document()` is a test-support builder in the library; its internal `.expect()`
+  calls operate only on freshly created ids and are documented as invariants in the source.
 - No git commits created — orchestrator will audit gates and commit.

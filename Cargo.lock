@@ -445,6 +445,11 @@ dependencies = [
 [[package]]
 name = "scribe-ast"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "scribe-autodoc"

@@ -32,6 +32,7 @@ miette = { version = "7", features = ["fancy"] }
 
 # Internal workspace crates (consumed via `.workspace = true`).
 scribe-config = { path = "crates/scribe-config" }
+scribe-ast = { path = "crates/scribe-ast" }
 
 # Parallelism + concurrent registries (reserved for Phases 08-14)
 rayon = "1"
