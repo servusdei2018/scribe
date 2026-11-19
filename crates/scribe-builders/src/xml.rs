@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 
 use scribe_ast::{AttributeValue, Document, Node, NodeId, NodeKind};
 use scribe_config::Config;
-use scribe_core::BuildEnvironment;
+use scribe_core::{
+    expand_toctrees, normalize_citation_references, normalize_xref_literals, BuildEnvironment,
+};
 
 use crate::build_common::{prepare, PreparedBuild};
 use crate::error::{OutputError, OutputResult};
@@ -80,8 +82,26 @@ fn build_docs(
     suffix: &str,
     mode: RenderMode,
 ) -> OutputResult<BuildResult> {
-    let PreparedBuild { docnames, mut parsed, warnings, .. } =
+    let PreparedBuild { docnames, mut parsed, mut warnings, toctrees, .. } =
         prepare(options, config, env, builder)?;
+
+    // Upstream resolves every `toctree` node before a writing builder emits the
+    // doctree. The HTML5 writer renders the raw node directly (as
+    // `toctree-wrapper`), so the expansion is applied only to the exported
+    // doctree here — this keeps both writers free of double-wrapping.
+    for docname in &docnames {
+        if let Some(document) = parsed.get_mut(docname) {
+            if let Err(error) = expand_toctrees(document, docname, env, &toctrees) {
+                warnings.push(format!("{docname}: toctree expansion failed: {error}"));
+            }
+            if let Err(error) = normalize_citation_references(document) {
+                warnings.push(format!("{docname}: citation reference normalization failed: {error}"));
+            }
+            if let Err(error) = normalize_xref_literals(document) {
+                warnings.push(format!("{docname}: xref literal normalization failed: {error}"));
+            }
+        }
+    }
 
     let pretty = config.get_bool("xml_pretty").unwrap_or(true);
     let mut written = Vec::new();

@@ -10,6 +10,7 @@ pub mod bridge;
 pub mod discovery;
 pub mod env;
 pub mod events;
+pub mod export_fidelity;
 pub mod extensions;
 pub mod glob;
 pub mod i18n;
@@ -18,6 +19,7 @@ pub mod post_transforms;
 pub mod python_shim;
 pub mod smartquotes;
 pub mod toctree;
+pub mod toctree_expand;
 pub mod transforms;
 pub mod warnings;
 
@@ -62,6 +64,8 @@ pub use toctree::{
     SectionTocEntry, TocTreeNode, ToctreeCollection, ToctreeCollector, ToctreeEntry,
     ToctreeHierarchy, ToctreeOptions, ToctreeWarning,
 };
+pub use toctree_expand::{expand_toctrees, ToctreeExpansion};
+pub use export_fidelity::{normalize_citation_references, normalize_xref_literals};
 
 pub use smartquotes::{educate as educate_smartquotes, language_supports_smartquotes, quote_pairs};
 pub use post_transforms::{

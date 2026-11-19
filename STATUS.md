@@ -2271,3 +2271,94 @@ no git history/stash touched) and rebuilding produced **419** on both sides.
 warnings; peak RSS 76,764 KB and speedup 7.17× both within limits. The
 aspirational ≥80% parity gate remains unmet, as in Phase 36. No commits, tags,
 branches or stash changes were made.
+
+---
+
+## Phase 38 — TocTree doctree expansion + exported node-shape fidelity (subagent)
+
+### What changed
+
+- New `scribe-core::toctree_expand` pass resolves every `toctree` node in the
+  **exported** doctree into Sphinx's exact shape:
+  `compact_paragraph[toctree="1"]` → optional `title` (caption) →
+  `bullet_list` → `list_item` → `compact_paragraph` → `reference`
+  (`internal`, `refuri`, `anchorname`, `secnumber`), with nested `bullet_list`s
+  for local sections and child toctrees. `:maxdepth:`, `:titlesonly:`,
+  `:hidden:`, `:includehidden:` and `:numbered:` are respected; hidden/empty
+  toctrees are removed. Cycle detection bounds recursive expansion.
+- Domain object signatures are now included in the local ToC as
+  `reference → literal` entries, with `memo_parents`-style nesting of member
+  objects (fixes the py/js/c/cpp ToC gaps). Anchors on either `desc_signature`
+  or the enclosing `desc` are accepted (JS stores them on `desc`).
+- New `scribe-core::export_fidelity` pass rewrites docutils `citation_reference`
+  into upstream's `reference → inline → [LABEL]` and converts resolved domain
+  xref `inline` wrappers (`classes` contain `xref`) into `literal`, matching
+  Sphinx's `ReferencesResolver` output in pseudoxml.
+- Both passes are invoked **only** by the `xml`/`pseudoxml` builders
+  (`crates/scribe-builders/src/xml.rs`). The working §7 AST, §12 environment
+  and §15 domain contracts are untouched, and HTML5/LaTeX still render the raw
+  `toctree`/citation nodes, so there is no `toctree-wrapper` double-wrapping
+  (verified: 4 wrapper `<div>`s in both scribe and oracle `test-toctree` HTML).
+
+### Per-fixture structure-score delta (oracle-vs-scribe multiset Jaccard)
+
+| Fixture | Struct before | Struct after | Δ | Score before | Score after | Status |
+|---|---:|---:|---:|---:|---:|---|
+| test-directive-only | 0.419 | 0.871 | +0.452 | 0.506 | 0.890 | partial |
+| test-toctree-glob | 0.378 | 0.767 | +0.389 | 0.472 | 0.802 | fail→partial |
+| test-markup-citation | 0.625 | 1.000 | +0.375 | 0.681 | 1.000 | partial→pass |
+| test-toctree | 0.644 | 0.938 | +0.294 | 0.647 | 0.897 | partial |
+| test-smartquotes | 0.619 | 0.900 | +0.281 | 0.676 | 0.915 | partial→pass |
+| test-domain-py | 0.694 | 0.987 | +0.293 | 0.740 | 0.989 | partial→pass |
+| test-domain-js | 0.673 | 0.977 | +0.304 | 0.572 | 0.830 | partial |
+| test-domain-cpp | 0.513 | 0.533 | +0.020 | 0.447 | 0.465 | fail |
+| test-prolog | 0.348 | 0.520 | +0.172 | 0.296 | 0.442 | fail |
+| test-productionlist | 0.683 | 0.831 | +0.148 | 0.581 | 0.707 | partial |
+| test-numfig | 0.824 | 0.970 | +0.146 | 0.700 | 0.825 | partial |
+| test-changes | 0.788 | 0.931 | +0.143 | 0.670 | 0.791 | partial |
+| test-footnotes | 0.891 | 0.941 | +0.050 | 0.908 | 0.950 | pass |
+| **all other fixtures** | — | — | 0.000 | — | — | unchanged |
+
+13 fixtures improved, **0 regressed**. Mean per-fixture structure score
+0.630 → 0.709. `test-domain-cpp` improved only marginally (0.513 → 0.533): its
+dominant gap is C++ parser signature fidelity, not export node shape.
+
+### Aggregate parity
+
+71.5% → **79.2%** over 34 applicable fixtures (9 pass / 22 partial / 3 fail /
+5 skip). The regression guard and report-determinism checks remain green; no
+comparison rule, baseline, rubric or fixture selection was modified.
+
+### Final verification (all commands run on this machine)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | 0 warnings / 0 errors |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` (× 3 consecutive) | **1,114 passed, 0 failed** each run |
+| `cargo test --workspace --release` | **1,114 passed, 0 failed** |
+| `cargo test -p scribe-cli --test conformance` | 2 passed; parity 79.2%, report regenerated |
+| `cargo test -p scribe-cli --test regression_guard` | 5 passed |
+| `cargo test -p scribe-cli --test selfhost` | 2 passed; exit 0, 158 pages |
+| HTML5/LaTeX builder differential + translator tests | green |
+| Benchmark (release, PAGES=150, RUNS=5) | **7.09×**, scribe 77,468 KB peak RSS |
+
+1,114 = 1,109 audited pre-existing tests + 2 new `toctree_expand` unit tests +
+1 new `export_fidelity` unit test + 3 new integration tests (5 new total).
+
+### Gate status
+
+| Gate | Requirement | Measured | Status |
+|---|---|---:|---|
+| Structure parity across affected fixtures | measurable jump, 0 regressions | 13 improved / 0 regressed | **PASS** |
+| Aggregate conformance parity | no regression | 71.5% → 79.2% | **PASS** |
+| Tests (debug ×3 + release) | 100% green | 1,114 / 1,114 each | **PASS** |
+| Peak RSS @150p | < 92,624 KB | 77,468 KB | **PASS** |
+| Speedup @150p | ≥ 7.0× | 7.09× | **PASS** |
+| HTML5 `toctree-wrapper` | no double-wrapping | 4 wrapper divs (same as oracle) | **PASS** |
+
+The aspirational ≥80% parity gate remains narrowly unmet (79.2%). Remaining
+divergences are C++ signature parsing, grid/list-table cell nesting, warning
+codes on non-toctree fixtures, and a few `only`-nested hidden toctrees that
+upstream deliberately leaves unresolved. No commits, tags, branches or stash
+changes were made; `stash@{0}: pre-phase-31-snapshot` is intact.
