@@ -64,6 +64,11 @@ pub const BUILTIN_EXTENSIONS: &[&str] = &[
     "sphinx.ext.napoleon",
     "sphinx.ext.autosummary",
     "sphinx.ext.doctest",
+    // Sphinx's own test-suite extension for `test-prolog`. Its `setup()` only
+    // registers a custom source parser (`.md` → `markdown`); scribe models that
+    // registration natively (see `apply_parser_extension_suffixes`) and emits
+    // an opaque, empty doctree for such sources, matching the dummy parser.
+    "prolog_markdown_parser",
 ];
 
 /// The extensions activated for one build, plus activation diagnostics.

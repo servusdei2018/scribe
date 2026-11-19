@@ -235,6 +235,8 @@ pub struct InlineOptions {
     pub source_name: Option<String>,
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
     pub extlinks: crate::extlinks::ExtLinkRoles,
+    /// Role selected by a `.. default-role::` declaration in `rst_prolog`.
+    pub default_role: Option<String>,
 }
 
 // ----- tokenizer ------------------------------------------------------------
@@ -1281,7 +1283,11 @@ fn try_interpreted(
 
     let payload = text_of(tokens, body, close_tick, Unescape::Restore);
     let payload_span = span_of(src, tokens, body, close_tick);
-    let role_name = role.clone().or_else(|| suffix_role.clone()).unwrap_or_else(|| "title-reference".to_owned());
+    let role_name = role
+        .clone()
+        .or_else(|| suffix_role.clone())
+        .or_else(|| options.default_role.clone())
+        .unwrap_or_else(|| "title-reference".to_owned());
 
     if refend > 0 {
         // Phrase reference: `text`_ / `text`__ (possibly with embedded target).

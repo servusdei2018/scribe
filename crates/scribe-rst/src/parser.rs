@@ -431,6 +431,7 @@ impl<'a> BlockParser<'a> {
             &InlineOptions {
                 source_name: self.options.source_name.clone(),
                 extlinks: Arc::clone(&self.options.extlinks),
+                default_role: self.options.default_role.clone(),
             },
         );
         // Tab-expanded lines have normalized-text byte offsets that can drift

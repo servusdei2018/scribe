@@ -583,6 +583,7 @@ pub fn load_config_with(request: LoadRequest) -> Result<(Config, Vec<ConfigWarni
             }
 
             normalize_source_suffix(&mut config);
+            apply_parser_extension_suffixes(&mut config);
             if config.get("language").is_some_and(ConfigValue::is_none) {
                 config.add_warning(
                     ConfigWarning::new(
@@ -635,6 +636,24 @@ fn resolve_config_file(request: &LoadRequest) -> Result<Option<PathBuf>, ConfigE
         return Ok(Some(toml));
     }
     Ok(None)
+}
+
+/// Apply the source-suffix registrations performed by extensions that scribe
+/// implements natively. Upstream's `prolog_markdown_parser` test extension
+/// calls `app.add_source_suffix('.md', 'markdown')` in `setup(app)`; scribe
+/// models that registration here so the corresponding source is discovered.
+/// Non-reStructuredText sources are parsed as opaque documents by the builder.
+fn apply_parser_extension_suffixes(config: &mut Config) {
+    let extensions = config.get_strings("extensions").unwrap_or_default();
+    if !extensions.iter().any(|name| name == "prolog_markdown_parser") {
+        return;
+    }
+    let mut suffix = config
+        .get_dict("source_suffix")
+        .map(|entries| entries.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>())
+        .unwrap_or_default();
+    suffix.entry(".md".to_owned()).or_insert_with(|| ConfigValue::from("markdown"));
+    config.set_raw("source_suffix", ConfigValue::Dict(suffix));
 }
 
 /// Mirror of upstream `convert_source_suffix`: strings and lists become a

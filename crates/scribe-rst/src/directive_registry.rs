@@ -308,6 +308,12 @@ impl<'a> DirectiveContext<'a> {
             &InlineOptions {
                 source_name: self.global.source_name.clone(),
                 extlinks: Arc::clone(&self.global.extlinks),
+                default_role: self
+                    .global
+                    .default_role
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone()),
             },
         );
         let ctx = InlineContext {
@@ -356,6 +362,7 @@ impl<'a> DirectiveContext<'a> {
                 tab_width: self.global.tab_width,
                 prolog: None,
                 epilog: None,
+                default_role: None,
                 extlinks: Arc::clone(&self.global.extlinks),
             },
         );

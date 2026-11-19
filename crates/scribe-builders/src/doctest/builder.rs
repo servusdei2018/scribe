@@ -122,6 +122,9 @@ impl DoctestBuilder {
         docnames.sort();
 
         let config_arc = Arc::new(config.clone());
+        let relevant = env.relevant_config();
+        let rst_prolog = relevant.rst_prolog.clone();
+        let rst_epilog = relevant.rst_epilog.clone();
         let mut documents = Vec::new();
         for docname in &docnames {
             let Some(path) = env.found_docs.get(docname) else { continue };
@@ -132,7 +135,14 @@ impl DoctestBuilder {
                     continue;
                 }
             };
-            let mut output = parse_with_options(&raw, ParseOptions::new(Some(docname.clone())));
+            let mut options = ParseOptions::new(Some(docname.clone()));
+            if !rst_prolog.is_empty() {
+                options.prolog = Some(rst_prolog.clone());
+            }
+            if !rst_epilog.is_empty() {
+                options.epilog = Some(rst_epilog.clone());
+            }
+            let mut output = parse_with_options(&raw, options);
             let mut ctx = RstContext::new(source_dir, scribe_config::Tags::new());
             ctx.config = Some(Arc::clone(&config_arc));
             ctx.source_name = Some(docname.clone());

@@ -313,6 +313,9 @@ pub fn build_with_flavor(
         let tags = Tags::with_tags(tag_names.iter().cloned());
         let config_arc = Arc::new(config.clone());
         let language = config.get_str("language").filter(|s| !s.is_empty()).unwrap_or("en").to_owned();
+        let relevant = env.relevant_config();
+        let rst_prolog = relevant.rst_prolog.clone();
+        let rst_epilog = relevant.rst_epilog.clone();
 
         // ---- Phase 20 extension activation --------------------------------
         let extensions = ActivatedExtensions::from_config(config);
@@ -346,6 +349,12 @@ pub fn build_with_flavor(
             let reading_started = Instant::now();
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
             parse_options.extlinks = Arc::clone(&extlink_roles);
+            if !rst_prolog.is_empty() {
+                parse_options.prolog = Some(rst_prolog.clone());
+            }
+            if !rst_epilog.is_empty() {
+                parse_options.epilog = Some(rst_epilog.clone());
+            }
             let mut output = parse_with_options(&raw, parse_options);
             let mut rst_ctx = RstContext::new(source_dir, Tags::with_tags(tag_names.iter().cloned()));
             rst_ctx.config = Some(Arc::clone(&config_arc));

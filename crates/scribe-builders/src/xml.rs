@@ -22,7 +22,7 @@ use scribe_core::{
     expand_toctrees, normalize_citation_references, normalize_xref_literals, BuildEnvironment,
 };
 
-use crate::build_common::{prepare, PreparedBuild};
+use crate::build_common::{no_title_warning_line, prepare, PreparedBuild};
 use crate::error::{OutputError, OutputResult};
 use crate::html::{BuildOptions, BuildResult};
 
@@ -91,8 +91,13 @@ fn build_docs(
     // doctree here — this keeps both writers free of double-wrapping.
     for docname in &docnames {
         if let Some(document) = parsed.get_mut(docname) {
-            if let Err(error) = expand_toctrees(document, docname, env, &toctrees) {
-                warnings.push(format!("{docname}: toctree expansion failed: {error}"));
+            match expand_toctrees(document, docname, env, &toctrees) {
+                Ok(expansion) => {
+                    for (target, line) in expansion.no_title {
+                        warnings.push(no_title_warning_line(docname, &target, line, &options.source_dir));
+                    }
+                }
+                Err(error) => warnings.push(format!("{docname}: toctree expansion failed: {error}")),
             }
             if let Err(error) = normalize_citation_references(document) {
                 warnings.push(format!("{docname}: citation reference normalization failed: {error}"));

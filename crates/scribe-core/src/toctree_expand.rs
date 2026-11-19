@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use scribe_ast::{AstError, AttributeValue, Document, Node, NodeId, NodeKind};
 
-use crate::{BuildEnvironment, ToctreeCollection};
+use crate::{toctree::docname_join, BuildEnvironment, ToctreeCollection};
 
 /// Outcome of one expansion pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +35,13 @@ pub struct ToctreeExpansion {
     pub replaced: usize,
     /// Number of `toctree` nodes removed (hidden or empty).
     pub removed: usize,
+    /// Entries dropped because the target document has no title, paired with
+    /// the 1-based line of the toctree directive that referenced them.
+    ///
+    /// Upstream keeps the document in `toctree['includefiles']` but emits no
+    /// link and logs `toc.no_title`; callers use these pairs to render that
+    /// diagnostic without touching the frozen environment seam.
+    pub no_title: Vec<(String, Option<u32>)>,
 }
 
 /// Replace every reachable `toctree` node in `document` with Sphinx's resolved
@@ -78,6 +85,7 @@ pub fn expand_toctrees(
             continue;
         }
 
+        let toctree_line = node.source.as_ref().and_then(|source| source.line);
         let maxdepth = int_attr(node, "maxdepth", -1);
         let titlesonly = bool_attr(node, "titlesonly", false);
         let caption = node.attrs.get_str("caption").ok().flatten().unwrap_or_default().to_owned();
@@ -106,6 +114,20 @@ pub fn expand_toctrees(
 
         let mut top_items = Vec::with_capacity(entries.len());
         for entry in &entries {
+            // Upstream's `TocTreeCollector.resolve_references` keeps a
+            // titleless target in `includefiles` but produces an empty TOC for
+            // it, so no reference node is emitted and a `toc.no_title`
+            // diagnostic is logged at the toctree directive's line.
+            if entry.title.is_empty() && entry.kind == "doc" {
+                let target = docname_join(docname, &entry.href);
+                // A target that was never discovered is reported as
+                // `toc.not_readable` by the collector; `toc.no_title` only
+                // applies to an existing document that carries no title.
+                if env.found_docs.contains_key(&target) && doc_title(env, &target).is_none() {
+                    result.no_title.push((target.clone(), toctree_line));
+                    continue;
+                }
+            }
             top_items.push(make_entry(
                 document, entry, docname, maxdepth, titlesonly, includehidden, env, collection,
                 &mut visiting,

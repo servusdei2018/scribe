@@ -287,8 +287,6 @@ struct BridgePayload {
     #[serde(default)]
     values: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
-    skipped: Vec<String>,
-    #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     traceback: Option<String>,
@@ -423,19 +421,10 @@ pub fn evaluate_conf_py(
             .warnings
             .push(ConfigWarning::new(ConfigWarningKind::PythonExecutionFailed, format!("Python bridge stderr:\n{tail}")).with_path(path));
     }
-    if !payload.skipped.is_empty() {
-        outcome.warnings.push(
-            ConfigWarning::new(
-                ConfigWarningKind::UnserializableValue,
-                format!(
-                    "skipped {} non-serializable namespace value(s): {}",
-                    payload.skipped.len(),
-                    payload.skipped.join(", ")
-                ),
-            )
-            .with_path(path),
-        );
-    }
+    // Values such as imported modules (`sys`) and classes (`Path`) remain in
+    // a real `conf.py` namespace but are not Sphinx settings and never produce
+    // a diagnostic upstream. Keep them out of the emitted warning stream so
+    // warning parity with `sphinx-build` is not polluted by bridge internals.
 
     for (key, value) in payload.values {
         match json_to_value(&value) {

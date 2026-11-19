@@ -141,6 +141,9 @@ fn build_impl(
     let tags = Tags::with_tags(std::iter::empty::<String>());
     let registry = DomainRegistry::builtin();
     registry.load_from_env(env);
+    let relevant = env.relevant_config();
+    let rst_prolog = relevant.rst_prolog.clone();
+    let rst_epilog = relevant.rst_epilog.clone();
 
     let mut parsed: BTreeMap<String, ParsedDoc> = BTreeMap::new();
     for docname in &docnames {
@@ -152,6 +155,12 @@ fn build_impl(
         let started = Instant::now();
         let mut parse_options = ParseOptions::new(Some(docname.clone()));
         parse_options.extlinks = Arc::clone(&extlink_roles);
+        if !rst_prolog.is_empty() {
+            parse_options.prolog = Some(rst_prolog.clone());
+        }
+        if !rst_epilog.is_empty() {
+            parse_options.epilog = Some(rst_epilog.clone());
+        }
         let mut output = parse_with_options(&raw, parse_options);
         let mut rst_ctx = RstContext::new(source_dir, Tags::with_tags(std::iter::empty::<String>()));
         rst_ctx.config = Some(Arc::clone(&config_arc));

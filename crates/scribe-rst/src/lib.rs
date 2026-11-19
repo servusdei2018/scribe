@@ -88,6 +88,9 @@ pub struct ParseOptions {
     pub prolog: Option<String>,
     /// Text appended at the end of the document (Sphinx `rst_epilog`).
     pub epilog: Option<String>,
+    /// Default role selected by a `.. default-role:: name` declaration inside
+    /// `rst_prolog`. Applied to interpreted text without an explicit role.
+    pub default_role: Option<String>,
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
     /// Empty by default; the builder fills it from the `extlinks` config.
     pub extlinks: extlinks::ExtLinkRoles,
@@ -101,6 +104,7 @@ impl ParseOptions {
             tab_width: 8,
             prolog: None,
             epilog: None,
+            default_role: None,
             extlinks: extlinks::empty_roles(),
         }
     }
@@ -129,12 +133,58 @@ pub fn parse_with_options(source: &str, options: ParseOptions) -> ParseOutput {
     if effective.tab_width == 0 {
         effective.tab_width = 8;
     }
-    if effective.prolog.is_none() && effective.epilog.is_none() {
+    if effective.prolog.is_none()
+        && effective.epilog.is_none()
+        && effective.default_role.is_none()
+    {
         return parser::BlockParser::with_source(source, effective).run();
     }
+    // Docutils processes `.. default-role::` while scanning the source, so a
+    // declaration in the injected prolog applies to body inline text. Scan the
+    // prolog up front (the epilog is appended after the body and cannot affect
+    // it) and thread the selected role into inline parsing.
+    if effective.default_role.is_none() {
+        if let Some(prolog) = effective.prolog.as_deref() {
+            effective.default_role = prolog_default_role(prolog);
+        }
+    }
     let parser_options = effective.clone();
-    let augmented = augment_source(source, &effective);
-    parser::BlockParser::with_source(&augmented, parser_options).run()
+    let (augmented, docinfo_lines, inserted_lines) = augment_source(source, &effective);
+    let mut output = parser::BlockParser::with_source(&augmented, parser_options).run();
+    if inserted_lines > 0 {
+        // The scanner saw the augmented text, but diagnostics (and the
+        // toctree directive's `source.line`) must report the original source's
+        // 1-based line. Nodes belonging to the injected prolog itself keep
+        // their prolog-relative lines, matching upstream's `<rst_prologue>`
+        // StringList source.
+        for node in &mut output.document.nodes {
+            let is_body_node = node
+                .source
+                .as_ref()
+                .and_then(|position| position.line)
+                .is_some_and(|line| line > docinfo_lines + inserted_lines);
+            if let Some(position) = node.source.as_mut() {
+                if let Some(line) = position.line {
+                    if line > docinfo_lines + inserted_lines {
+                        position.line = Some(line - inserted_lines);
+                    }
+                }
+            }
+            // `Pending` directives carry their marker line as an attribute;
+            // `resolve_output` stamps it onto the concrete directive node.
+            if is_body_node {
+                if let Ok(Some(line)) = node.attrs.get_int(crate::pending::KEY_DIRECTIVE_LINE) {
+                    if line > i64::from(docinfo_lines + inserted_lines) {
+                        node.attrs.set_int(
+                            crate::pending::KEY_DIRECTIVE_LINE,
+                            line - i64::from(inserted_lines),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    output
 }
 
 /// Parses a document and returns the first recoverable diagnostic as an error.
@@ -149,13 +199,33 @@ pub fn try_parse_document(source: &str) -> RstResult<Document> {
     Ok(output.document)
 }
 
+/// Extracts the role name from the last `.. default-role:: name` declaration
+/// in a prolog string. Whitespace and indentation are tolerated, mirroring
+/// Docutils' directive syntax.
+fn prolog_default_role(prolog: &str) -> Option<String> {
+    let mut selected = None;
+    for line in prolog.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("..") else { continue };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix("default-role::") else { continue };
+        let name = rest.split_whitespace().next().unwrap_or("");
+        if !name.is_empty() {
+            selected = Some(name.to_owned());
+        }
+    }
+    selected
+}
+
 /// Builds the prolog/epilog-augmented source string.
 ///
 /// The prologue is inserted after any leading docinfo field lines (mirroring
 /// upstream `_prepend_prologue`), separated by blank lines. The epilogue is
 /// appended after a blank line (mirroring `_append_epilogue`).
-fn augment_source(source: &str, options: &ParseOptions) -> String {
+fn augment_source(source: &str, options: &ParseOptions) -> (String, u32, u32) {
     let mut out = String::with_capacity(source.len() + 128);
+    let mut docinfo_lines = 0u32;
+    let mut inserted_lines = 0u32;
     if let Some(prolog) = options.prolog.as_deref().filter(|p| !p.is_empty()) {
         let mut docinfo_end = 0usize;
         for line in source.split_inclusive('\n') {
@@ -166,19 +236,27 @@ fn augment_source(source: &str, options: &ParseOptions) -> String {
                 break;
             }
         }
-        out.push_str(&source[..docinfo_end]);
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
+        let docinfo = &source[..docinfo_end];
+        docinfo_lines = docinfo.matches('\n').count() as u32
+            + u32::from(!docinfo.is_empty() && !docinfo.ends_with('\n'));
+        out.push_str(docinfo);
         if docinfo_end > 0 {
+            if !out.ends_with('\n') {
+                out.push('\n');
+                inserted_lines += 1;
+            }
             // Upstream inserts a blank line after the docinfo field list.
             out.push('\n');
+            inserted_lines += 1;
         }
         out.push_str(prolog);
+        inserted_lines += prolog.matches('\n').count() as u32;
         if !prolog.ends_with('\n') {
             out.push('\n');
+            inserted_lines += 1;
         }
         out.push('\n');
+        inserted_lines += 1;
         out.push_str(&source[docinfo_end..]);
     } else {
         out.push_str(source);
@@ -194,7 +272,7 @@ fn augment_source(source: &str, options: &ParseOptions) -> String {
             out.push('\n');
         }
     }
-    out
+    (out, docinfo_lines, inserted_lines)
 }
 
 /// The phase that implemented this crate's block and inline functionality.
@@ -211,11 +289,13 @@ mod tests {
             tab_width: 8,
             prolog: Some(".. |x| replace:: X".into()),
             epilog: Some(".. _e: https://example.com".into()),
+            default_role: None,
             extlinks: crate::extlinks::empty_roles(),
         };
-        let augmented = augment_source(":author: me\n\nBody.\n", &options);
+        let (augmented, docinfo_lines, inserted_lines) = augment_source(":author: me\n\nBody.\n", &options);
         assert!(augmented.starts_with(":author: me\n\n.. |x| replace:: X\n\n"));
         assert!(augmented.ends_with(".. _e: https://example.com\n"));
+        assert_eq!((docinfo_lines, inserted_lines), (1, 3));
     }
 
     #[test]

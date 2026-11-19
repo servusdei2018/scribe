@@ -228,3 +228,42 @@ fn all_inline_spans_are_within_source() {
         }
     }
 }
+
+#[test]
+fn prolog_epilog_symbols_default_role_and_line_mapping() {
+    let opts = ParseOptions {
+        prolog: Some(
+            ".. _lbl: https://example.org/lbl\n\n.. |sub| replace:: **SUB**\n\n.. default-role:: literal\n"
+                .into(),
+        ),
+        epilog: Some(".. _epi: https://example.org/epi\n".into()),
+        ..ParseOptions::default()
+    };
+    let source = "Body |sub| `lbl`_ `epi`_ `inline`.\n";
+    let out = parse_with_options(source, opts);
+    let pseudo = out.document.to_pseudoxml().unwrap();
+    // Symbol table: labels from prolog and epilog both resolve in the body.
+    assert!(pseudo.contains("refuri=\"https://example.org/lbl\""), "{pseudo}");
+    assert!(pseudo.contains("refuri=\"https://example.org/epi\""), "{pseudo}");
+    // Substitution table: a definition in the prolog resolves in the body.
+    assert!(pseudo.contains("<strong>"), "{pseudo}");
+    assert!(pseudo.contains("SUB"), "{pseudo}");
+    // Default role declared in the prolog applies to bare interpreted text.
+    assert!(pseudo.contains("<literal>"), "{pseudo}");
+    assert!(!pseudo.contains("<title_reference>"), "{pseudo}");
+
+    // Warning/annotation line numbers refer to the *original* body, not the
+    // prolog-augmented scanner input (the prolog injected three lines here).
+    let body_line = out
+        .document
+        .iter()
+        .find_map(|(_, node)| {
+            if node.kind == scribe_ast::NodeKind::Paragraph {
+                node.source.as_ref().and_then(|pos| pos.line)
+            } else {
+                None
+            }
+        })
+        .expect("body paragraph source position");
+    assert_eq!(body_line, 1);
+}

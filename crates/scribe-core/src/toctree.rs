@@ -829,7 +829,7 @@ fn decode_toctree(id: NodeId, node: &Node, owner: &str) -> ParsedToctree {
 }
 
 /// Upstream `docname_join` port used for manually constructed entries.
-fn docname_join(base: &str, name: &str) -> String {
+pub(crate) fn docname_join(base: &str, name: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
     let base = base.trim_end_matches('/');
     if let Some((parent, _)) = base.rsplit_once('/') {

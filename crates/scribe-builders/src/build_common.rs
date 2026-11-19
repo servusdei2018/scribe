@@ -89,6 +89,28 @@ fn toctree_warning_lines(toctrees: &ToctreeCollection, source_dir: &std::path::P
     out
 }
 
+/// Render the upstream `toc.no_title` diagnostic for a toctree entry whose
+/// target document carries no title. Upstream keeps the target in
+/// `includefiles` (so no `toc.not_included` warning is produced) but emits no
+/// link; the warning is located on the toctree directive itself.
+pub fn no_title_warning_line(
+    source_docname: &str,
+    target_docname: &str,
+    line: Option<u32>,
+    source_dir: &std::path::Path,
+) -> String {
+    let base = source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
+    let suffix = if source_docname.ends_with(".md") { "" } else { ".rst" };
+    let path = base.join(format!("{source_docname}{suffix}"));
+    let location = match line {
+        Some(line) => format!("{}:{line}", path.display()),
+        None => path.display().to_string(),
+    };
+    format!(
+        "{location}: WARNING: toctree contains reference to document '{target_docname}' that doesn't have a title: no link will be generated [toc.no_title]"
+    )
+}
+
 /// Canonical Sphinx warning code for a structured domain diagnostic.
 ///
 /// Upstream logs unresolved xrefs as `ref.<reftype>` (see
@@ -223,6 +245,33 @@ pub fn prepare(
     let (extlink_roles, extlink_warnings) = extensions::extlink_roles(config);
     warnings.extend(extlink_warnings);
 
+    // Upstream's `SphinxProject.read()` passes `rst_prolog` / `rst_epilog` to
+    // the reStructuredText parser only (``sphinx/util/rst.py``). Capture the
+    // values and the suffix→parser table once so each worker can decide
+    // whether a source is reST (augmented) or handled by a custom parser
+    // (which never receives the injected text).
+    let relevant = env.relevant_config().clone();
+    let rst_prolog = relevant.rst_prolog.clone();
+    let rst_epilog = relevant.rst_epilog.clone();
+    // `RelevantConfig::source_suffix` stores display strings (quoted); use the
+    // typed config value to obtain the actual parser names.
+    let suffix_parsers: Vec<(String, String)> = config
+        .get_dict("source_suffix")
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(suffix, value)| {
+                    let parser = match value {
+                        scribe_config::ConfigValue::Str(name) => name.clone(),
+                        scribe_config::ConfigValue::None => "restructuredtext".to_owned(),
+                        other => other.display_string(),
+                    };
+                    (suffix.clone(), parser)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let config_arc = Arc::new(config.clone());
     let tags = Tags::with_tags(std::iter::empty::<String>());
     let registry = DomainRegistry::builtin();
@@ -251,8 +300,35 @@ pub fn prepare(
                 source: Arc::clone(&source),
             });
             let raw = source.lock().map(|guard| guard.clone()).unwrap_or_default();
+            // Find the parser registered for this source's suffix. Non-reST
+            // parsers (e.g. a custom parser supplied by an extension) receive
+            // the raw source verbatim; upstream never injects rst_prolog or
+            // rst_epilog into them and their output is an opaque doctree.
+            let parser_name = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!(".{extension}"))
+                .and_then(|suffix| {
+                    suffix_parsers
+                        .iter()
+                        .find(|(registered, _)| registered == &suffix)
+                        .map(|(_, parser)| parser.clone())
+                })
+                .unwrap_or_else(|| "restructuredtext".to_owned());
+            if parser_name != "restructuredtext" {
+                let mut document = Document::new(Some(docname.clone()));
+                document.metadata.docname = Some(docname.clone());
+                return Some((docname.clone(), document, Vec::new()));
+            }
+
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
             parse_options.extlinks = Arc::clone(&extlink_roles);
+            if !rst_prolog.is_empty() {
+                parse_options.prolog = Some(rst_prolog.clone());
+            }
+            if !rst_epilog.is_empty() {
+                parse_options.epilog = Some(rst_epilog.clone());
+            }
             let mut output = parse_with_options(&raw, parse_options);
 
             let mut rst_ctx = RstContext::new(source_dir, Tags::with_tags(std::iter::empty::<String>()));

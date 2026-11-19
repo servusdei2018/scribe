@@ -168,7 +168,15 @@ pub fn run_check(args: CheckArgs) -> Result<CheckReport> {
         let source = Arc::new(raw);
         sources.insert(docname.clone(), Arc::clone(&source));
 
-        let parse_options = scribe_rst::ParseOptions::new(Some(docname.clone()));
+        let mut parse_options = scribe_rst::ParseOptions::new(Some(docname.clone()));
+        let rst_prolog = config.get_str("rst_prolog").unwrap_or_default().to_owned();
+        let rst_epilog = config.get_str("rst_epilog").unwrap_or_default().to_owned();
+        if !rst_prolog.is_empty() {
+            parse_options.prolog = Some(rst_prolog);
+        }
+        if !rst_epilog.is_empty() {
+            parse_options.epilog = Some(rst_epilog);
+        }
         let mut output = scribe_rst::parse_with_options(&source, parse_options);
         for diagnostic in &output.diagnostics {
             push(
