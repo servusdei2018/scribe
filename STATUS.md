@@ -53,6 +53,7 @@
 | 37 | Span-carrying canonical warnings (subagent, tasks 2–4) | DONE | check/clippy clean; test ×3 + release green | `WarningLocation`/`format_warning`, canonical `[type.subtype]` suffixes, source path + line on every structured domain diagnostic; see §Phase 37 below |
 | 38 | TocTree doctree expansion + exported node-shape fidelity (subagent) | DONE | check/clippy clean; **1,114 tests green × 3 consecutive** + release; conformance + self-host green | Parity **70.8% → 79.2%** (9 pass / 22 partial / 3 fail / 5 skip); 13 fixtures improved / 0 regressed; see §Phase 38 below |
 | 39 | HTML5 builder parity + JS short-name resolution (subagent) | DONE | check/clippy clean; **1,114 tests green × 3 consecutive** + release; conformance + regression guard + self-host + HTML5/LaTeX + bench green | Parity **79.2% → 82.8%** (15 pass / 16 partial / 3 fail / 5 skip) — **≥80% GATE PASS**; phantom `py-modindex` page + virtual-label rows eliminated (6 HTML fixtures), JS qualified-name object-prefix fix; see §Phase 39 below |
+| 40 | Final conformance audit, fuzz hardening, release benchmarks & docs (isolated subagent) | DONE | check/clippy clean; **1,116 tests green × 3 consecutive** + release, zero warnings; conformance + regression guard + self-host + 280k fuzz green | Parity **82.8%** unchanged (0 per-fixture regressions); **280,000 fuzz cases / 28 properties / 0 panics** (new TocTree-expander property); **5.77× @40p / 7.33× @150p with 76,940 KB peak RSS**; self-host exit 0 both modes (419 warnings); five docs finalized; see §Phase 40 below |
 
 ## Frozen cross-phase contracts
 
@@ -2475,3 +2476,113 @@ harness on every batch.
 
 No commits, tags, branches or git-history changes were made;
 `stash@{0}: pre-phase-31-snapshot` is intact.
+
+## Phase 40 — final conformance audit, fuzz hardening, release benchmarks & docs
+
+Phase 40 closes the program with a measured-only audit. No rubric, baseline,
+fixture-selection or memory/speed rule was weakened; every figure below was
+re-run from a clean `e896629` tree with `stash@{0}: pre-phase-31-snapshot`
+intact.
+
+### 1. Final conformance audit (task 1)
+
+`cargo test -p scribe-cli --test conformance`: **2 passed, 0 failed**; the
+regenerated `CONFORMANCE.md` is byte-identical to the Phase 39 report.
+
+- Aggregate semantic parity: **82.8% over 34 applicable fixtures**
+  (**15 pass / 16 partial / 3 fail / 5 skip**) — clears the ≥80.0% gate by
+  +2.8 points.
+- Parity progression across the program:
+  **65.6% → 66.7% → 70.8% → 71.5% → 79.2% → 82.8%**.
+- Per-fixture score changes vs the Phase 39 baseline: **all 0.000** (no status
+  changes, no score drift, no new skips). Previously passing fixtures stayed
+  green; the regression guard (`cargo test -p scribe-cli --test regression_guard`)
+  is **5 passed**.
+
+### 2. Fuzz hardening (task 2)
+
+Extended `crates/scribe-core/tests/fuzz.rs` (new permanent harness with a
+`proptest` dev-dependency) with
+`toctree_expansion_never_panics_and_stays_in_bounds` and the deterministic
+`regression_cyclic_child_toctrees_terminate`, so the sweep now exercises the
+Phase 38 TocTree expander in addition to the existing AST / RST / C++ /
+intersphinx targets. Sweep ran at `PROPTEST_CASES=10000`:
+
+| Suite | Proptest properties | Cases | Result |
+|---|---:|---:|---|
+| scribe-core `fuzz` (TocTree expander) | 1 | 10,000 | green |
+| scribe-rst `fuzz` (AST nodes, inline/blocks, unicode) | 8 | 80,000 | green |
+| scribe-domains `fuzz` (Python/C/C++ signatures, inventory) | 6 | 60,000 | green |
+| scribe-config `fuzz` | 4 | 40,000 | green |
+| scribe-myst `fuzz` | 4 | 40,000 | green |
+| scribe-myst `adversarial` | 5 | 50,000 | green |
+| **Total** | **28** | **280,000** | **0 panics, all spans in bounds** |
+
+Coverage includes `TitleReference`/`Classifier`/`OptionGroup`-producing
+constructs, the RST parser, the new TocTree expander (including cyclic /
+self / external / multi-byte entries), C/C++ domain parsers and the
+`Inventory::loads` intersphinx loader. No new panic was found, so no new
+production fix was required; the new deterministic cycle regression is
+retained permanently.
+
+### 3. Release benchmarks & self-host (task 3)
+
+`cargo build --release -p scribe-cli`, then the authoritative cold-fixture
+commands (`RUNS=5 PAGES=40` and `RUNS=3 PAGES=150`), medians of 1 warmup + N
+measured runs, GNU `time -v` for wall/RSS:
+
+| Fixture | scribe wall / RSS | sphinx-build wall / RSS | Speedup | Gate |
+|---|---|---|---:|---|
+| 40 pages | 0.13 s / 35,904 KB | 0.75 s / 79,208 KB | 5.77× | — |
+| 150 pages | 0.24 s / 76,940 KB | 1.76 s / 92,452 KB | **7.33×** | RSS 76,940 KB < 92,624 KB **PASS**; speedup ≥ 7.0× **PASS** |
+
+Full `sphinx/doc` self-host (155 source pages, release binary):
+
+| Mode | Exit | Wall | Peak RSS | HTML files | Warnings |
+|---|---:|---:|---:|---:|---:|
+| unmodified `sphinx13` theme | 0 | 1.13 s | 207,576 KB | 158 | 419 |
+| `-D html_theme=basic` | 0 | 1.18 s | 206,488 KB | 158 | 419 |
+
+`cargo test -p scribe-cli --test selfhost`: **2 passed** (terminates without
+panicking; unmodified `sphinx13` theme actually used).
+
+### 4. Documentation (task 4)
+
+All five top-level docs carry final audited numbers: `CONFORMANCE.md`
+(regenerated by the harness, not hand-edited), `BENCHMARKS.md`,
+`ARCHITECTURE.md` (new §38), `README.md` (final status/close-out) and
+`STATUS.md` (this section + ledger row).
+
+### Final verification (all commands run on this machine)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | 0 warnings / 0 errors |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` (× 3 consecutive) | **1,116 passed, 0 failed** each run |
+| `cargo test --workspace --release` | **1,116 passed, 0 failed**, 0 warnings |
+| `cargo test -p scribe-cli --test conformance` | 2 passed; parity 82.8%; report regenerated |
+| `cargo test -p scribe-cli --test regression_guard` | 5 passed |
+| `cargo test -p scribe-cli --test selfhost` | 2 passed (both theme modes exit 0) |
+| `PROPTEST_CASES=10000` fuzz sweep | 280,000 cases / 28 properties / 0 panics |
+
+### Gate status
+
+| Gate | Requirement | Measured | Status |
+|---|---|---:|---|
+| Aggregate conformance parity | ≥ 80.0% | 82.8% | **PASS** |
+| Fuzz cases / panics | 250,000 / 0 | 280,000 / 0 | **PASS** |
+| Peak RSS @150p | < 92,624 KB | 76,940 KB | **PASS** |
+| Speedup @150p | ≥ 7.0× | 7.33× | **PASS** |
+| Workspace tests (debug ×3 + release) | 100% green | 1,116 / 1,116 every run | **PASS** |
+| Check / clippy / release warnings | zero | clean | **PASS** |
+| Regression guard / self-host | green | green | **PASS** |
+| Docs updated with measured numbers | 5 files | 5 files | **PASS** |
+
+### Checkpoint / stash statement
+
+**159 files were checkpointed into 7 logical commits** capturing the
+originally uncommitted work. The **`pre-phase-31-snapshot` backup stash
+(`stash@{0}`) is retained** and must remain intact **until the orchestrator's
+final verification**; this subagent did not commit, tag, branch, drop/pop the
+stash, or alter git history.

@@ -26,6 +26,9 @@ scribe-rst.workspace = true
 unicode-normalization.workspace = true
 miette.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [features]
 # Enables the Wasm plugin ABI host backend (manifest + native trampolines).
 # Default builds stay lightweight: no WebAssembly runtime dependency is pulled

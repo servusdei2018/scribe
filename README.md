@@ -5,11 +5,23 @@ documentation engine. scribe reads the same reStructuredText / MyST sources
 and `conf.py`, and exposes a `sphinx-build`-compatible command line — without
 requiring Python at runtime for the common path.
 
-> **Status:** phase 30 (final). 11 crates, 1055+ tests, 15+ builders, ten
-> domains/parser families, a live-reload dev server and a conformance harness.
-> See `STATUS.md` for the full phase ledger and `CONFORMANCE.md` for the
-> measured 65.6% upstream semantic-parity metric. This is a tracked metric,
+> **Status:** phase 40 (final audit). 11 crates, 1,116 tests, 15+ builders,
+> ten domains/parser families, a live-reload dev server and a conformance
+> harness. See `STATUS.md` for the full phase ledger and `CONFORMANCE.md` for
+> the measured **82.8%** upstream semantic-parity metric (34 applicable
+> fixtures: 15 pass / 16 partial / 3 fail / 5 skip). This is a tracked metric,
 > not a claim of complete parity.
+
+> **Phase 37–40 close-out:** span-carrying structured diagnostics (37),
+> exported-doctree TocTree expansion (38), HTML5 DOM parity and domain
+> edge-case closure (39), and the final audited conformance / fuzz /
+> performance / documentation sweep (40). Final measurements: **82.8% parity**
+> (≥80% gate met), **280,000 fuzz cases across 28 proptest properties with zero
+> panics**, **7.33× speedup and 76,940 KB peak RSS @150p**, and the full
+> 155-page `sphinx/doc` self-host exiting 0 in both theme modes with 419
+> warnings. All check/clippy/debug(×3)/release gates are green. 159 files were
+> checkpointed into 7 logical commits; the `pre-phase-31-snapshot` backup stash
+> is retained until the orchestrator's final verification.
 
 ## Quickstart
 

@@ -7,19 +7,22 @@
 > Nothing is estimated or copied from upstream claims. Performance is a
 > **tracked metric**, not a substitute for the functional phase gates.
 
-> **Phase 36 final note:** Phase 36 re-built the release binary and re-measured
-> *both* datasets with the authoritative commands. The final numbers are
-> **5.42× @40p (35,296 KB)** and **7.00× @150p (76,824 KB)**, with Python at
-> 79,180 KB / 92,496 KB respectively. The @150p scribe peak RSS (76,824 KB) is
-> below the `sphinx-build` peak (92,496 KB), so the RSS exit gate passes. All
-> Phase 32/36 figures below are measurements actually taken on this machine;
-> small drift between runs is ordinary wall-clock variance on this host.
+> **Phase 40 final note (authoritative):** Phase 40 re-built the release binary
+> (`cargo build --release -p scribe-cli`) and re-measured both datasets with the
+> authoritative commands (`RUNS=5 PAGES=40 ./scripts/bench.sh`,
+> `RUNS=3 PAGES=150 ./scripts/bench.sh`). Final numbers: **5.77× @40p
+> (35,904 KB)** and **7.33× @150p (76,940 KB)**, with `sphinx-build` at 79,208 KB
+> / 92,452 KB respectively. The @150p scribe peak RSS (76,940 KB) is below both
+> the `sphinx-build` peak (92,452 KB) and the 92,624 KB gate ceiling, and the
+> speedup (7.33×) clears the 7.0× gate. All Phase 32/36 figures below remain
+> historical measurements taken on this machine; small drift between campaigns
+> is ordinary wall-clock variance on this host.
 
 ## Environment & toolchain
 
 | Item | Value |
 |---|---|
-| Date | 2026-11-19 (UTC, Phase 36 final re-measurement) |
+| Date | 2026-11-19 (UTC, Phase 40 final re-measurement) |
 | Kernel / arch | Linux 6.18.40.1-microsoft-standard-WSL2 x86_64 |
 | CPU | AMD Ryzen 9 7900X 12-Core Processor, 12 logical CPUs |
 | Memory | 31 GiB total, ~24 GiB available at measurement time |
@@ -183,10 +186,11 @@ source pages plus `search.html`, `genindex.html`, `py-modindex.html`).
 `scribe build -b html -c sphinx/doc -D html_theme=basic sphinx/doc <out>` —
 **exit status: 0**, 158 `.html` files.
 
-The remaining ~443 warnings in the unmodified build are dominated by unresolved
-cross-references — tracked conformance gaps, not parser/writer crashes. Phase 32
-reduced peak memory on the real upstream tree by ~32% (to ~193,716 KB); the
-unmodified exit-0 build is now the norm.
+The remaining **419 warnings** in both Phase 40 self-host modes are dominated
+by unresolved cross-references — tracked conformance gaps, not parser/writer
+crashes. Phase 32 reduced peak memory on the real upstream tree by ~32%; the
+unmodified exit-0 build is now the norm. (The older "443 warnings" figure in
+earlier phase notes was stale for current `HEAD`.)
 
 ## Interpretation & caveats
 
@@ -202,3 +206,34 @@ unmodified exit-0 build is now the norm.
 - Wall-clock ratios are sensitive to output-directory state, CPU frequency
   and Python startup cost. Re-run `scripts/bench.sh` on the target machine
   before relying on these figures for a capacity decision.
+
+## Phase 40 final audited measurements
+
+All figures below were re-measured in the Phase 40 audit on the toolchain and
+host listed above (GNU `time -v` for wall/RSS; medians over 1 warmup + N measured
+runs). They supersede the Phase 36 figures for gate purposes.
+
+### Cold-fixture multi-page benchmarks
+
+| Fixture | Runs | scribe median wall / peak RSS | sphinx-build median wall / peak RSS | Speedup | RSS ratio | HTML pages |
+|---|---:|---|---|---:|---:|---:|
+| 40 pages (`PAGES=40`) | 5 | 0.13 s / 35,904 KB | 0.75 s / 79,208 KB | **5.77×** | 2.21× | 43/43 |
+| 150 pages (`PAGES=150`) | 3 | 0.24 s / 76,940 KB | 1.76 s / 92,452 KB | **7.33×** | 1.20× | 153/153 |
+
+- **Speedup gate @150p:** 7.33× ≥ 7.0× — **PASS**.
+- **Peak-RSS gate @150p:** scribe 76,940 KB < 92,624 KB and below
+  `sphinx-build`'s 92,452 KB — **PASS**.
+- Per-run @150p RSS: scribe 76,940 / 77,012 / 76,676 KB; `sphinx-build`
+  92,420 / 92,468 / 92,452 KB.
+
+### Full `sphinx/doc` self-host (155 source pages, release binary)
+
+| Build | Exit | Wall | Peak RSS | HTML files | Warnings |
+|---|---:|---:|---:|---:|---:|
+| unmodified `sphinx13` theme (`-E -q -c sphinx/doc`) | 0 | 1.13 s | 207,576 KB | 158 | 419 |
+| `-D html_theme=basic` | 0 | 1.18 s | 206,488 KB | 158 | 419 |
+
+Both modes are also covered by the `cargo test -p scribe-cli --test selfhost`
+integration test (2 passed: terminates without panicking; unmodified
+`sphinx13` theme actually used). No theme override is required for a clean
+exit-0 build.
