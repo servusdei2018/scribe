@@ -1,0 +1,48 @@
+Vendored theme assets — attribution and license notice
+======================================================
+
+This directory contains theme templates, stylesheets, scripts and metadata
+copied verbatim (or with the minimal adaptations noted below) from the
+reference Sphinx distribution and the Alabaster theme package.  They are
+included so that scribe can render the same HTML structure as its Python
+oracle for the built-in `basic`, `classic` and `nature` themes and for the
+third-party `alabaster` theme.
+
+1. Sphinx built-in themes: basic, classic, nature
+-------------------------------------------------
+Source:  sphinx/sphinx/themes/{basic,classic,nature}/  in the reference tree
+         (Sphinx 9.3.0+, https://www.sphinx-doc.org/)
+License: BSD 2-Clause "Simplified" License.
+
+Copyright (c) 2007-2026 by the Sphinx team.
+See <https://www.sphinx-doc.org/en/master/about.html> for the full license
+text and contributor list.  These files are redistributed under the terms of
+that license.  No source code was modified; the `.jinja` stylesheet suffixes
+are preserved as shipped upstream.
+
+2. Alabaster theme
+------------------
+Source:  alabaster 1.0.0 package
+         (https://pypi.org/project/alabaster/, https://github.com/bitprophet/alabaster/)
+License: BSD License.
+
+Copyright (c) 2010-2024 by Jeff Forcier and the Alabaster contributors.
+The files `layout.html`, `about.html`, `donate.html`, `navigation.html`,
+`relations.html`, `theme.conf`, `static/alabaster.css_t`, `static/custom.css`
+and `static/github-banner.svg` are redistributed under the terms of the
+Alabaster license (see the LICENSE.rst shipped with that distribution).
+
+`__init__.py` and `support.py` are retained only as a reference for the
+`pygments_style = alabaster.support.Alabaster` setting; they are not executed
+by scribe.
+
+3. Adaptations made by scribe
+-----------------------------
+* The original `theme.toml` / `theme.conf` metadata files are kept unchanged.
+* Jinja2 `{% trans %}...{% endtrans %}` blocks are rewritten on load into
+  equivalent `{% set %}` + inline text by `scribe-theme`'s preprocessor,
+  because minijinja does not ship the i18n extension.  English output is
+  unchanged; see ARCHITECTURE.md §20.
+* HTML templates that Sphinx renders with its Python builder context are
+  driven by scribe's `RenderContext` (see `scribe-theme`).  No template file
+  content was otherwise changed.
