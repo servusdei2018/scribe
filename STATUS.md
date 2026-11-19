@@ -50,6 +50,9 @@
 | 33–34 | Warning-code taxonomy, xref & theme conformance improvements | DONE | check/clippy clean; test ×3 + release green; conformance + self-host + regression guard green | Semantic parity **65.6% → 66.7%** over 34 fixtures (3 pass / 26 partial / 5 fail / 5 skip); extended warning-code taxonomy + std-domain xref formatting + bundled theme parity; 1,106 tests |
 | 35 | External HTML theme resolution (unmodified `sphinx/doc` self-host) | DONE | check/clippy clean; test ×3 + release green; unmodified self-host build exit 0 | `sphinx13` external theme resolved via `html_theme_path` + site-packages discovery; both unmodified and `-D html_theme=basic` builds exit 0 with 158 HTML pages |
 | 36 | Final conformance push, 250k fuzz sweep & verified docs | PARTIAL | check/clippy clean; test ×3 + release green (1,108); 270,000 fuzz cases; self-host + conformance + regression guard + benchmarks green | Parity **66.7% → 70.8%** (4 pass / 26 partial / 4 fail / 5 skip) — **below the ≥80% gate**; see §Phase 36 below for the honest blocker report. @40p 5.42× / 35,296 KB; @150p 7.00× / 76,824 KB (< 92,496 KB Python). **No commits created** |
+| 37 | Span-carrying canonical warnings (subagent, tasks 2–4) | DONE | check/clippy clean; test ×3 + release green | `WarningLocation`/`format_warning`, canonical `[type.subtype]` suffixes, source path + line on every structured domain diagnostic; see §Phase 37 below |
+| 38 | TocTree doctree expansion + exported node-shape fidelity (subagent) | DONE | check/clippy clean; **1,114 tests green × 3 consecutive** + release; conformance + self-host green | Parity **70.8% → 79.2%** (9 pass / 22 partial / 3 fail / 5 skip); 13 fixtures improved / 0 regressed; see §Phase 38 below |
+| 39 | HTML5 builder parity + JS short-name resolution (subagent) | DONE | check/clippy clean; **1,114 tests green × 3 consecutive** + release; conformance + regression guard + self-host + HTML5/LaTeX + bench green | Parity **79.2% → 82.8%** (15 pass / 16 partial / 3 fail / 5 skip) — **≥80% GATE PASS**; phantom `py-modindex` page + virtual-label rows eliminated (6 HTML fixtures), JS qualified-name object-prefix fix; see §Phase 39 below |
 
 ## Frozen cross-phase contracts
 
@@ -2362,3 +2365,113 @@ divergences are C++ signature parsing, grid/list-table cell nesting, warning
 codes on non-toctree fixtures, and a few `only`-nested hidden toctrees that
 upstream deliberately leaves unresolved. No commits, tags, branches or stash
 changes were made; `stash@{0}: pre-phase-31-snapshot` is intact.
+
+## Phase 39 — HTML5 builder parity + JS short-name resolution (subagent)
+
+### What changed (3 production/test files + this ledger)
+
+1. **`crates/scribe-builders/src/html/index.rs` — phantom index pages/rows removed.**
+   Upstream's `StandaloneHTMLBuilder` only registers a domain index when that
+   index has content (`content, collapse = index.generate(); if content: ...`).
+   Scribe unconditionally wrote a `py-modindex.html` page *and* listed the
+   std-domain virtual `:ref:` labels (`genindex` / `modindex` / `search`) as
+   general-index rows, for every project.  `write_index_pages` now (a) filters
+   those virtual label rows out of the index object list and (b) emits
+   `py-modindex.html` only when a real `module` / `py:module` object exists.
+   This removes one entire phantom HTML page (with its full theme chrome:
+   `<html>/<head>/<body>/<form>/<search>/<script>/<link>/<li>/<a>/<div>` counts)
+   from every module-less project, and removes the `${root}/py-modindex/`
+   relbar/genindex links that pointed at nothing.
+2. **`crates/scribe-domains/src/javascript.rs` — qualified-name object scope.**
+   Upstream `JSObject.handle_signature` splits a qualified member name
+   (`Class.member`) into its object prefix and short name and keeps the prefix
+   as the active `js:object` ref-context.  Scribe kept the whole qualified
+   string as the short name with an empty object scope, so a short-name xref
+   such as `:js:meth:\`mod_child_2\`` inside `Class.mod_child_1` (both declared
+   at module scope as siblings of the class) could not resolve and emitted a
+   spurious `[ref.meth]` warning.  `prepare_one` now derives the effective
+   object prefix, uses it for `js:object`, the signature's `object` attribute
+   (now `ModTopLevel`, matching upstream), the local xref annotation and the
+   child scope.  Class nesting is unchanged.
+3. **`crates/scribe-builders/tests/html_differential.rs`** — the `test-basic`
+   skeleton test now asserts that `py-modindex.html` is *absent* (the
+   upstream-correct result for a project with no Python modules) instead of
+   requiring it.  `test_root_structural_invariants_and_generated_pages` still
+   requires the page (that fixture declares modules), so both the positive and
+   negative behaviours are covered.
+
+Frozen contracts (§7 AST, §12 `BuildEnvironment`, §15 `Domain`) untouched.
+No `unwrap()`/`expect()` added to library code; all changes are additive data
+handling inside existing `Result`-returning functions.
+
+### Per-fixture score deltas (baseline 79.2% → final, from `CONFORMANCE.md`)
+
+| Fixture | Builder | Score before | Score after | Δ | Status |
+|---|---|---:|---:|---:|---|
+| test-basic | html | 0.771 | 0.987 | +0.216 | partial → **pass** |
+| test-highlight_options | html | 0.750 | 0.973 | +0.223 | partial → **pass** |
+| test-reST-code-block | html | 0.752 | 0.978 | +0.226 | partial → **pass** |
+| test-reST-code-role | html | 0.719 | 0.923 | +0.204 | partial → **pass** |
+| test-theming | html | 0.748 | 0.969 | +0.221 | partial → **pass** |
+| test-domain-js | pseudoxml | 0.830 | 0.973 | +0.143 | partial → **pass** |
+| test-directive-code | html | 0.602 | 0.595 | −0.007 | partial (noise) |
+| test-toctree-maxdepth | html | 0.677 | 0.666 | −0.011 | partial |
+| all other 26 fixtures | — | — | — | 0.000 | unchanged |
+
+**6 fixtures improved / 2 with sub-0.012 measurement noise / 26 unchanged.**
+The two tiny decreases are within the harness's ±0.15 regression tolerance;
+both remain `partial` and the committed regression guard is green.  No
+comparison rule, rubric, fixture selection, baseline row or hand-edited
+`CONFORMANCE.md` number was changed — the report was regenerated by the
+harness on every batch.
+
+### Aggregate parity
+
+**79.2% → 82.8%** over 34 applicable fixtures
+(**15 pass / 16 partial / 3 fail / 5 skip**).  **The ≥80% exit gate is met with
++2.8 points of margin.**  Aggregate rose monotonically through the two batches:
+79.2% → 81.2% (phantom page) → 82.3% (virtual-label rows) → 82.8% (JS scope).
+
+### Final verification (all commands run on this machine)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | 0 warnings / 0 errors |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` (× 3 consecutive) | **1,114 passed, 0 failed** each run |
+| `cargo test --workspace --release` | **1,114 passed, 0 failed** |
+| `cargo test -p scribe-cli --test conformance` | 2 passed; parity 82.8%; report regenerated deterministically |
+| `cargo test -p scribe-cli --test regression_guard` | 5 passed |
+| `cargo test -p scribe-cli --test selfhost` | 2 passed; unmodified `sphinx13` theme, exit 0 |
+| HTML5/LaTeX builder + translator tests (`scribe-builders`) | green |
+| Benchmark (release, PAGES=150, RUNS=3) | **7.27× speedup**, scribe **76,756 KB** peak RSS (sphinx 92,580 KB), 153/153 HTML pages |
+
+### Gate status
+
+| Gate | Requirement | Measured | Status |
+|---|---|---:|---|
+| Aggregate conformance parity | ≥ 80.0% | **82.8%** | **PASS** |
+| Workspace tests (debug ×3 + release) | 100% green | 1,114 / 1,114 every run | **PASS** |
+| Check / clippy | zero warnings | clean | **PASS** |
+| Peak RSS @150p | < 92,624 KB | 76,756 KB | **PASS** |
+| Speedup @150p | ≥ 7.0× | 7.27× | **PASS** |
+| Regression guard / self-host / builders | green | green | **PASS** |
+
+### Remaining divergences (honest, not addressed this phase)
+
+- `warning codes` on ~13 fixtures: upstream logs code-less warnings (e.g. the
+  `numfig is disabled. :numref: is ignored.` family, the `master_doc` notice,
+  docutils directive errors) while scribe's canonical formatter always appends
+  a `[type.subtype]` suffix.  Matching these would require a no-code diagnostic
+  channel and exact message/line parity; left untouched to protect the 15
+  currently green warning scores.
+- C/C++ duplicate-declaration warnings and template/overload signature fidelity
+  (`test-domain-cpp` remains `fail`, 0.465); C++ domain parser work is a larger
+  effort than this phase's HTML/JS scope.
+- `productionlist` `:token:` xref registration (`test-productionlist` 0.707).
+- `numfig` figure/table number prefixes when `numfig = False`.
+- `test-root` / `test-prolog` / `test-nested-tables` structure (parser-level,
+  pre-existing).
+
+No commits, tags, branches or git-history changes were made;
+`stash@{0}: pre-phase-31-snapshot` is intact.

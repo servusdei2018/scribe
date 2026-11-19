@@ -177,7 +177,19 @@ pub fn write_index_pages(
     outdir: &Path,
     flavor: &BuildFlavor,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let objects = collect_objects(registry);
+    // The std domain keeps virtual `:ref:` labels (`genindex`, `modindex`,
+    // `search`) so those xrefs resolve; they are not real domain objects and
+    // upstream's general index never lists them as entries (its genindex body
+    // is generated from `IndexEntries.create_index`, which only sees indexable
+    // objects/terms).  Filter them here so we neither render phantom index
+    // rows nor emit a link to a `py-modindex.html` page that does not exist.
+    let objects: Vec<ObjectEntry> = collect_objects(registry)
+        .into_iter()
+        .filter(|entry| {
+            !(entry.objtype == "label"
+                && matches!(entry.name.as_str(), "genindex" | "modindex" | "search"))
+        })
+        .collect();
     let mut pages: Vec<(String, String)> = Vec::new();
     // Each generated page needs its own `docname` so `pathto` computes the
     // correct base URI (crucial for dirhtml's nested `genindex/index.html`).
@@ -194,10 +206,20 @@ pub fn write_index_pages(
     gen_ctx.docname = "genindex".to_owned();
     let genindex = generate_genindex_with(manager, &gen_ctx, &objects, &href_for_page("genindex"))?;
     pages.push((flavor.output_path("genindex").to_string_lossy().into_owned(), genindex));
-    let mut mod_ctx = ctx.clone();
-    mod_ctx.docname = "py-modindex".to_owned();
-    let modindex = generate_modindex_with(manager, &mod_ctx, &objects, &href_for_page("py-modindex"))?;
-    pages.push((flavor.output_path("py-modindex").to_string_lossy().into_owned(), modindex));
+    // Upstream only emits a domain index page when that index has content
+    // (`StandaloneHTMLBuilder`: `content, collapse = index.generate(); if
+    // content: ...`).  The Python module index therefore has no `py-modindex`
+    // page at all in projects that declare no `py:module` objects.  Gate the
+    // page on real module entries so we never ship an empty phantom index.
+    let has_modules = objects
+        .iter()
+        .any(|entry| entry.objtype == "module" || entry.objtype.starts_with("py:module"));
+    if has_modules {
+        let mut mod_ctx = ctx.clone();
+        mod_ctx.docname = "py-modindex".to_owned();
+        let modindex = generate_modindex_with(manager, &mod_ctx, &objects, &href_for_page("py-modindex"))?;
+        pages.push((flavor.output_path("py-modindex").to_string_lossy().into_owned(), modindex));
+    }
     if flavor.search {
         let mut search_ctx = ctx.clone();
         search_ctx.docname = "search".to_owned();

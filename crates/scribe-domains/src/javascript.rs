@@ -429,15 +429,35 @@ fn prepare_one(document: &mut Document, child: NodeId, scope: &JsScope) -> Domai
         .unwrap_or("")
         .to_owned();
     let span = document.get(child).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
-    let name = signature.trim().trim_start_matches(".. js:").trim().split(|ch: char| ch.is_whitespace() || ch == '(').next().unwrap_or("").to_owned();
-    let fullname = scope.fullname(&name);
+    let raw_name = signature.trim().trim_start_matches(".. js:").trim().split(|ch: char| ch.is_whitespace() || ch == '(').next().unwrap_or("").to_owned();
+    // Upstream `JSObject.handle_signature` splits a qualified member name
+    // (`Class.member`) into its object prefix and short name, then keeps the
+    // prefix as the active `js:object` ref-context.  This is what lets a
+    // short-name xref such as `:js:meth:`member2`` inside `Class.member1`
+    // resolve against `Class.member2` even when both methods are declared at
+    // module scope (siblings of the class).  Nestable classes keep the whole
+    // name and push it onto the object stack below.
+    let mut effective = scope.clone();
+    let name = if objtype != "class" {
+        if let Some((prefix, short)) = raw_name.rsplit_once('.') {
+            if !prefix.is_empty() {
+                effective.object.extend(prefix.split('.').map(str::to_owned));
+            }
+            short.to_owned()
+        } else {
+            raw_name
+        }
+    } else {
+        raw_name
+    };
+    let fullname = effective.fullname(&name);
     {
         let node = document.get_mut(child)?;
         node.attrs.set_str("js:fullname", &fullname);
         node.attrs.set_str("js:shortname", &name);
         node.attrs.set_str("js:anchor", &fullname);
-        node.attrs.set_str("js:module", scope.module_text());
-        node.attrs.set_str("js:object", scope.object_text());
+        node.attrs.set_str("js:module", effective.module_text());
+        node.attrs.set_str("js:object", effective.object_text());
         node.attrs.set_list("ids", vec![fullname.clone()]);
     }
     // Populate the sibling index node.
@@ -445,18 +465,18 @@ fn prepare_one(document: &mut Document, child: NodeId, scope: &JsScope) -> Domai
     if let Some(index_id) = index_id {
         let label = match objtype.as_str() {
             "class" => format!("{name}() (class)"),
-            "function" if scope.module_text().is_empty() && scope.object_text().is_empty() => format!("{name}() (built-in function)"),
-            "function" => format!("{fullname}() ({} method)", scope.object_text()),
+            "function" if effective.module_text().is_empty() && effective.object_text().is_empty() => format!("{name}() (built-in function)"),
+            "function" => format!("{fullname}() ({} method)", effective.object_text()),
             _ => format!("{fullname} ({objtype})"),
         };
         if let Ok(node) = document.get_mut(index_id) {
             node.attrs.set_str("entries", format!("['single', '{label}', '{fullname}', '', None]"));
         }
     }
-    build_signature(document, child, &name, &objtype, scope, span)?;
-    annotate_scope(document, child, scope);
+    build_signature(document, child, &name, &objtype, &effective, span)?;
+    annotate_scope(document, child, &effective);
 
-    let mut inner = scope.clone();
+    let mut inner = effective.clone();
     if objtype == "class" {
         inner.object.push(name);
     }

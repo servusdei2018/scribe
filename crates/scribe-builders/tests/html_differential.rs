@@ -151,7 +151,7 @@ fn test_basic_page_skeleton_and_assets() {
     assert!(html.contains("documentation_options.js"));
 
     for file in [
-        "index.html", "genindex.html", "py-modindex.html", "search.html",
+        "index.html", "genindex.html", "search.html",
         "objects.inv", ".buildinfo", "searchindex.js",
         "_static/basic.css", "_static/pygments.css", "_static/doctools.js",
         "_static/documentation_options.js", "_static/sphinx_highlight.js",
@@ -162,6 +162,14 @@ fn test_basic_page_skeleton_and_assets() {
         if file == "searchindex.js" { continue; }
         assert!(ours.join(file).is_file(), "missing generated file: {file}");
     }
+    // Upstream only writes `py-modindex.html` when the project declares at
+    // least one Python module (`StandaloneHTMLBuilder`: emit a domain index
+    // only when its generated content is non-empty).  `test-basic` is a plain
+    // RST fixture with no `py:module` objects, so no module index page exists.
+    assert!(
+        !ours.join("py-modindex.html").exists(),
+        "py-modindex.html emitted for a project with no Python modules"
+    );
     std::fs::remove_dir_all(ours).ok();
 }
 
