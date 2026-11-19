@@ -1,0 +1,109 @@
+name: release
+
+# Cross-platform release artifacts for scribe. Mirrors scripts/release.sh.
+# Linux uses musl for fully-static binaries; macOS produces a universal
+# (x86_64 + aarch64) binary via lipo; Windows uses the MSVC target.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  PKG: scribe-cli
+  BIN: scribe
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build static binary
+        run: cross build --release -p "$PKG" --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p out/$BIN-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/$BIN out/$BIN-${{ matrix.target }}/
+          tar -C out -czf $BIN-${{ matrix.target }}.tar.gz $BIN-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.BIN }}-${{ matrix.target }}.tar.gz
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build both slices
+        run: |
+          cargo build --release -p "$PKG" --target x86_64-apple-darwin
+          cargo build --release -p "$PKG" --target aarch64-apple-darwin
+      - name: Fatten universal binary
+        run: |
+          mkdir -p out/$BIN-macos-universal
+          lipo -create \
+            target/x86_64-apple-darwin/release/$BIN \
+            target/aarch64-apple-darwin/release/$BIN \
+            -output out/$BIN-macos-universal/$BIN
+          tar -C out -czf $BIN-macos-universal.tar.gz $BIN-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: ${{ env.BIN }}-macos-universal.tar.gz
+
+  windows:
+    name: Windows x86_64 (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build --release -p "$env:PKG" --target x86_64-pc-windows-msvc
+        shell: pwsh
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/${env:BIN}.exe" `
+            -DestinationPath "${env:BIN}-x86_64-pc-windows-msvc.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
+          path: ${{ env.BIN }}-x86_64-pc-windows-msvc.zip
+
+  publish:
+    name: Publish release
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
