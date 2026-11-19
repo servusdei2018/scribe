@@ -59,6 +59,13 @@ fn toctree_warning_lines(toctrees: &ToctreeCollection, source_dir: &std::path::P
     // to the oracle's after the harness normalizes absolute paths.
     let base = source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
     for warning in &toctrees.warnings {
+        if warning.code == "scribe::config::master_doc_fallback" {
+            // Upstream logs this from config validation with no source
+            // location and no warning code; the message already carries the
+            // `WARNING: ` prefix, so emit it verbatim.
+            out.push(warning.message.clone());
+            continue;
+        }
         let (canonical, message, docname) = match warning.code {
             "scribe::toc::not_included" => {
                 // Upstream's exact text has no trailing `: <docname>`.

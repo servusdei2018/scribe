@@ -130,10 +130,16 @@ impl Decl {
 }
 
 /// Primitive C type keywords (rendered as `desc_sig_keyword_type`).
+///
+/// These mirror upstream's `sphinx.domains.c._ids._keywords` (C language
+/// keywords) plus the `c_extra_keywords` (`_macro_keywords`) that Sphinx treats
+/// as type keywords. Standard-library *typedefs* such as `size_t` are **not**
+/// keywords: upstream parses them as named types and emits a `c:identifier`
+/// pending xref (see `ASTIdentifier.describe_signature(mode='markType')`), so
+/// they must not appear here.
 pub const PRIMITIVE_TYPES: &[&str] = &[
     "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool",
-    "bool", "size_t", "ptrdiff_t", "wchar_t", "int8_t", "uint8_t", "int16_t", "uint16_t",
-    "int32_t", "uint32_t", "int64_t", "uint64_t", "intptr_t", "uintptr_t", "FILE", "va_list",
+    "bool",
 ];
 
 /// Declaration specifiers rendered as `desc_sig_keyword`.
@@ -347,13 +353,17 @@ fn type_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {
                 out.push(SigToken::Keyword(token.text.clone()));
             }
             TokKind::Word => {
-                // A named type; upstream renders it as a type xref.
+                // A named type; upstream renders it via
+                // `ASTIdentifier.describe_signature(mode='markType')` as a
+                // `pending_xref(reftype='identifier')` wrapping a
+                // `desc_sig_name`. Standard-library typedefs (`size_t`, ...)
+                // therefore produce `c:identifier` missing-reference warnings.
                 let prev_is_sep = index > 0 && matches!(toks[index - 1].text.as_str(), "::" | "." | "->");
                 if prev_is_sep {
                     out.push(SigToken::Punctuation(toks[index - 1].text.clone()));
-                    out.push(SigToken::reference(domain, token.text.clone(), "type", "c-type"));
+                    out.push(SigToken::reference(domain, token.text.clone(), "identifier", "c-identifier"));
                 } else {
-                    out.push(SigToken::reference(domain, token.text.clone(), "type", "c-type"));
+                    out.push(SigToken::reference(domain, token.text.clone(), "identifier", "c-identifier"));
                 }
             }
             TokKind::Punct => match token.text.as_str() {

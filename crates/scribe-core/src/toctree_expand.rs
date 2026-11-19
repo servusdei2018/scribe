@@ -220,9 +220,18 @@ fn make_entry(
     } else {
         collect_children(docname, env, collection, includehidden, visiting)
     };
+    // When the toctree entry has no explicit title, upstream copies the target
+    // document's title *nodes* (filtered by `SphinxContentsFilter`) into the
+    // reference instead of a plain-text label. Preserve inline markup such as
+    // `:mod:` roles so exported doctrees match the oracle.
+    let rich_children = if entry.title.is_empty() && !external {
+        rich_title_children(env, docname, document)
+    } else {
+        None
+    };
     build_list_item(
         document, &title, &refuri, "", !external, secnumber, &children, 1, maxdepth, titlesonly,
-        false,
+        false, rich_children,
     )
 }
 
@@ -242,6 +251,7 @@ fn build_list_item(
     maxdepth: i64,
     titlesonly: bool,
     literal_title: bool,
+    rich_children: Option<Vec<NodeId>>,
 ) -> Result<NodeId, AstError> {
     let item = document.add_node(Node::new(NodeKind::ListItem), None)?;
     let para = document.add_node(Node::new(NodeKind::CompactParagraph), None)?;
@@ -253,7 +263,9 @@ fn build_list_item(
         reference.attrs.insert("secnumber", AttributeValue::Str(number));
     }
     let reference_id = document.add_node(reference, None)?;
-    if literal_title {
+    if let Some(children) = rich_children {
+        document.replace_children(reference_id, children)?;
+    } else if literal_title {
         // Domain-object signatures are rendered as `<literal>` (upstream adds
         // `nodes.literal` as the sole child of the ToC reference).
         let literal_id = document.add_node(Node::new(NodeKind::Literal), None)?;
@@ -285,6 +297,7 @@ fn build_list_item(
                 maxdepth,
                 titlesonly,
                 child.literal_title,
+                None,
             )?);
         }
         let nested = document.add_node(Node::new(NodeKind::BulletList), None)?;
@@ -566,15 +579,19 @@ fn doc_title(env: &BuildEnvironment, docname: &str) -> Option<String> {
 }
 
 fn find_first_title(document: &Document, id: NodeId, counter: &mut usize) -> Option<String> {
+    find_first_title_id(document, id, counter)
+        .map(|title_id| document.get(title_id).map(|title| title.astext(document)).unwrap_or_default())
+        .filter(|text| !text.is_empty())
+}
+
+/// Locate the node id of the document's first (section) title, mirroring the
+/// traversal in [`find_first_title`] so rich ToC entries copy exactly the same
+/// node that supplies the plain-text title.
+fn find_first_title_id(document: &Document, id: NodeId, counter: &mut usize) -> Option<NodeId> {
     let node = document.get(id).ok()?;
-    if node.kind == NodeKind::Title {
-        let text = node.astext(document);
-        if !text.is_empty() {
-            return Some(text);
-        }
+    if node.kind == NodeKind::Title && !node.astext(document).is_empty() {
+        return Some(id);
     }
-    // Avoid treating nested section titles as the document title: only walk
-    // the first section chain.
     if node.kind == NodeKind::Section && *counter > 0 {
         return None;
     }
@@ -582,11 +599,79 @@ fn find_first_title(document: &Document, id: NodeId, counter: &mut usize) -> Opt
         *counter += 1;
     }
     for child in &node.children {
-        if let Some(title) = find_first_title(document, *child, counter) {
+        if let Some(title) = find_first_title_id(document, *child, counter) {
             return Some(title);
         }
     }
     None
+}
+
+/// Clone the children of a target document's title into the document whose
+/// ToC is being expanded, applying Sphinx's `SphinxContentsFilter`:
+/// `reference` / `target` / `problematic` nodes are unwrapped (their children
+/// are kept), footnote and citation references are dropped, and `image` nodes
+/// contribute their `alt` text. This is what makes a `:mod:`-role fragment in
+/// a title survive as `<literal classes="xref py py-mod">` in a ToC link.
+fn clone_title_contents(
+    src: &Document,
+    src_id: NodeId,
+    dst: &mut Document,
+) -> Result<Vec<NodeId>, AstError> {
+    let Ok(node) = src.get(src_id) else {
+        return Ok(Vec::new());
+    };
+    match node.kind {
+        NodeKind::Reference | NodeKind::Target | NodeKind::Problematic | NodeKind::PendingXref => {
+            let mut out = Vec::new();
+            for &child in &node.children {
+                out.extend(clone_title_contents(src, child, dst)?);
+            }
+            Ok(out)
+        }
+        NodeKind::FootnoteReference | NodeKind::CitationReference => Ok(Vec::new()),
+        NodeKind::Image => {
+            let alt = node.attrs.get_str("alt").ok().flatten().unwrap_or("").to_owned();
+            if alt.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![dst.new_text(alt, None)?])
+            }
+        }
+        _ => {
+            let mut copy = node.clone();
+            copy.children.clear();
+            let new_id = dst.add_node(copy, None)?;
+            let children = node.children.clone();
+            let cloned = {
+                let mut all = Vec::new();
+                for child in children {
+                    all.extend(clone_title_contents(src, child, dst)?);
+                }
+                all
+            };
+            dst.get_mut(new_id)?.children = cloned;
+            Ok(vec![new_id])
+        }
+    }
+}
+
+/// Build the rich content for a ToC reference to `docname`, or `None` when the
+/// target has no discoverable title (in which case the caller falls back to a
+/// plain-text label).
+fn rich_title_children(
+    env: &BuildEnvironment,
+    docname: &str,
+    dst: &mut Document,
+) -> Option<Vec<NodeId>> {
+    let src = env.get_doctree(docname)?;
+    let mut counter = 0usize;
+    let title_id = find_first_title_id(src, src.root, &mut counter)?;
+    let title = src.get(title_id).ok()?;
+    let mut out = Vec::new();
+    for &child in &title.children {
+        out.extend(clone_title_contents(src, child, dst).ok()?);
+    }
+    Some(out)
 }
 
 fn number_attr(collection: &ToctreeCollection, docname: &str, anchor: &str) -> Option<String> {

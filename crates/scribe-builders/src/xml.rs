@@ -74,6 +74,27 @@ enum RenderMode {
     PseudoXml,
 }
 
+/// Remove `highlightlang` nodes before exporting the doctree.
+///
+/// Upstream's `highlight` directive inserts an `addnodes.highlightlang` marker,
+/// but `HighlightLanguageTransform` (post priority 400) consumes it — applying
+/// the language to following literal blocks and removing the node from the
+/// doctree — before any writing builder runs. Scribe applies the language at
+/// parse time (via the document's `__highlight_*` seam), so the marker is dead
+/// weight; dropping it here keeps exported doctrees byte-comparable with the
+/// oracle. HTML translators ignore the node, so only the XML/pseudo-XML export
+/// path needs the cleanup.
+fn remove_highlightlang_nodes(document: &mut Document) {
+    let ids: Vec<NodeId> = document
+        .preorder_ids()
+        .into_iter()
+        .filter(|&id| document.get(id).is_ok_and(|node| node.kind == NodeKind::Highlightlang))
+        .collect();
+    for id in ids {
+        let _ = document.remove_node(id);
+    }
+}
+
 fn build_docs(
     options: &BuildOptions,
     config: &Config,
@@ -105,6 +126,7 @@ fn build_docs(
             if let Err(error) = normalize_xref_literals(document) {
                 warnings.push(format!("{docname}: xref literal normalization failed: {error}"));
             }
+            remove_highlightlang_nodes(document);
         }
     }
 

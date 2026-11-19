@@ -605,7 +605,6 @@ pub fn collect_toctrees_with_sources(
     config: &scribe_config::Config,
     sources: &BTreeMap<String, Arc<String>>,
 ) -> ToctreeCollection {
-    let root = config.master_doc().to_owned();
     let found: BTreeSet<String> = env.found_docs.keys().cloned().collect();
     let spec = env.glob_to_spec();
     let suffixes: Vec<String> = config
@@ -619,6 +618,24 @@ pub fn collect_toctrees_with_sources(
         .collect();
 
     let mut warnings = Vec::new();
+
+    // Mirror upstream's `sphinx.config.check_master_doc`: Sphinx 2.0 changed
+    // the default master document from `contents` to `index`. When a project
+    // still has `contents.rst` but no `index.rst`, upstream logs a warning and
+    // falls back to `contents` as the root document. Without this fallback a
+    // legacy `contents.rst` tree has no root and every document is reported as
+    // `toc.not_included` — a large false-positive warning divergence.
+    let mut root = config.master_doc().to_owned();
+    if root == "index" && !found.contains("index") && found.contains("contents") {
+        root = "contents".to_owned();
+        warnings.push(ToctreeWarning::new(
+            "scribe::config::master_doc_fallback",
+            "WARNING: Sphinx now uses \"index\" as the master document by default. To keep pre-2.0 behaviour, set \"master_doc = 'contents'\".",
+            "set master_doc explicitly to silence this warning",
+            None,
+            "",
+        ));
+    }
     let mut toctrees = Vec::new();
     let mut writebacks: Vec<(String, NodeId, Vec<String>)> = Vec::new();
 

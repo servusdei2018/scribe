@@ -289,7 +289,10 @@ pub fn run_check(args: CheckArgs) -> Result<CheckReport> {
     //    is the conventional upstream warning.
     let toctrees = scribe_core::collect_toctrees_with_sources(&mut env, &check_config, &sources);
     for warning in &toctrees.warnings {
-        let error = warning.code != "scribe::toc::not_included";
+        // Both an unreachable document and the legacy `contents.rst` master
+        // document fallback are conventional upstream warnings, not errors.
+        let error = warning.code != "scribe::toc::not_included"
+            && warning.code != "scribe::config::master_doc_fallback";
         push(&mut report, error, warning.code.to_owned(), Some(warning.source_name.clone()), warning.message.clone());
     }
 

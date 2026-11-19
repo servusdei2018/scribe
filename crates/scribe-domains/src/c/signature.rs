@@ -247,6 +247,11 @@ fn build_signature_into(
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "c".to_owned()]);
+        // Upstream stamps `_toc_name` on indexable object signatures; the
+        // TocTreeCollector uses it for the local ToC `literal()` label. The
+        // C domain wraps `desc_name` inside `desc_signature_line`, so the
+        // generic `desc_name` fallback in toctree expansion cannot see it.
+        node.attrs.set_str("_toc_name", decl.short_name());
     }
     let line = builder.add(NodeKind::DescSignatureLine, signature_id)?;
     if let Ok(node) = builder.doc.get_mut(line) {
