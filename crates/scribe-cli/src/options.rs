@@ -403,9 +403,233 @@ impl TryFrom<BuildArgs> for BuildOptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 31 process-tooling argument models
+// ---------------------------------------------------------------------------
+
+/// Clap-facing arguments for `scribe quickstart`.
+///
+/// Mirrors the frequently used flags of upstream `sphinx-quickstart`. In
+/// `--batch` mode every value must come from a flag (interactive prompts are
+/// skipped); without it the command asks for missing values on stdout/stdin.
+#[derive(Debug, Args)]
+pub struct QuickstartArgs {
+    /// Directory in which to create the project.
+    #[arg(value_name = "PATH", default_value = ".")]
+    pub path: PathBuf,
+
+    /// Non-interactive mode: use flag values and defaults, ask nothing.
+    #[arg(long = "batch")]
+    pub batch: bool,
+
+    /// Suppress prompts and status messages.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Overwrite existing project files.
+    #[arg(long = "force")]
+    pub force: bool,
+
+    /// Project name.
+    #[arg(short = 'p', long = "project", value_name = "NAME")]
+    pub project: Option<String>,
+
+    /// Author name(s).
+    #[arg(short = 'a', long = "author", value_name = "AUTHOR")]
+    pub author: Option<String>,
+
+    /// Project version / release.
+    #[arg(short = 'v', long = "release", visible_alias = "version", value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Source directory (relative to PATH).
+    #[arg(long = "source-dir", value_name = "PATH")]
+    pub source_dir: Option<PathBuf>,
+
+    /// Build directory (relative to PATH).
+    #[arg(long = "build-dir", value_name = "PATH")]
+    pub build_dir: Option<PathBuf>,
+
+    /// Master document name (without suffix).
+    #[arg(long = "master", value_name = "DOCNAME")]
+    pub master_doc: Option<String>,
+
+    /// Source file suffix, e.g. `.rst` or `.md`.
+    #[arg(long = "suffix", value_name = "SUFFIX")]
+    pub source_suffix: Option<String>,
+
+    /// Comma-separated list of Sphinx extensions.
+    #[arg(long = "extensions", value_name = "EXTENSIONS")]
+    pub extensions: Option<String>,
+}
+
+/// Validated, clap-independent quickstart inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickstartOptions {
+    /// Project root directory.
+    pub path: PathBuf,
+    /// Non-interactive mode.
+    pub batch: bool,
+    /// Suppress prompts and status messages.
+    pub quiet: bool,
+    /// Overwrite existing files.
+    pub force: bool,
+    /// Project name.
+    pub project: String,
+    /// Author name(s).
+    pub author: String,
+    /// Version / release.
+    pub version: String,
+    /// Source directory relative to the project root.
+    pub source_dir: PathBuf,
+    /// Build directory relative to the project root.
+    pub build_dir: PathBuf,
+    /// Master document name without suffix.
+    pub master_doc: String,
+    /// Source file suffix including the leading dot.
+    pub source_suffix: String,
+    /// Extension module names.
+    pub extensions: Vec<String>,
+}
+
+impl QuickstartOptions {
+    /// Build options from parsed arguments, filling in upstream defaults for
+    /// every value the caller did not supply.
+    pub fn from_args(args: QuickstartArgs) -> Self {
+        Self {
+            path: args.path,
+            batch: args.batch,
+            quiet: args.quiet,
+            force: args.force,
+            project: args.project.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "Project name not set".to_owned()),
+            author: args.author.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "Author name not set".to_owned()),
+            version: args.version.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "0.1".to_owned()),
+            source_dir: args.source_dir.unwrap_or_else(|| PathBuf::from("source")),
+            build_dir: args.build_dir.unwrap_or_else(|| PathBuf::from("build")),
+            master_doc: args.master_doc.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "index".to_owned()),
+            source_suffix: normalize_suffix(
+                &args.source_suffix.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| ".rst".to_owned()),
+            ),
+            extensions: args
+                .extensions
+                .map(|raw| raw.split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Reject values that would generate unusable projects.
+    pub fn validate(&self) -> std::result::Result<(), Report> {
+        if self.project.trim().is_empty() {
+            return Err(Report::new(InvalidQuickstartValue {
+                field: "project",
+                reason: "the project name must not be empty",
+            }));
+        }
+        if self.master_doc.trim().is_empty() || self.master_doc.contains('/') || self.master_doc.contains('\\') {
+            return Err(Report::new(InvalidQuickstartValue {
+                field: "master",
+                reason: "the master document must be a single path component",
+            }));
+        }
+        if !self.source_suffix.starts_with('.') || self.source_suffix.len() < 2 {
+            return Err(Report::new(InvalidQuickstartValue {
+                field: "suffix",
+                reason: "the source suffix must start with `.` and have at least one character",
+            }));
+        }
+        for path in [&self.source_dir, &self.build_dir] {
+            if path.as_os_str().is_empty() {
+                return Err(Report::new(InvalidQuickstartValue {
+                    field: "directory",
+                    reason: "source and build directories must not be empty",
+                }));
+            }
+        }
+        if self.source_dir == self.build_dir {
+            return Err(Report::new(InvalidQuickstartValue {
+                field: "build-dir",
+                reason: "the source and build directories must differ",
+            }));
+        }
+        Ok(())
+    }
+}
+
+fn normalize_suffix(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('.') {
+        trimmed.to_owned()
+    } else {
+        format!(".{trimmed}")
+    }
+}
+
+/// Diagnostic for an invalid quickstart value.
+#[derive(Debug, Error, miette::Diagnostic)]
+#[error("invalid quickstart value for `{field}`: {reason}")]
+#[diagnostic(
+    code(scribe::cli::invalid_quickstart_value),
+    help("Correct the value and rerun `scribe quickstart --batch`.")
+)]
+pub struct InvalidQuickstartValue {
+    /// Field that failed validation.
+    pub field: &'static str,
+    /// Explanation of the rejection.
+    pub reason: &'static str,
+}
+
+/// Clap-facing arguments for `scribe clean`.
+#[derive(Debug, Args)]
+pub struct CleanArgs {
+    /// Project directory to clean.
+    #[arg(value_name = "PATH", default_value = ".")]
+    pub path: PathBuf,
+
+    /// Print the targets that would be removed without deleting anything.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Configuration directory (defaults to PATH).
+    #[arg(short = 'c', long = "conf-dir", value_name = "PATH")]
+    pub conf_dir: Option<PathBuf>,
+
+    /// Additional build/output directory to remove (relative to PATH).
+    #[arg(short = 'o', long = "build-dir", value_name = "PATH")]
+    pub build_dir: Vec<PathBuf>,
+}
+
+/// Clap-facing arguments for `scribe check`.
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Documentation source directory to inspect.
+    #[arg(value_name = "PATH", default_value = ".")]
+    pub path: PathBuf,
+
+    /// Configuration directory (defaults to PATH).
+    #[arg(short = 'c', long = "conf-dir", value_name = "PATH")]
+    pub conf_dir: Option<PathBuf>,
+
+    /// Turn warnings into errors (non-zero exit status).
+    #[arg(short = 'W', long = "fail-on-warning")]
+    pub warningiserror: bool,
+
+    /// Accepted for compatibility with `scribe build` / `sphinx-build`;
+    /// upstream treats it as a no-op that does not change the exit status.
+    #[arg(long = "keep-going")]
+    pub keep_going: bool,
+
+    /// Report all missing cross-reference targets.
+    #[arg(short = 'n', long = "nitpicky")]
+    pub nitpicky: bool,
+
+    /// Suppress status output; diagnostics are still printed.
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BuildOptions, ConfigOverride, Jobs, ScribeCliError};
+    use super::{BuildOptions, ConfigOverride, Jobs, QuickstartOptions, ScribeCliError};
     use std::num::NonZeroUsize;
 
     #[test]
@@ -474,5 +698,74 @@ mod tests {
         let options = BuildOptions::try_from(args).unwrap();
         assert_eq!(options.doctree_dir(), std::path::PathBuf::from("out/.doctrees"));
         assert_eq!(options.conf_dir(), Some(std::path::Path::new("src")));
+    }
+
+    #[test]
+    fn quickstart_defaults_match_upstream_shape() {
+        let options = QuickstartOptions::from_args(super::QuickstartArgs {
+            path: "demo".into(),
+            batch: true,
+            quiet: true,
+            force: false,
+            project: None,
+            author: None,
+            version: None,
+            source_dir: None,
+            build_dir: None,
+            master_doc: None,
+            source_suffix: None,
+            extensions: None,
+        });
+        assert_eq!(options.path, std::path::PathBuf::from("demo"));
+        assert_eq!(options.project, "Project name not set");
+        assert_eq!(options.source_dir, std::path::PathBuf::from("source"));
+        assert_eq!(options.build_dir, std::path::PathBuf::from("build"));
+        assert_eq!(options.source_suffix, ".rst");
+        assert_eq!(options.master_doc, "index");
+        assert!(options.extensions.is_empty());
+        options.validate().unwrap();
+    }
+
+    #[test]
+    fn quickstart_normalizes_suffix_and_splits_extensions() {
+        let options = QuickstartOptions::from_args(super::QuickstartArgs {
+            path: "demo".into(),
+            batch: true,
+            quiet: true,
+            force: false,
+            project: Some("Demo".to_owned()),
+            author: Some("Ada".to_owned()),
+            version: Some("1.0".to_owned()),
+            source_dir: None,
+            build_dir: None,
+            master_doc: None,
+            source_suffix: Some("md".to_owned()),
+            extensions: Some("sphinx.ext.todo, sphinx.ext.viewcode".to_owned()),
+        });
+        assert_eq!(options.source_suffix, ".md");
+        assert_eq!(options.extensions, vec!["sphinx.ext.todo", "sphinx.ext.viewcode"]);
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn quickstart_rejects_invalid_master_and_equal_dirs() {
+        let mut options = QuickstartOptions::from_args(super::QuickstartArgs {
+            path: "demo".into(),
+            batch: true,
+            quiet: true,
+            force: false,
+            project: None,
+            author: None,
+            version: None,
+            source_dir: None,
+            build_dir: None,
+            master_doc: Some("a/b".to_owned()),
+            source_suffix: None,
+            extensions: None,
+        });
+        assert!(options.validate().is_err());
+        options.master_doc = "index".to_owned();
+        options.build_dir = options.source_dir.clone();
+        assert!(options.validate().is_err());
     }
 }

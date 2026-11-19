@@ -6,15 +6,24 @@
 //! after validation and emits a structured `miette` diagnostic; it never
 //! panics on user input.
 
+pub mod check;
+pub mod clean;
 pub mod options;
+pub mod quickstart;
+pub mod serve;
 
+pub use check::{CheckDiagnostic, CheckFailed, CheckReport};
+pub use clean::{CleanError, CleanReport, CleanTarget};
 pub use options::{
-    BuildArgs, BuildOptions, ColorChoice, ConfigOverride, InvalidBuildOptions, Jobs,
-    MissingBuildArgument, ScribeCliError,
+    BuildArgs, BuildOptions, CheckArgs, CleanArgs, ColorChoice, ConfigOverride,
+    InvalidBuildOptions, Jobs, MissingBuildArgument, QuickstartArgs, QuickstartOptions,
+    ScribeCliError,
 };
+pub use quickstart::{QuickstartError, QuickstartReport};
+pub use serve::ServeArgs;
 
 use clap::{Parser, Subcommand};
-use miette::{Diagnostic, IntoDiagnostic, Report, Result, WrapErr};
+use miette::{Diagnostic, Report, Result};
 use scribe_config::{load_config_with, Config, ConfigWarning, LoadRequest};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,26 +54,19 @@ pub enum Command {
     /// Build documentation (mirrors `sphinx-build`).
     Build(BuildArgs),
 
-    /// Print a quickstart banner (scaffolding lands in a later phase).
-    Quickstart {
-        /// Target directory for the new project.
-        #[arg(value_name = "PATH", default_value = ".")]
-        path: std::path::PathBuf,
-    },
+    /// Scaffold a new documentation project.
+    Quickstart(QuickstartArgs),
 
-    /// Remove the local `.scribe-cache` directory, if present.
-    Clean {
-        /// Directory to clean.
-        #[arg(value_name = "PATH", default_value = ".")]
-        path: std::path::PathBuf,
-    },
+    /// Safely remove generated build output and the doctree cache.
+    Clean(CleanArgs),
 
-    /// Report discovered source files (discovery lands in Phase 08).
-    Check {
-        /// Directory to inspect.
-        #[arg(value_name = "PATH", default_value = ".")]
-        path: std::path::PathBuf,
-    },
+    /// Validate configuration, sources, toctrees and cross-references.
+    Check(CheckArgs),
+
+    /// Serve documentation with incremental rebuilds and live reload
+    /// (alias: `watch`).
+    #[command(visible_alias = "watch")]
+    Serve(serve::ServeArgs),
 }
 
 /// Diagnostic emitted when a builder is requested before builders exist.
@@ -77,6 +79,114 @@ pub enum Command {
 pub struct UnimplementedBuilder {
     /// Builder requested on the command line.
     pub builder: String,
+}
+
+/// Diagnostic emitted when the selected builder fails.
+#[derive(Debug, Error, Diagnostic)]
+#[error("HTML builder failed for builder `{builder}`")]
+#[diagnostic(
+    code(scribe::builder::failed),
+    help("check the source directory, configuration and reported warnings")
+)]
+pub struct BuilderFailed {
+    /// Builder that failed.
+    pub builder: String,
+    /// Underlying builder error.
+    #[source]
+    pub source: scribe_builders::HtmlError,
+}
+
+/// Diagnostic emitted when the LaTeX/PDF builder fails.
+#[derive(Debug, Error, Diagnostic)]
+#[error("LaTeX builder failed for builder `{builder}`")]
+#[diagnostic(
+    code(scribe::builder::latex_failed),
+    help("check the source directory, configuration and reported warnings")
+)]
+pub struct LatexBuilderFailed {
+    /// Builder that failed.
+    pub builder: String,
+    /// Underlying builder error.
+    #[source]
+    pub source: scribe_builders::LatexError,
+}
+
+/// Diagnostic emitted when one of the Phase 24 output builders fails.
+#[derive(Debug, Error, Diagnostic)]
+#[error("output builder `{builder}` failed: {source}")]
+#[diagnostic(
+    code(scribe::builder::output_failed),
+    help("check the source directory, configuration and reported warnings")
+)]
+pub struct OutputBuilderFailed {
+    /// Builder that failed.
+    pub builder: String,
+    /// Underlying builder error.
+    #[source]
+    pub source: scribe_builders::OutputError,
+}
+
+/// Diagnostic emitted when the linkcheck builder reports broken links with
+/// `-W` enabled. Upstream sets a non-zero status code unconditionally; scribe
+/// gates it on `-W` per the Phase 25 contract (see `ARCHITECTURE.md` §31).
+#[derive(Debug, Error, Diagnostic)]
+#[error("linkcheck: {broken} broken link(s), {timeouts} timeout(s)")]
+#[diagnostic(
+    code(scribe::linkcheck::broken_links),
+    help("inspect output.txt and output.json in the output directory")
+)]
+pub struct LinkcheckBrokenLinks {
+    /// Number of broken links.
+    pub broken: u32,
+    /// Number of timed-out links.
+    pub timeouts: u32,
+    /// Directory containing the detailed report.
+    pub output: std::path::PathBuf,
+}
+
+/// Diagnostic emitted when `-W` is active and a build produced warnings.
+///
+/// Upstream counts only warnings that survive `suppress_warnings`, and
+/// `--keep-going` is accepted for flag compatibility without changing the
+/// final exit status (confirmed against `sphinx-build 9.3.0`).
+#[derive(Debug, Error, Diagnostic)]
+#[error("build finished with problems, {count} warning(s) (with warnings treated as errors)")]
+#[diagnostic(
+    code(scribe::build::warnings_as_errors),
+    help("fix the reported warnings or extend `suppress_warnings`; --keep-going does not change the exit status")
+)]
+pub struct WarningsAsErrors {
+    /// Number of unsuppressed warnings that escalated to errors.
+    pub count: usize,
+    /// Whether `--keep-going` was requested (informational).
+    pub keep_going: bool,
+}
+
+/// Diagnostic emitted when the doctest builder itself fails.
+#[derive(Debug, Error, Diagnostic)]
+#[error("doctest builder failed: {source}")]
+#[diagnostic(
+    code(scribe::builder::doctest_failed),
+    help("check the source directory, configuration and reported warnings")
+)]
+pub struct DoctestFailed {
+    /// Underlying doctest builder error.
+    #[source]
+    pub source: scribe_builders::DoctestError,
+}
+
+/// Diagnostic emitted when one or more executed doctests fail.
+#[derive(Debug, Error, Diagnostic)]
+#[error("doctest: {failures} failure(s); see {}", .output.display())]
+#[diagnostic(
+    code(scribe::doctest::failed),
+    help("inspect output.txt for the exact expected/got diff")
+)]
+pub struct DoctestTestsFailed {
+    /// Number of failed examples (tests + setup + cleanup).
+    pub failures: u32,
+    /// Path of the detailed report.
+    pub output: std::path::PathBuf,
 }
 
 /// Diagnostic for a configuration file that could not be loaded.
@@ -94,18 +204,6 @@ pub struct ConfigLoadFailed {
     pub source: scribe_config::ConfigError,
 }
 
-/// Diagnostic for subcommands that are still placeholders.
-#[derive(Debug, Error, Diagnostic)]
-#[error("`scribe {subcommand}` is not implemented yet")]
-#[diagnostic(
-    code(scribe::not_implemented),
-    help("This subcommand is a Phase 01 placeholder with deterministic, non-panicking behaviour.")
-)]
-pub struct NotImplemented {
-    /// Name of the placeholder subcommand.
-    pub subcommand: &'static str,
-}
-
 /// Parse process arguments and execute the selected subcommand.
 pub fn run() -> Result<()> {
     execute(Cli::parse())
@@ -115,9 +213,10 @@ pub fn run() -> Result<()> {
 pub fn execute(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Build(args) => run_build(args),
-        Command::Quickstart { path } => run_quickstart(&path),
-        Command::Clean { path } => run_clean(&path),
-        Command::Check { path } => run_check(&path),
+        Command::Quickstart(args) => quickstart::run_quickstart(args).map(|_| ()),
+        Command::Clean(args) => clean::run_clean(args).map(|_| ()),
+        Command::Check(args) => check::run_check(args).map(|_| ()),
+        Command::Serve(args) => serve::run_serve(args),
     }
 }
 
@@ -145,9 +244,357 @@ fn run_build(args: BuildArgs) -> Result<()> {
         print_config_summary(&config, &warnings);
     }
 
+    // HTML-family builders share the Phase 17 pipeline (Phase 19 adds the
+    // alternate flavors). Unknown builders keep the Phase 01 diagnostic.
+    if options.builder == "doctest" {
+        return run_doctest_build(&options, &config);
+    }
+
+    if options.builder == "gettext" {
+        return run_gettext_build(&options, &config);
+    }
+
+    if options.builder == "linkcheck" {
+        return run_linkcheck_build(&options, &config);
+    }
+
+    if matches!(options.builder.as_str(), "xml" | "pseudoxml" | "changes") {
+        return run_doc_build(&options, &config);
+    }
+
+    if matches!(
+        options.builder.as_str(),
+        "html" | "dirhtml" | "singlehtml" | "json" | "htmlhelp" | "qthelp" | "devhelp"
+    ) {
+        return run_html_build(&options, &config);
+    }
+
+    if matches!(options.builder.as_str(), "latex" | "pdf") {
+        return run_latex_build(&options, &config);
+    }
+
+    if matches!(
+        options.builder.as_str(),
+        "epub" | "epub3" | "man" | "texinfo" | "text"
+    ) {
+        return run_output_build(&options, &config);
+    }
+
     Err(Report::new(UnimplementedBuilder {
         builder: options.builder.clone(),
     }))
+}
+
+/// Print the warnings that survive `suppress_warnings` and apply `-W` exit
+/// semantics. Shared by every builder so `build` and `check` behave alike.
+fn finish_build_warnings(options: &BuildOptions, config: &Config, warnings: &[String]) -> Result<()> {
+    let patterns = config.get_strings("suppress_warnings").unwrap_or_default();
+    let visible: Vec<&String> = warnings
+        .iter()
+        .filter(|warning| {
+            !scribe_core::is_suppressed(
+                &scribe_core::classify_warning_message(warning),
+                &patterns,
+            )
+        })
+        .collect();
+    if !options.really_quiet {
+        for warning in &visible {
+            eprintln!("scribe: warning: {warning}");
+        }
+    }
+    if options.warningiserror && !visible.is_empty() {
+        return Err(Report::new(WarningsAsErrors {
+            count: visible.len(),
+            keep_going: options.keep_going,
+        }));
+    }
+    Ok(())
+}
+
+fn run_gettext_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(&options.source_dir, config);
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: "gettext".to_owned(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let result = scribe_builders::GettextBuilder::build(&builder_options, config, &mut environment)
+        .map_err(|source| Report::new(OutputBuilderFailed {
+            builder: "gettext".to_owned(),
+            source,
+        }))?;
+    if !options.really_quiet {
+        println!(
+            "scribe: gettext: built {} document(s), wrote {} catalog(s) to {}",
+            result.built_docnames.len(),
+            result.file_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &result.warnings)
+}
+
+fn run_doctest_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(
+        &options.source_dir,
+        config,
+    );
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: "doctest".to_owned(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let result = scribe_builders::DoctestBuilder::build(&builder_options, config, &mut environment)
+        .map_err(|source| Report::new(DoctestFailed { source }))?;
+    if !options.really_quiet {
+        println!(
+            "scribe: doctest: {} test(s), {} failure(s) in tests, {} in setup, {} in cleanup",
+            result.total_tries,
+            result.total_failures,
+            result.setup_failures,
+            result.cleanup_failures
+        );
+        if result.skipped {
+            println!("scribe: doctest: execution skipped (no usable Python interpreter)");
+        }
+    }
+    let failures = result.total_failures + result.setup_failures + result.cleanup_failures;
+    if failures > 0 {
+        return Err(Report::new(DoctestTestsFailed {
+            failures,
+            output: result.output_path,
+        }));
+    }
+    Ok(())
+}
+
+fn run_latex_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(
+        &options.source_dir,
+        config,
+    );
+    let builder_options = scribe_builders::latex::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: options.builder.clone(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+    };
+    let result = scribe_builders::LatexBuilder::build(&builder_options, config, &mut environment)
+        .map_err(|source| Report::new(LatexBuilderFailed {
+            builder: options.builder.clone(),
+            source,
+        }))?;
+
+    if !options.really_quiet {
+        println!(
+            "scribe: built {} LaTeX document(s), wrote {} file(s) to {}",
+            result.built_docnames.len(),
+            result.file_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &result.warnings)
+}
+
+fn run_output_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(&options.source_dir, config);
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: options.builder.clone(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let result = match options.builder.as_str() {
+        "epub" | "epub3" => scribe_builders::EpubBuilder::build(&builder_options, config, &mut environment),
+        "man" => scribe_builders::ManBuilder::build(&builder_options, config, &mut environment),
+        "texinfo" => scribe_builders::TexinfoBuilder::build(&builder_options, config, &mut environment),
+        "text" => scribe_builders::TextBuilder::build(&builder_options, config, &mut environment),
+        other => Err(scribe_builders::OutputError::config(
+            "cli",
+            "builder",
+            format!("unsupported output builder `{other}`"),
+        )),
+    }
+    .map_err(|source| Report::new(OutputBuilderFailed {
+        builder: options.builder.clone(),
+        source,
+    }))?;
+
+    if !options.really_quiet {
+        println!(
+            "scribe: built {} output document(s), wrote {} file(s) to {}",
+            result.built_docnames.len(),
+            result.file_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &result.warnings)
+}
+
+fn run_doc_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(
+        &options.source_dir,
+        config,
+    );
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: options.builder.clone(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let result = match options.builder.as_str() {
+        "xml" => scribe_builders::XmlBuilder::build(&builder_options, config, &mut environment),
+        "pseudoxml" => scribe_builders::PseudoXmlBuilder::build(&builder_options, config, &mut environment),
+        "changes" => scribe_builders::ChangesBuilder::build(&builder_options, config, &mut environment),
+        other => Err(scribe_builders::OutputError::config(
+            "cli",
+            "builder",
+            format!("unsupported document builder `{other}`"),
+        )),
+    }
+    .map_err(|source| Report::new(OutputBuilderFailed {
+        builder: options.builder.clone(),
+        source,
+    }))?;
+
+    if !options.really_quiet {
+        println!(
+            "scribe: built {} document(s), wrote {} file(s) to {}",
+            result.built_docnames.len(),
+            result.file_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &result.warnings)
+}
+
+fn run_linkcheck_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(
+        &options.source_dir,
+        config,
+    );
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: "linkcheck".to_owned(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let report = scribe_builders::LinkcheckBuilder::build(&builder_options, config, &mut environment)
+        .map_err(|source| Report::new(OutputBuilderFailed {
+            builder: "linkcheck".to_owned(),
+            source,
+        }))?;
+
+    if !options.really_quiet {
+        println!(
+            "scribe: linkcheck: {} link(s) checked, {} broken, {} timeout(s); report in {}",
+            report.results.len(),
+            report.broken_count(),
+            report.timeout_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &report.warnings)?;
+    if options.warningiserror && report.has_broken() {
+        return Err(Report::new(LinkcheckBrokenLinks {
+            broken: report.broken_count() as u32,
+            timeouts: report.timeout_count() as u32,
+            output: options.output_dir.clone(),
+        }));
+    }
+    Ok(())
+}
+
+fn run_html_build(options: &BuildOptions, config: &Config) -> Result<()> {
+    let mut environment = scribe_core::BuildEnvironment::with_config(
+        &options.source_dir,
+        config,
+    );
+    let builder_options = scribe_builders::html::BuildOptions {
+        source_dir: options.source_dir.clone(),
+        output_dir: options.output_dir.clone(),
+        builder_name: options.builder.clone(),
+        force_all: options.force_all,
+        freshenv: options.freshenv,
+        doctree_dir: options.doctreedir.clone(),
+        filenames: options.filenames.clone(),
+        worker_count: options.worker_count(),
+        really_quiet: options.really_quiet,
+        bridge: Some(std::sync::Arc::new(
+            scribe_core::InteropBridge::from_config(config, &options.source_dir),
+        )),
+    };
+    let result = match options.builder.as_str() {
+        "dirhtml" => scribe_builders::DirectoryHTMLBuilder::build(&builder_options, config, &mut environment),
+        "singlehtml" => scribe_builders::SingleFileHTMLBuilder::build(&builder_options, config, &mut environment),
+        "json" => scribe_builders::JsonBuilder::build(&builder_options, config, &mut environment),
+        "htmlhelp" => scribe_builders::HtmlHelpBuilder::build(&builder_options, config, &mut environment),
+        "qthelp" => scribe_builders::QtHelpBuilder::build(&builder_options, config, &mut environment),
+        "devhelp" => scribe_builders::DevHelpBuilder::build(&builder_options, config, &mut environment),
+        _ => scribe_builders::html::StandaloneHtmlBuilder::build(&builder_options, config, &mut environment),
+    }
+    .map_err(|source| Report::new(BuilderFailed {
+        builder: options.builder.clone(),
+        source,
+    }))?;
+
+    if !options.really_quiet {
+        println!(
+            "scribe: built {} page(s), wrote {} file(s) to {}",
+            result.built_docnames.len(),
+            result.file_count(),
+            options.output_dir.display()
+        );
+    }
+    finish_build_warnings(options, config, &result.warnings)
 }
 
 /// Assemble `-D`, `-A`, `-n` and `-t` inputs and load the effective config.
@@ -206,37 +653,6 @@ fn print_config_summary(config: &Config, warnings: &[ConfigWarning]) {
     }
 }
 
-fn run_quickstart(path: &Path) -> Result<()> {
-    println!("scribe quickstart (Phase 01 placeholder)");
-    println!("  target directory : {}", path.display());
-    println!("  source suffix    : .rst");
-    println!("  master document  : index");
-    println!("Project scaffolding will be generated in a later phase.");
-    Ok(())
-}
-
-fn run_check(path: &Path) -> Result<()> {
-    println!("No source discovered yet at {}.", path.display());
-    Ok(())
-}
-
-fn run_clean(path: &Path) -> Result<()> {
-    let cache = path.join(".scribe-cache");
-    let exists = cache
-        .try_exists()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("cannot inspect {}", cache.display()))?;
-    if exists {
-        std::fs::remove_dir_all(&cache)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("cannot remove {}", cache.display()))?;
-        println!("Removed cache directory {}", cache.display());
-    } else {
-        println!("No cache directory at {}; nothing to clean.", cache.display());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{build_config, Cli, Command};
@@ -251,6 +667,7 @@ mod tests {
         assert!(names.contains(&"quickstart"));
         assert!(names.contains(&"clean"));
         assert!(names.contains(&"check"));
+        assert!(names.contains(&"serve"));
     }
 
     #[test]
@@ -274,6 +691,16 @@ mod tests {
         assert!(args.color);
         assert!(!args.no_color);
         super::BuildOptions::try_from(args).unwrap();
+    }
+
+    #[test]
+    fn check_parses_w_and_keep_going_flags() {
+        let cli = Cli::try_parse_from(["scribe", "check", "docs", "-W", "--keep-going"]).unwrap();
+        let Command::Check(args) = cli.command else {
+            panic!("expected check subcommand");
+        };
+        assert!(args.warningiserror && args.keep_going);
+        assert_eq!(args.path, PathBuf::from("docs"));
     }
 
     #[test]

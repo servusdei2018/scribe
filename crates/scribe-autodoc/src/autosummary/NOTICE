@@ -1,0 +1,17 @@
+Bundled autosummary stub templates
+==================================
+
+The files whose contents are embedded in `templates.rs` are vendored
+verbatim from the pinned Sphinx oracle checkout:
+
+    sphinx/sphinx/ext/autosummary/templates/autosummary/{base,module,class}.rst
+
+Upstream source: https://github.com/sphinx-doc/sphinx
+License: BSD 3-Clause ("Sphinx License"), Copyright (c) 2007-2026 by the
+Sphinx team. See `sphinx/LICENSE` in the oracle checkout for the full text.
+
+Only the three stub templates are vendored; no Python source is shipped.
+They are rendered by minijinja with the same filter contract as upstream's
+`AutosummaryRenderer` (`escape` = `sphinx.util.rst.escape`, `underline` =
+`title + '\n' + '=' * len(title)`), and the `_()` translation global is the
+identity function for the default English locale.
