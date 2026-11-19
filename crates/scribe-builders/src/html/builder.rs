@@ -366,7 +366,7 @@ pub fn build_with_flavor(
             bridge.register_directives(&directive_registry);
             let resolve_report = resolve_output(&mut output, &directive_registry, &rst_ctx);
             for issue in &resolve_report.unresolved {
-                warnings.push(format!("{docname}: {}", issue.message));
+                warnings.push(issue.warning_message(docname));
                 let _ = events.emit_firstresult("missing-reference", &Event::MissingReference {
                     docname: docname.clone(),
                     target: issue.name.clone(),

@@ -334,6 +334,7 @@ pub fn prepare(
             let mut rst_ctx = RstContext::new(source_dir, Tags::with_tags(std::iter::empty::<String>()));
             rst_ctx.config = Some(Arc::clone(&config_arc));
             rst_ctx.source_name = Some(docname.clone());
+            rst_ctx.source_text = Some(Arc::new(raw));
             rst_ctx.extlinks = Arc::clone(&extlink_roles);
             let mut directive_registry = DirectiveRegistry::builtin();
             register_code_directives(&mut directive_registry);
@@ -344,7 +345,7 @@ pub fn prepare(
             let doc_warnings: Vec<String> = resolve_report
                 .unresolved
                 .iter()
-                .map(|issue| format!("{docname}: {}", issue.message))
+                .map(|issue| issue.warning_message(docname))
                 .collect();
 
             output.document.metadata.docname = Some(docname.clone());

@@ -690,14 +690,19 @@ fn contents(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         node.attrs.set_list("classes", classes);
         node.attrs.set_list("names", vec![crate::names::fully_normalize_name(&title_text)]);
     }
-    let title = ctx.add(NodeKind::Title, id)?;
-    ctx.parse_inline_into(&title_text, title, line)?;
+    // Upstream omits the title entirely for a local ToC without an explicit
+    // argument (docutils `directives.parts.Contents.run`).
+    if !(ctx.flag("local") && ctx.argument(0).is_none()) {
+        let title = ctx.add(NodeKind::Title, id)?;
+        ctx.parse_inline_into(&title_text, title, line)?;
+    }
     let details: BTreeMap<String, String> = ctx
         .raw_options
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     let pending = ctx.add(NodeKind::Pending, id)?;
+    ctx.doc.get_mut(pending)?.attrs.set_str("__directive", "contents");
     ctx.doc
         .get_mut(pending)?
         .attrs
@@ -1421,11 +1426,25 @@ fn list_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
                     .doc
                     .get(cell_id)
                     .map_or_else(|_| Vec::new(), |node| node.children.clone());
+                // Docutils copies `item.children` verbatim into the entry. Any
+                // reference-bearing inline node would lose its identity if the
+                // cell were flattened to plain text (``astext()`` only keeps
+                // the display label, so ``:ref:`Title <target>` `` becomes
+                // ``Title`` and ``[#]_`` becomes ``#``). Preserve the real AST
+                // subtree for nested directives *and* for these reference
+                // nodes so the domain and footnote transforms can link them.
                 let nested = nodes.iter().any(|&node| {
-                    ctx.doc
-                        .subtree_ids(node)
-                        .iter()
-                        .any(|&id| ctx.doc.get(id).is_ok_and(|n| n.kind == NodeKind::Pending))
+                    ctx.doc.subtree_ids(node).iter().any(|&id| {
+                        ctx.doc.get(id).is_ok_and(|n| {
+                            matches!(
+                                n.kind,
+                                NodeKind::Pending
+                                    | NodeKind::PendingXref
+                                    | NodeKind::FootnoteReference
+                                    | NodeKind::CitationReference
+                            )
+                        })
+                    })
                 });
                 if nested {
                     cells.push(DirectiveCell::Nodes(nodes));

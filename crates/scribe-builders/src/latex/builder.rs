@@ -171,7 +171,7 @@ fn build_impl(
         extensions::register_directives(&mut directive_registry, &extensions);
         let resolve_report = resolve_output(&mut output, &directive_registry, &rst_ctx);
         for issue in &resolve_report.unresolved {
-            warnings.push(format!("{docname}: {}", issue.message));
+            warnings.push(issue.warning_message(docname));
         }
         let _ = started; // timing intentionally not embedded (determinism)
 

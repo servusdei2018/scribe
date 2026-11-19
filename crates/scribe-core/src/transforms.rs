@@ -22,7 +22,7 @@
 //! [`TransformReport`] records exactly what ran and what was skipped.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -75,6 +75,8 @@ pub mod priority {
     pub const DOCTEST: u32 = 500;
     /// Docutils `Footnotes` (priority 620).
     pub const FOOTNOTES: u32 = 620;
+    /// Docutils `parts.Contents` (priority 720) — expand `.. contents::`.
+    pub const CONTENTS: u32 = 720;
     /// `sphinx.transforms.SphinxSmartQuotes`.
     pub const SMART_QUOTES: u32 = 750;
     /// `sphinx.transforms.references.SphinxDomains` — Phase 14 seam.
@@ -568,6 +570,7 @@ impl TransformRegistry {
         registry.register_read(DoctestTransform);
         registry.register_read(GlossarySorter);
         registry.register_read(FootnotesTransform);
+        registry.register_read(ContentsTransform);
         registry.register_read(SphinxSmartQuotes);
         registry.register_read(SphinxDomains);
         registry.register_read(DoctreeReadEvent);
@@ -1601,6 +1604,176 @@ impl Transform for GlossarySorter {
             }
         }
         if changed { TransformResult::changed() } else { TransformResult::unchanged() }
+    }
+}
+
+/// Docutils `parts.Contents` (priority 720) — expand the `pending` placeholder
+/// emitted by `.. contents::` into a nested bullet list of section links.
+///
+/// Mirrors `docutils/transforms/parts.py::Contents`: only direct `section`
+/// children of the ToC root are listed; a copy of each title (with citations,
+/// footnotes and images filtered out) becomes the reference text, and the
+/// original section title gets a backlink `refid` to the generated entry.
+#[derive(Debug)]
+pub struct ContentsTransform;
+
+impl Transform for ContentsTransform {
+    fn name(&self) -> &'static str {
+        "Contents"
+    }
+
+    fn default_priority(&self) -> u32 {
+        priority::CONTENTS
+    }
+
+    fn apply(&self, document: &mut Document, _ctx: &TransformContext<'_>) -> TransformResult {
+        let topics: Vec<NodeId> = nodes_of_kind(document, NodeKind::Topic);
+        let mut changed = false;
+        for topic in topics {
+            let pending = document.children(topic).ok().and_then(|children| {
+                children.iter().copied().find(|&id| {
+                    document.get(id).is_ok_and(|node|
+                        node.kind == NodeKind::Pending
+                            && str_attr(node, "__directive") == Some("contents"))
+                })
+            });
+            let Some(pending) = pending else { continue };
+            let details = document.get(pending).ok().and_then(|node| str_attr(node, "__details"))
+                .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(raw).ok())
+                .unwrap_or_default();
+            let depth = details.get("depth").and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            // Upstream assigns the topic an id derived from its implicit name.
+            if document.get(topic).is_ok_and(|node| list_attr(node, "ids").is_empty()) {
+                let name = document.get(topic).ok()
+                    .and_then(|node| list_attr(node, "names").into_iter().next())
+                    .unwrap_or_else(|| "contents".to_owned());
+                let mut used = collect_used_ids(document);
+                let id = if !used.contains(&name) { name } else { fresh_id(document, &mut used) };
+                if let Ok(node) = document.get_mut(topic) {
+                    node.attrs.set_list("ids", vec![id]);
+                }
+            }
+            // The ToC root is the section (or document) containing the topic.
+            // For a local ToC upstream starts at the topic's parent and walks
+            // up to the nearest section/document.
+            let mut root = document.parent(topic).ok().flatten().unwrap_or(document.root);
+            while document.get(root).is_ok_and(|node| {
+                node.kind != NodeKind::Section && node.kind != NodeKind::Document
+            }) {
+                let Some(parent) = document.parent(root).ok().flatten() else { break };
+                root = parent;
+            }
+            let mut used = collect_used_ids(document);
+            let bullet = build_contents(document, root, 1, depth, &mut used);
+            if let Some(bullet) = bullet {
+                let index = document.children(topic).ok().and_then(|children| {
+                    children.iter().position(|&child| child == pending)
+                });
+                if let Some(index) = index {
+                    let _ = document.splice_children(topic, index..index + 1, vec![bullet]);
+                    let _ = document.remove_node(pending);
+                    changed = true;
+                }
+            } else {
+                // No sections: upstream removes the whole topic.
+                let _ = document.remove_node(topic);
+                changed = true;
+            }
+        }
+        if changed { TransformResult::changed() } else { TransformResult::unchanged() }
+    }
+}
+
+/// Recursively build the nested `<bullet_list>` for one ToC root.
+fn build_contents(
+    document: &mut Document,
+    root: NodeId,
+    level: usize,
+    depth: usize,
+    used: &mut BTreeSet<String>,
+) -> Option<NodeId> {
+    let sections: Vec<NodeId> = document.children(root).ok().map(|children| {
+        children.iter().copied().filter(|&id| {
+            document.get(id).is_ok_and(|node| node.kind == NodeKind::Section)
+        }).collect()
+    }).unwrap_or_default();
+    if sections.is_empty() {
+        return None;
+    }
+    let bullet = document.add(NodeKind::BulletList, None).ok()?;
+    for section in sections {
+        let title = document.children(section).ok().and_then(|children| {
+            children.iter().copied().find(|&id| document.get(id).is_ok_and(|n| n.kind == NodeKind::Title))
+        });
+        let Some(title) = title else { continue };
+        let reference = document.add(NodeKind::Reference, None).ok()?;
+        let ref_id = fresh_id(document, used);
+        let target_id = section_first_id(document, section);
+        if let Ok(node) = document.get_mut(reference) {
+            node.attrs.set_str("refid", target_id);
+            node.attrs.set_list("ids", vec![ref_id.clone()]);
+            node.attrs.set_bool("internal", true);
+        }
+        clone_filtered_title(document, title, reference);
+        let paragraph = document.add(NodeKind::Paragraph, None).ok()?;
+        let _ = document.append_child(paragraph, reference);
+        let item = document.add(NodeKind::ListItem, None).ok()?;
+        let _ = document.append_child(item, paragraph);
+        // Upstream `backlinks = 'entry'` by default: point the section title at
+        // the generated table-of-contents entry.
+        if let Ok(node) = document.get_mut(title) {
+            node.attrs.set_str("refid", ref_id);
+        }
+        if level < depth {
+            if let Some(nested) = build_contents(document, section, level + 1, depth, used) {
+                let _ = document.append_child(item, nested);
+            }
+        }
+        let _ = document.append_child(bullet, item);
+    }
+    Some(bullet)
+}
+
+fn section_first_id(document: &Document, section: NodeId) -> String {
+    document.get(section).ok()
+        .and_then(|node| list_attr(node, "ids").into_iter().next())
+        .unwrap_or_default()
+}
+
+/// Copy a section title's children into a ToC reference, dropping
+/// citation/footnote references and unwrapping plain references and targets.
+fn clone_filtered_title(document: &mut Document, title: NodeId, parent: NodeId) {
+    let children = document.children(title).map(|c| c.to_vec()).unwrap_or_default();
+    for child in children {
+        clone_toc_node(document, child, parent);
+    }
+}
+
+fn clone_toc_node(document: &mut Document, id: NodeId, parent: NodeId) {
+    let Ok(node) = document.get(id).cloned() else { return };
+    match node.kind {
+        NodeKind::FootnoteReference | NodeKind::SystemMessage => (),
+        NodeKind::Reference | NodeKind::Target | NodeKind::Problematic => {
+            let children = document.children(id).map(|c| c.to_vec()).unwrap_or_default();
+            for child in children {
+                clone_toc_node(document, child, parent);
+            }
+        }
+        NodeKind::Image => {
+            if let Some(alt) = str_attr(&node, "alt") {
+                let _ = document.new_text(alt.to_owned(), Some(parent));
+            }
+        }
+        _ => {
+            let mut clone = node;
+            clone.children.clear();
+            if let Ok(new_id) = document.add_node(clone, Some(parent)) {
+                for child in document.get(id).map(|n| n.children.clone()).unwrap_or_default() {
+                    clone_toc_node(document, child, new_id);
+                }
+            }
+        }
     }
 }
 

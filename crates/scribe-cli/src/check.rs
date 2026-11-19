@@ -199,7 +199,7 @@ pub fn run_check(args: CheckArgs) -> Result<CheckReport> {
                 false,
                 "scribe::rst::directive",
                 Some(docname.clone()),
-                issue.message.clone(),
+                issue.warning_message(docname),
             );
         }
         output.document.metadata.docname = Some(docname.clone());

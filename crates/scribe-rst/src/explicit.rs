@@ -355,7 +355,12 @@ impl<'a> BlockParser<'a> {
         index: usize,
         rest: &str,
     ) -> RstResult<()> {
-        let mut lines = self.take_body(index, base_indent);
+        // Docutils fixes a footnote/citation's body indentation from the first
+        // indented line after the marker, allowing blank lines in between.
+        // `take_body` stops at the first blank and would leave a genuinely
+        // indented body (e.g. a nested `.. code-block::`) outside the note as a
+        // stray block quote, so use the blank-tolerant directive body reader.
+        let (mut lines, _) = self.take_directive_body(index, base_indent);
         let close = rest.find(']');
         let label = close.map_or("", |pos| &rest[1..pos]);
         let kind = if label.starts_with('#') || label == "*" || label.bytes().all(|b| b.is_ascii_digit()) {

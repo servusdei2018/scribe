@@ -483,6 +483,9 @@ impl ConfigRegistry {
 
             // ---- LaTeX / man / texinfo ----
             computed("latex_documents", default_latex_documents, ConfigType::List, "", "LaTeX document definitions."),
+            entry("latex_toplevel_sectioning", ConfigValue::from("section"),
+                ConfigType::Enum { candidates: &["part", "chapter", "section", "subsection", "subsubsection"] },
+                "", "LaTeX top-level sectioning command."),
             entry("latex_engine", ConfigValue::from("pdflatex"),
                 ConfigType::Enum { candidates: &["pdflatex", "xelatex", "lualatex", "platex", "uplatex"] },
                 "", "LaTeX engine."),

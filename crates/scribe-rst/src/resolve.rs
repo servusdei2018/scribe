@@ -10,6 +10,7 @@
 //! diagnostics and the node is left in place: a partially resolved document is
 //! still usable by later phases and by writers.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
@@ -36,6 +37,11 @@ pub struct ResolveIssue {
     pub message: String,
     /// Stable diagnostic code.
     pub code: &'static str,
+    /// When set, the exact (possibly multi-line) warning text to forward to
+    /// the build log, bypassing the usual `{docname}: {message}` prefix. Used
+    /// for docutils-compatible directive errors such as the `[docutils]`
+    /// invalid-option block.
+    pub raw_message: Option<String>,
     /// Source name used by miette.
     pub source_name: Option<String>,
     /// Source text used by miette (may be empty).
@@ -67,6 +73,13 @@ impl ResolveIssue {
             self.source_name.clone().unwrap_or_else(|| "<rst>".to_owned()),
             Arc::clone(&self.source_text),
         )
+    }
+
+    /// Warning text forwarded to the build log by builders and `check`.
+    pub fn warning_message(&self, docname: &str) -> String {
+        self.raw_message
+            .clone()
+            .unwrap_or_else(|| format!("{docname}: {}", self.message))
     }
 }
 
@@ -402,6 +415,16 @@ fn resolve_one(
     let options = match validate {
         Ok(options) => options,
         Err(error) => {
+            let raw = if let crate::directive_registry::DirectiveError::Option(option_error) = &error {
+                docutils_option_error(&name, line, option_error, &raw_options, context)
+            } else {
+                None
+            };
+            // Docutils replaces a directive whose options fail validation with
+            // a `system_message` that the normal writer filters out. Remove
+            // the placeholder so it does not leak a `pending` node into the
+            // exported doctree.
+            let drop_pending = raw.is_some();
             push_issue(
                 report,
                 &name,
@@ -411,6 +434,14 @@ fn resolve_one(
                 error.code(),
                 context,
             );
+            if let Some(raw) = raw {
+                if let Some(issue) = report.unresolved.last_mut() {
+                    issue.raw_message = Some(raw);
+                }
+            }
+            if drop_pending {
+                let _ = document.remove_node(id);
+            }
             return false;
         }
     };
@@ -656,9 +687,74 @@ fn push_issue(
         span: byte_span,
         message,
         code,
+        raw_message: None,
         source_name: context.source_name.clone(),
         source_text: source,
     });
+}
+
+/// Reconstruct docutils' multi-line `Error in "<directive>" directive:`
+/// invalid-option block, including the quoted source lines and `[docutils]`
+/// suffix emitted by `sphinx-build` with a pseudoxml writer.
+fn docutils_option_error(
+    name: &str,
+    line: u32,
+    error: &crate::option_spec::OptionError,
+    raw_options: &BTreeMap<String, String>,
+    context: &Context,
+) -> Option<String> {
+    use crate::option_spec::OptionError;
+    let OptionError::InvalidValue { name: option_name, expected, .. } = error else {
+        return None;
+    };
+    let raw_value = raw_options.get(option_name)?.clone();
+    let candidates: Vec<String> = expected
+        .strip_prefix("one of ")?
+        .split(", ")
+        .map(|candidate| format!("\"{candidate}\""))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let choices = if candidates.len() == 1 {
+        candidates[0].clone()
+    } else {
+        let tail = candidates.last().map_or("", String::as_str);
+        format!("{}, or {}", candidates[..candidates.len() - 1].join(", "), tail)
+    };
+    let source_name = context.source_name.as_deref().unwrap_or("index");
+    let candidate = context.source_dir.as_ref()?.join(format!("{source_name}.rst"));
+    // Sphinx reports canonical absolute paths; canonicalise so the harness's
+    // non-canonical workspace path (with `..` components) does not diverge.
+    let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+    let source = context.source_text.as_ref()?;
+    let lines: Vec<&str> = source.lines().collect();
+    let start = (line as usize).saturating_sub(1);
+    if start >= lines.len() {
+        return None;
+    }
+    let mut block = vec![lines[start].to_owned()];
+    for text in lines.iter().skip(start + 1) {
+        if text.trim().is_empty() || !text.starts_with(char::is_whitespace) {
+            break;
+        }
+        block.push((*text).to_owned());
+    }
+    let last = block.len() - 1;
+    block[last].push_str(" [docutils]");
+    Some(format!(
+        "{}:{}: ERROR: Error in \"{}\" directive:\n\
+         invalid option value: (option: \"{}\"; value: '{}')\n\
+         \"{}\" unknown; choose from {}.\n\n{}",
+        path.display(),
+        line,
+        name,
+        option_name,
+        raw_value,
+        raw_value,
+        choices,
+        block.join("\n"),
+    ))
 }
 
 fn to_miette_span(span: Span, line: u32, context: &Context) -> SourceSpan {

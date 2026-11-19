@@ -150,7 +150,7 @@ impl DoctestBuilder {
             register_directives(&registry);
             let resolve_report = resolve_output(&mut output, &registry, &ctx);
             for issue in &resolve_report.unresolved {
-                warnings.push(format!("{docname}: {}", issue.message));
+                warnings.push(issue.warning_message(docname));
             }
             let filename = path
                 .strip_prefix(source_dir)

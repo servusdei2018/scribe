@@ -28,7 +28,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 89.6% over 34 applicable fixtures (24 pass, 8 partial, 2 fail, 5 skip)
+## Aggregate semantic parity: 90.4% over 34 applicable fixtures (25 pass, 7 partial, 2 fail, 5 skip)
 
 ## Per-fixture results
 
@@ -38,7 +38,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-basic | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-changes | pseudoxml | builder | partial | 0.791 | 0.931 | 0.000 | 30/31 | 0/0 | directive, domain, html classes, parser, warning codes |
 | test-default_role | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
-| test-directive-code | html | directive | partial | 0.595 | 0.700 | 0.000 | 26/27 | 0/0 | html classes, warning codes |
+| test-directive-code | html | directive | partial | 0.600 | 0.706 | 0.000 | 26/27 | 0/0 | html classes, parser, warning codes |
 | test-directive-csv-table | pseudoxml | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-directive-include | pseudoxml | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-directive-only | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
@@ -53,12 +53,12 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-domain-py-xref-warning | pseudoxml | domain | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-ext-autodoc | pseudoxml | domain | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-ext-graphviz | html | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
-| test-footnotes | pseudoxml | parser | pass | 0.950 | 0.941 | 1.000 | 41/43 | 0/0 | domain, html classes, parser |
+| test-footnotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 41/41 | 0/0 | — |
 | test-glossary | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-highlight_options | html | directive | pass | 0.973 | 0.969 | 1.000 | 21/21 | 0/0 | html classes |
 | test-linkcheck | html | builder | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-markup-citation | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 8/8 | 0/0 | — |
-| test-markup-rubric | pseudoxml | parser | partial | 0.785 | 0.923 | 0.000 | 4/5 | 0/0 | html classes, warning codes |
+| test-markup-rubric | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 4/4 | 0/0 | — |
 | test-maxlistdepth | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
 | test-nested-enumerated-list | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-nested-tables | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
@@ -67,7 +67,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-prolog | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-reST-code-block | html | parser | pass | 0.978 | 0.975 | 1.000 | 20/20 | 0/0 | html classes |
 | test-reST-code-role | html | parser | pass | 0.928 | 0.915 | 1.000 | 21/21 | 0/0 | html classes |
-| test-root | html | builder | fail | 0.367 | 0.418 | 0.075 | 48/45 | 0/0 | directive, html classes, parser, warning codes |
+| test-root | html | builder | fail | 0.368 | 0.419 | 0.076 | 48/45 | 0/0 | directive, html classes, parser, warning codes |
 | test-smartquotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-theming | html | builder | pass | 0.969 | 0.964 | 1.000 | 20/20 | 0/0 | html classes |
 | test-toctree | pseudoxml | builder | pass | 0.950 | 1.000 | 0.667 | 11/11 | 0/0 | warning codes |
@@ -85,8 +85,8 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 ## Divergences by category
 
 - **directive**: test-changes (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-productionlist (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
-- **domain**: test-changes (pseudoxml), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-domain-py (pseudoxml), test-footnotes (pseudoxml), test-productionlist (pseudoxml), test-toctree-glob (pseudoxml)
-- **html classes**: test-basic (html), test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-footnotes (pseudoxml), test-highlight_options (html), test-markup-rubric (pseudoxml), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-reST-code-block (html), test-reST-code-role (html), test-root (html), test-theming (html), test-toctree-glob (pseudoxml), test-toctree-maxdepth (html)
-- **parser**: test-changes (pseudoxml), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-footnotes (pseudoxml), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
-- **warning codes**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-py-python_use_unqualified_type_names (pseudoxml), test-markup-rubric (pseudoxml), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-root (html), test-toctree (pseudoxml), test-toctree-maxdepth (html)
+- **domain**: test-changes (pseudoxml), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-domain-py (pseudoxml), test-productionlist (pseudoxml), test-toctree-glob (pseudoxml)
+- **html classes**: test-basic (html), test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-highlight_options (html), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-reST-code-block (html), test-reST-code-role (html), test-root (html), test-theming (html), test-toctree-glob (pseudoxml), test-toctree-maxdepth (html)
+- **parser**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
+- **warning codes**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-py-python_use_unqualified_type_names (pseudoxml), test-numfig (pseudoxml), test-productionlist (pseudoxml), test-root (html), test-toctree (pseudoxml), test-toctree-maxdepth (html)
 

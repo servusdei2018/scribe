@@ -561,6 +561,20 @@ impl StandardDomain {
                     let title = title_for_label(document, id);
                     self.note_label(ctx, name, &labelid, title.as_deref(), span);
                 }
+            } else if node.kind == NodeKind::Container
+                && node.attrs.get_bool("literal_block").unwrap_or_default().unwrap_or(false)
+                && !names.is_empty()
+                && !ids.is_empty()
+            {
+                // `.. code-block::` with `:name:` stores the explicit target
+                // directly on its wrapper container (upstream's
+                // `literal_block` enumerable node).  Register it as a label
+                // with the caption as section name so `:ref:` can resolve it.
+                let labelid = ids.first().cloned().unwrap_or_default();
+                let title = title_for_label(document, id);
+                for name in &names {
+                    self.note_label(ctx, name, &labelid, title.as_deref(), span);
+                }
             } else if node.kind != NodeKind::Section {
                 let propagated = ids.iter().any(|labelid| {
                     document.get(id).is_ok_and(|node| node.get_str("refid").ok().flatten() == Some(labelid.as_str()))
@@ -705,7 +719,7 @@ fn title_for_label(document: &Document, id: NodeId) -> Option<String> {
         NodeKind::Rubric | NodeKind::Term | NodeKind::FieldName | NodeKind::Title | NodeKind::Caption => {
             Some(node.astext(document).trim().to_owned())
         }
-        NodeKind::Figure | NodeKind::Table => document
+        NodeKind::Figure | NodeKind::Table | NodeKind::Container => document
             .children(id)
             .ok()?
             .iter()
