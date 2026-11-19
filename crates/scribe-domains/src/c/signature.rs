@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use scribe_ast::{Document, NodeId, NodeKind, Span};
 
-use super::parser::{parameter_names, parse_declaration, Decl};
+use super::parser::{parameter_names, parse_declaration, parse_expression, Decl};
 use crate::error::DomainResult;
 use crate::sigbuild::{SigBuilder, SigToken};
 
@@ -26,18 +26,16 @@ pub struct COptions {
 /// Mutable read-time scope while walking a document.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {
-    /// Active `c:namespace` (empty at global scope).
-    namespace: String,
+    /// Active `c:namespace` stack (empty at global scope).  `namespace` resets
+    /// it, `namespace-push` appends and `namespace-pop` removes the last entry.
+    namespace: Vec<String>,
     /// Nested struct/union/enum scope, outermost first.
     nested: Vec<String>,
 }
 
 impl Scope {
     fn qualified(&self, name: &str) -> String {
-        let mut parts: Vec<&str> = Vec::new();
-        if !self.namespace.is_empty() {
-            parts.push(&self.namespace);
-        }
+        let mut parts: Vec<&str> = self.namespace.iter().map(String::as_str).collect();
         parts.extend(self.nested.iter().map(String::as_str));
         if !name.is_empty() {
             parts.push(name);
@@ -45,9 +43,18 @@ impl Scope {
         parts.join(".")
     }
 
+    fn namespace_text(&self) -> String {
+        self.namespace.join(".")
+    }
+
     fn anchor(&self, name: &str) -> String {
         format!("c.{}", self.qualified(name))
     }
+}
+
+/// Upstream treats these `c:namespace` arguments as "global namespace".
+fn is_null_namespace(name: &str) -> bool {
+    matches!(name.trim(), "NULL" | "0" | "nullptr")
 }
 
 /// Information materialized for one skeleton declaration.
@@ -80,47 +87,196 @@ pub fn prepare_document(document: &mut Document) -> DomainResult<()> {
     prepare_children(document, root, &scope)
 }
 
+/// Expands `c:expr` / `c:texpr` skeleton `desc_inline` nodes emitted by the RST
+/// layer into their `desc_sig_*` token trees (upstream `CExprRole.run`).
+fn expand_expr_inlines(document: &mut Document, node: NodeId) -> DomainResult<()> {
+    let is_expr = document.get(node).is_ok_and(|n| {
+        n.kind == NodeKind::DescInline && n.get_str("c:expr_text").ok().flatten().is_some()
+    });
+    if is_expr {
+        let (text, source, span) = {
+            let n = document.get(node)?;
+            (
+                n.get_str("c:expr_text").ok().flatten().unwrap_or("").to_owned(),
+                n.source.clone(),
+                n.span.unwrap_or(Span::new(0, 0)),
+            )
+        };
+        let tokens = parse_expression(&text);
+        if let Ok(n) = document.get_mut(node) {
+            n.children.clear();
+        }
+        let mut builder = SigBuilder::new_with_source(document, span, "c", source);
+        builder.emit_all(&tokens, node)?;
+    }
+    let children = document.get(node).map(|n| n.children.clone()).unwrap_or_default();
+    for child in children {
+        expand_expr_inlines(document, child)?;
+    }
+    Ok(())
+}
+
+/// Rewrites the typed `:param:` fields of a C object into upstream's grouped
+/// `Parameters` field (upstream `TypedField` with `typerolename='expr'`).
+fn rewrite_fields(document: &mut Document, desc: NodeId) -> DomainResult<()> {
+    let content = document.get(desc).ok().and_then(|node| {
+        node.children.iter().copied().find(|&id| {
+            document.get(id).is_ok_and(|child| child.kind == NodeKind::DescContent)
+        })
+    });
+    let Some(content) = content else { return Ok(()) };
+    let fieldlists: Vec<NodeId> = document.get(content).ok().map(|node| {
+        node.children.iter().copied().filter(|&id| {
+            document.get(id).is_ok_and(|child| child.kind == NodeKind::FieldList)
+        }).collect()
+    }).unwrap_or_default();
+    for fieldlist in fieldlists {
+        rewrite_fieldlist(document, fieldlist)?;
+    }
+    Ok(())
+}
+
+fn field_name_text(doc: &Document, field: NodeId) -> String {
+    let Ok(node) = doc.get(field) else { return String::new() };
+    for &child in &node.children {
+        if let Ok(name) = doc.get(child) {
+            if name.kind == NodeKind::FieldName {
+                return name.astext(doc).trim().to_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+fn rewrite_fieldlist(document: &mut Document, fieldlist: NodeId) -> DomainResult<()> {
+    let fields: Vec<NodeId> = document.get(fieldlist).ok().map(|n| n.children.to_vec()).unwrap_or_default();
+    let mut params: Vec<(String, String)> = Vec::new(); // (name, type)
+    let mut others: Vec<NodeId> = Vec::new();
+    for field in fields {
+        let label = field_name_text(document, field);
+        let head = label.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        if matches!(head.as_str(), "param" | "parameter" | "arg" | "argument") {
+            let arg = label.split_once(' ').map_or("", |(_, value)| value.trim());
+            let (ty, name) = match arg.rsplit_once(char::is_whitespace) {
+                Some((ty, name)) => (ty.trim().to_owned(), name.trim().to_owned()),
+                None => (String::new(), arg.to_owned()),
+            };
+            params.push((name, ty));
+            let _ = document.remove_node(field);
+        } else {
+            // Upstream relabels the bare `rtype` field as "Return type".
+            if head == "rtype" {
+                if let Some(name_id) = document.get(field).ok().and_then(|f| {
+                    f.children.iter().copied().find(|&id| {
+                        document.get(id).is_ok_and(|n| n.kind == NodeKind::FieldName)
+                    })
+                }) {
+                    if let Ok(node) = document.get_mut(name_id) {
+                        node.children.clear();
+                    }
+                    let _ = document.add_node(scribe_ast::Node::text("Return type"), Some(name_id));
+                }
+            }
+            others.push(field);
+        }
+    }
+    if params.is_empty() {
+        return Ok(());
+    }
+    let span = document.get(fieldlist).ok().and_then(|n| n.span).unwrap_or(Span::new(0, 0));
+    let source = document.get(fieldlist).ok().and_then(|n| n.source.clone());
+    let mut rebuilt = Vec::new();
+    {
+        let mut builder = SigBuilder::new_with_source(document, span, "c", source);
+        let field = builder.add(NodeKind::Field, fieldlist)?;
+        let name_node = builder.add(NodeKind::FieldName, field)?;
+        builder.text("Parameters", name_node)?;
+        let body = builder.add(NodeKind::FieldBody, field)?;
+        let bullets = builder.add(NodeKind::BulletList, body)?;
+        for (param, ty) in &params {
+            let item = builder.add(NodeKind::ListItem, bullets)?;
+            let para = builder.add(NodeKind::Paragraph, item)?;
+            let strong = builder.add(NodeKind::LiteralStrong, para)?;
+            builder.text(param, strong)?;
+            builder.text(" (", para)?;
+            let inline = builder.add(NodeKind::Inline, para)?;
+            let desc_inline = builder.add(NodeKind::DescInline, inline)?;
+            if let Ok(node) = builder.doc.get_mut(desc_inline) {
+                node.attrs.set_str("domain", "c");
+                node.attrs.set_list("classes", vec![
+                    "c-expr".to_owned(), "sig".to_owned(), "sig-inline".to_owned(), "c".to_owned(),
+                ]);
+            }
+            let tokens = parse_expression(ty);
+            builder.emit_all(&tokens, desc_inline)?;
+            builder.text(")", para)?;
+        }
+        rebuilt.push(field);
+    }
+    rebuilt.extend(others);
+    if let Ok(node) = document.get_mut(fieldlist) {
+        node.children = rebuilt;
+    }
+    Ok(())
+}
+
 fn prepare_children(document: &mut Document, parent: NodeId, scope: &Scope) -> DomainResult<()> {
     let children = document.children(parent).map(<[NodeId]>::to_vec).unwrap_or_default();
-    for child in children {
+    prepare_siblings(document, &children, scope)
+}
+
+/// Processes a fixed slice of siblings.  A namespace marker installs its scope
+/// on the *remaining* siblings only, so earlier declarations are never
+/// re-expanded with a later namespace's scope.
+fn prepare_siblings(document: &mut Document, children: &[NodeId], scope: &Scope) -> DomainResult<()> {
+    for (position, &child) in children.iter().enumerate() {
         if document.get(child).is_err() {
             continue;
         }
-        // Namespace markers are emitted as `target` nodes with `c:namespace`.
+        // Expand C expression roles and annotate all user xrefs under this
+        // node with the read-time namespace scope (upstream's
+        // `env.ref_context['c:parent_key']`).
+        expand_expr_inlines(document, child)?;
+        annotate_scope(document, child, &scope.qualified(""));
+        // All three namespace directives emit a `target` marker carrying a
+        // `c:namespace*` attribute.  Upstream returns no nodes for any of them,
+        // so strip the marker and install the new scope for following siblings.
         let marker = document.get(child).ok().and_then(|node| {
-            if node.kind != NodeKind::Target || node.get_str("c:namespace").ok().flatten().is_none() {
+            if node.kind != NodeKind::Target {
                 return None;
             }
-            node.get_str("objtype").ok().flatten().map(str::to_owned)
+            let kind = node.get_str("objtype").ok().flatten().map(str::to_owned)?;
+            if !matches!(kind.as_str(), "namespace" | "namespace-push" | "namespace-pop") {
+                return None;
+            }
+            let name = match kind.as_str() {
+                "namespace" => node.get_str("c:namespace").ok().flatten().unwrap_or(""),
+                "namespace-push" => node.get_str("c:namespace-push").ok().flatten().unwrap_or(""),
+                _ => "",
+            };
+            Some((kind, name.to_owned()))
         });
-        if let Some(kind) = marker {
-            let name = document.get(child)
-                .ok()
-                .and_then(|node| node.get_str("c:namespace").ok().flatten())
-                .unwrap_or("")
-                .to_owned();
+        if let Some((kind, name)) = marker {
             let mut next = scope.clone();
             match kind.as_str() {
-                "namespace" => next.namespace = name,
+                "namespace" => {
+                    next.namespace.clear();
+                    if !is_null_namespace(&name) && !name.is_empty() {
+                        next.namespace.push(name);
+                    }
+                }
                 "namespace-push" => {
-                    if next.namespace.is_empty() {
-                        next.namespace = name;
-                    } else {
-                        next.namespace = format!("{}.{}", next.namespace, name);
+                    if !is_null_namespace(&name) && !name.is_empty() {
+                        next.namespace.push(name);
                     }
                 }
                 "namespace-pop" => {
-                    if let Some((head, _)) = next.namespace.rsplit_once('.') {
-                        next.namespace = head.to_owned();
-                    } else {
-                        next.namespace.clear();
-                    }
+                    let _ = next.namespace.pop();
                 }
                 _ => {}
             }
             let _ = document.remove_node(child);
-            prepare_children(document, parent, &next)?;
-            return Ok(());
+            return prepare_siblings(document, &children[position + 1..], &next);
         }
 
         let Some(objtype) = is_skeleton(document, child) else {
@@ -136,11 +292,22 @@ fn prepare_children(document: &mut Document, parent: NodeId, scope: &Scope) -> D
         };
         let span = document.get(child).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
         let info = build_signature(document, child, &signature, &objtype, &options, scope, span)?;
+        rewrite_fields(document, child)?;
+        expand_expr_inlines(document, child)?;
+        annotate_scope(document, child, &scope.qualified(""));
 
-        // Struct/union/enum introduce a nested scope for their content.
+        // Struct/union/enum introduce a nested scope for their content; a
+        // function's parameters live in the function's own scope.
         let mut inner = scope.clone();
-        if matches!(objtype.as_str(), "struct" | "union" | "enum" | "enum-class" | "enum-struct" | "class") {
+        if matches!(objtype.as_str(), "struct" | "union" | "enum" | "enum-class" | "enum-struct" | "class" | "function" | "macro") {
             inner.nested.push(info.shortname.clone());
+        }
+        if let Some(content) = document.get(child).ok().and_then(|node| {
+            node.children.iter().copied().find(|&id| {
+                document.get(id).is_ok_and(|n| n.kind == NodeKind::DescContent)
+            })
+        }) {
+            annotate_scope(document, content, &inner.qualified(""));
         }
         prepare_children(document, child, &inner)?;
     }
@@ -172,7 +339,7 @@ pub fn build_signature(
         node.attrs.set_str("c:fullname", &fullname);
         node.attrs.set_str("c:shortname", decl.short_name());
         node.attrs.set_str("c:anchor", &anchor);
-        node.attrs.set_str("c:namespace", &scope.namespace);
+        node.attrs.set_str("c:namespace", scope.namespace_text());
         node.attrs.set_str("c:param_names", param_names.join("\u{1f}"));
         node.attrs.set_str("domain", "c");
         node.attrs.set_bool("no-index", options.no_index);

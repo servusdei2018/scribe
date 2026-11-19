@@ -177,12 +177,27 @@ impl CDomain {
         let allowed = objtypes_for_role(role);
         let data = self.data.read();
         let mut matches = Vec::new();
-        // Exact scoped name first (mirrors `LookupKey` with parent scope).
-        let scoped = if scope.is_empty() { target.to_owned() } else { format!("{scope}.{target}") };
-        if let Some(entry) = data.objects.get(&scoped) {
-            if allowed.is_empty() || allowed.contains(&entry.objtype.as_str()) {
-                matches.push((scoped, entry.clone()));
+        // Upstream's symbol lookup walks *up* the parent scope chain until a
+        // scope declares the name (`ancestor_lookup_type`).  This makes a
+        // `:c:var:`i`` inside a function resolve to the parameter `f.i` or,
+        // failing that, to the namespace variable `i`, instead of producing a
+        // suffix-match ambiguity across unrelated namespaces.
+        let mut current = scope.to_owned();
+        loop {
+            let scoped = if current.is_empty() { target.to_owned() } else { format!("{current}.{target}") };
+            if let Some(entry) = data.objects.get(&scoped) {
+                if allowed.is_empty() || allowed.contains(&entry.objtype.as_str()) {
+                    matches.push((scoped, entry.clone()));
+                    break;
+                }
             }
+            if current.is_empty() {
+                break;
+            }
+            current = match current.rsplit_once('.') {
+                Some((head, _)) => head.to_owned(),
+                None => String::new(),
+            };
         }
         if matches.is_empty() {
             if let Some(entry) = data.objects.get(target) {
@@ -192,9 +207,15 @@ impl CDomain {
             }
         }
         if matches.is_empty() {
+            // Final fallback mirrors `find_declaration(recurseInAnon=True)`:
+            // search nested symbols, but only inside the active scope subtree.
+            // A global suffix search would let `b` leak across namespaces.
             let suffix = format!(".{target}");
+            let prefix = if scope.is_empty() { String::new() } else { format!("{scope}.") };
             for (name, entry) in data.objects.iter() {
-                if name.ends_with(&suffix) && (allowed.is_empty() || allowed.contains(&entry.objtype.as_str())) {
+                if name.starts_with(&prefix) && name.ends_with(&suffix)
+                    && (allowed.is_empty() || allowed.contains(&entry.objtype.as_str()))
+                {
                     matches.push((name.clone(), entry.clone()));
                 }
             }
@@ -284,6 +305,20 @@ impl Domain for CDomain {
             let Some(fullname) = node.get_str("c:fullname").ok().flatten().map(str::to_owned) else { continue };
             let anchor = node.get_str("c:anchor").ok().flatten().unwrap_or("").to_owned();
             self.note_object(ctx, &fullname, &objtype, &anchor, false, node.span);
+            // Members declared inside an anonymous struct/union are also
+            // addressable without the `@name` anonymous segment (upstream's
+            // `recurseInAnon` lookup), e.g. `A.@data.a` is also `A.a`.
+            let parts: Vec<&str> = fullname.split('.').collect();
+            if objtype == "member" {
+                if let Some(anon) = parts.iter().position(|part| part.starts_with('@')) {
+                    let mut alias_parts = parts.clone();
+                    alias_parts.remove(anon);
+                    let alias = alias_parts.join(".");
+                    if !alias.is_empty() {
+                        self.note_object(ctx, &alias, &objtype, &anchor, true, node.span);
+                    }
+                }
+            }
             // Function parameters register as hidden `functionParam` objects.
             if objtype == "function" {
                 if let Some(index_id) = node.attrs.get_node_id("c:index_id").ok().flatten() {
@@ -353,8 +388,9 @@ impl Domain for CDomain {
         let title = if explicit {
             name.clone()
         } else {
-            // Upstream uses the target's last dotted component.
-            name.rsplit('.').next().unwrap_or(name).to_owned()
+            // Upstream displays the parsed target name (e.g. `f.i` stays
+            // `f.i`), not the resolved object's fully-qualified name.
+            target.to_owned()
         };
         let signature = document.get(node_id).ok().and_then(|node| node.get_str("c:scope").ok().flatten()).is_some();
         Ok(Some(self.make_refnode(ctx, entry, title, typ, signature)))

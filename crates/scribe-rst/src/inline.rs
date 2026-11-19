@@ -1422,6 +1422,21 @@ fn emit_role(
 ) {
     let out_start = out.len();
 
+    // The C domain's `c:expr` / `c:texpr` roles parse their payload as a C
+    // expression and render a `desc_inline` token tree.  Emit a skeleton here
+    // (scribe-rst cannot depend on scribe-domains); `c::prepare_document`
+    // materializes the `desc_sig_*` children and identifier xrefs.
+    if role == "c:expr" || role == "c:texpr" {
+        let class = if role == "c:expr" { "c-expr" } else { "c-texpr" };
+        let node = InlineNode::element(NodeKind::DescInline, full_span, 0)
+            .with_attr("domain", "c")
+            .with_attr("classes", vec![class.to_owned(), "sig".to_owned(), "sig-inline".to_owned(), "c".to_owned()])
+            .with_attr("c:expr_text", payload.replace('\n', " "))
+            .with_attr("c:expr_code", role == "c:expr");
+        out.push(node);
+        return;
+    }
+
     // Resolve a custom role declared by `.. role:: name(base)` in document
     // order. Docutils' `roles.CustomRole` delegates node construction to the
     // base role but overrides the `classes` attribute with the custom name.

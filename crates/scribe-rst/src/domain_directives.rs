@@ -103,6 +103,37 @@ fn marker(
     Ok(ids)
 }
 
+/// Emits a `js:module` directive: upstream `JSModule.run()` returns an `index`
+/// node followed by an `ismod` target carrying the module anchor, then the
+/// parsed content.  `MoveModuleTargets` folds the first module target into its
+/// section, so the sibling `index` also carries `js:module` for the domain
+/// scope/object passes which run after that transform.
+fn js_module(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let name = ctx.argument(0).unwrap_or("").trim().to_owned();
+    if name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids = emit_index(ctx)?;
+    if let Some(&index_id) = ids.first() {
+        if let Ok(node) = ctx.doc.get_mut(index_id) {
+            let entry = format!("['single', '{} (module)', 'module-{}', '', None]", name, name);
+            node.attrs.set_str("entries", &entry);
+            node.attrs.set_str("js:module", &name);
+        }
+    }
+    let anchor = format!("module-{}", name);
+    let mut target = Node::new(NodeKind::Target);
+    target.attrs.set_str("objtype", "module");
+    target.attrs.set_str("js:module", &name);
+    target.attrs.set_bool("ismod", true);
+    target.attrs.set_list("ids", vec![anchor]);
+    target.span = Some(ctx.span);
+    let target_id = ctx.doc.add_node(target, Some(ctx.parent))?;
+    ids.push(target_id);
+    ids.extend(ctx.parse_nested()?);
+    Ok(ids)
+}
+
 /// Registers every new-domain directive.
 pub fn register(registry: &DirectiveRegistry) {
     let spec = object_spec();
@@ -178,7 +209,7 @@ pub fn register(registry: &DirectiveRegistry) {
     object_directive!("js", "attribute", "attribute");
     registry.register(crate::directives::FnDirective::new(
         "js:module", 1, 0, true, OptionSpec::empty(), false,
-        |ctx: &mut DirectiveContext<'_>| marker(ctx, "js", "module"),
+        |ctx: &mut DirectiveContext<'_>| js_module(ctx),
     ));
 
     // reST domain.

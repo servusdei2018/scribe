@@ -388,6 +388,64 @@ fn type_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {
     out
 }
 
+/// Operators rendered as `desc_sig_operator` by upstream's C expression
+/// renderer (`ASTOperator` / `ASTOpUnary`).
+const EXPRESSION_OPERATORS: &[&str] = &[
+    "->", "::", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+=", "-=", "*=", "/=",
+];
+
+/// Parses the payload of a `c:expr` / `c:texpr` role into signature tokens.
+///
+/// Upstream calls `describe_signature(mode='markType')` on the parsed
+/// expression, so every identifier becomes an `identifier` pending xref while
+/// type keywords render as `desc_sig_keyword_type` and operators as
+/// `desc_sig_operator`.  Whitespace between tokens becomes a `desc_sig_space`.
+pub fn parse_expression(text: &str) -> Vec<SigToken> {
+    let toks = tokenize(text);
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut member_access = false;
+    for tok in &toks {
+        let is_member = member_access;
+        member_access = false;
+        while cursor < text.len() && text.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if !out.is_empty() && cursor > 0
+            && text.as_bytes().get(cursor.saturating_sub(1)).is_some_and(u8::is_ascii_whitespace)
+        {
+            out.push(SigToken::Space);
+        }
+        if text[cursor.min(text.len())..].starts_with(&tok.text) {
+            cursor += tok.text.len();
+        }
+        let token = match tok.kind {
+            TokKind::Word if PRIMITIVE_TYPES.contains(&tok.text.as_str()) => {
+                SigToken::KeywordType(tok.text.clone())
+            }
+            TokKind::Word if DECL_KEYWORDS.contains(&tok.text.as_str()) => {
+                SigToken::Keyword(tok.text.clone())
+            }
+            // Upstream `ASTPostfixMemberOfPointer` renders the member name in
+            // `noneIsName` mode: a plain `desc_sig_name`, never an xref.
+            TokKind::Word if is_member => SigToken::Name(tok.text.clone()),
+            TokKind::Word => SigToken::reference("c", tok.text.clone(), "identifier", "c-identifier"),
+            TokKind::Punct if EXPRESSION_OPERATORS.contains(&tok.text.as_str()) => {
+                member_access = tok.text == "->";
+                SigToken::Operator(tok.text.clone())
+            }
+            TokKind::Punct => {
+                member_access = tok.text == ".";
+                SigToken::Punctuation(tok.text.clone())
+            }
+            TokKind::Number => SigToken::Number(tok.text.clone()),
+            TokKind::Literal => SigToken::Literal(tok.text.clone()),
+        };
+        out.push(token);
+    }
+    out
+}
+
 /// Converts a parameter's token list, rendering its final identifier as a plain
 /// name (Sphinx marks parameters `n`, not `n` + type xref).
 pub fn param_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {

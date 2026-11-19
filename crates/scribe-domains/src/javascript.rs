@@ -235,7 +235,12 @@ impl Domain for JavaScriptDomain {
     fn process_doc(&mut self, ctx: &DomainContext<'_>, _docname: &str, document: &Document) -> DomainResult<()> {
         for id in document.preorder_ids() {
             let Ok(node) = document.get(id) else { continue };
-            if node.kind == NodeKind::Target && node.get_str("js:module").ok().flatten().is_some() {
+            // The first module's `ismod` target may have been folded into its
+            // section by `MoveModuleTargets`; its sibling `index` node still
+            // carries `js:module`, so note modules from either carrier.
+            if matches!(node.kind, NodeKind::Target | NodeKind::Index)
+                && node.get_str("js:module").ok().flatten().is_some()
+            {
                 let name = node.get_str("js:module").ok().flatten().unwrap_or("").to_owned();
                 let anchor = format!("module-{}", name);
                 self.note_module(ctx, &name, &anchor);
@@ -378,30 +383,32 @@ pub fn prepare_document(document: &mut Document) -> DomainResult<()> {
 
 fn prepare_children(document: &mut Document, parent: NodeId, scope: &JsScope) -> DomainResult<()> {
     let children = document.children(parent).map(<[NodeId]>::to_vec).unwrap_or_default();
-    for child in children {
+    prepare_siblings(document, &children, scope)
+}
+
+/// Processes a fixed slice of siblings with `scope`.  A `js:module` marker
+/// installs a new module scope for the *remaining* siblings and returns, which
+/// also handles consecutive module directives in one section correctly.
+fn prepare_siblings(document: &mut Document, children: &[NodeId], scope: &JsScope) -> DomainResult<()> {
+    for (position, &child) in children.iter().enumerate() {
         if document.get(child).is_err() { continue; }
+        // `js:module` emits both an `index` node and an `ismod` target.  The
+        // read transform `MoveModuleTargets` folds the first module target into
+        // its section and removes it, so the index node is the durable carrier
+        // of the module name for the scope pass.  The surviving target carries
+        // a `refid` (its ids were propagated to the following block) and still
+        // carries `js:module` too, so both are recognised here.
         let module_marker = document.get(child).ok().and_then(|node| {
-            if node.kind == NodeKind::Target && node.get_str("js:module").ok().flatten().is_some() {
+            if matches!(node.kind, NodeKind::Target | NodeKind::Index)
+                && node.get_str("js:module").ok().flatten().is_some()
+            {
                 node.get_str("js:module").ok().flatten().map(str::to_owned)
             } else { None }
         });
         if let Some(name) = module_marker {
-            let anchor = format!("module-{}", name);
-            if let Ok(node) = document.get_mut(child) {
-                node.attrs.set_list("ids", vec![anchor]);
-                node.attrs.set_str("objtype", "module");
-            }
             let mut next = scope.clone();
             next.module = name.split('.').map(str::to_owned).collect();
-            // `js:module` emits a target, not a desc; process siblings in the
-            // new scope by recursing into the parent with the updated scope.
-            let remaining = document.children(parent).map(<[NodeId]>::to_vec).unwrap_or_default();
-            let position = remaining.iter().position(|&id| id == child).unwrap_or(0);
-            for sibling in remaining.into_iter().skip(position + 1) {
-                if document.get(sibling).is_err() { continue; }
-                prepare_one(document, sibling, &next)?;
-            }
-            return Ok(());
+            return prepare_siblings(document, &children[position + 1..], &next);
         }
         prepare_one(document, child, scope)?;
     }
@@ -507,8 +514,14 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
         builder.sig(NodeKind::DescSigKeyword, "class", "k", annotation)?;
         builder.sig(NodeKind::DescSigSpace, " ", "w", annotation)?;
     }
-    // Qualifiers (module + object path) render as plain sig names.
-    let qualifiers: Vec<String> = scope.module.iter().chain(scope.object.iter()).cloned().collect();
+    // Upstream `JSObject.handle_signature` renders `actual_prefix = prefix or mod_name`:
+    // the object (class) prefix wins over the module path.  Only when there is no
+    // object prefix does the module qualify the name (e.g. a top-level class).
+    let qualifiers: Vec<String> = if !scope.object.is_empty() {
+        scope.object.clone()
+    } else {
+        scope.module.clone()
+    };
     if !qualifiers.is_empty() {
         let addname = builder.add(NodeKind::DescAddname, signature_id)?;
         builder.classes(addname, &["sig-prename", "descclassname"])?;
