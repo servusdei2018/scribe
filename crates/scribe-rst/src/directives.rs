@@ -1224,12 +1224,28 @@ fn parse_csv(text: &str, delim: char, quote: char, escape: Option<char>, keepspa
     rows
 }
 
+/// Content of a single cell in a directive-built table.
+///
+/// `csv-table` cells hold plain inline text (Docutils stores a `StringList`
+/// and `nested_parse` turns it into a paragraph). `list-table` cells hold the
+/// *parsed body nodes* verbatim: Docutils copies `item.children` straight into
+/// the `entry`, so a nested directive (e.g. a nested `list-table`, or a table
+/// inside a grid cell) must survive as an AST subtree, not be flattened to
+/// text. Keeping the nodes also lets nested `Pending` directives be resolved
+/// by the outer fixpoint pass in a subsequent iteration.
+#[derive(Clone)]
+enum DirectiveCell {
+    Text(String),
+    Nodes(Vec<NodeId>),
+}
+
 fn build_table(
     ctx: &mut DirectiveContext<'_>,
     title: Option<&str>,
-    header_rows: &[Vec<String>],
-    body_rows: &[Vec<String>],
+    header_rows: &[Vec<DirectiveCell>],
+    body_rows: &[Vec<DirectiveCell>],
     widths: &[String],
+    stub_columns: usize,
 ) -> HandlerResult {
     let cols = header_rows
         .first()
@@ -1237,7 +1253,15 @@ fn build_table(
         .map_or(1, Vec::len);
     let line = ctx.line;
     let title = title.map(str::to_owned);
-    let classes = ctx.classes();
+    let mut classes = ctx.classes();
+    // Docutils `Body.build_table()` adds a width-style class from the
+    // `:widths:` option: `colwidths-auto` for `auto`, `colwidths-given` for an
+    // explicit integer list.
+    if ctx.option_str("widths") == Some("auto") {
+        classes.push("colwidths-auto".to_owned());
+    } else if ctx.option_list("widths").is_some() {
+        classes.push("colwidths-given".to_owned());
+    }
     let width = ctx.option_str("width").map(str::to_owned);
     let align = ctx.option_str("align").map(str::to_owned);
     let table = ctx.add(NodeKind::Table, ctx.parent)?;
@@ -1261,8 +1285,14 @@ fn build_table(
     ctx.doc.get_mut(tgroup)?.attrs.set_int("cols", cols as i64);
     for index in 0..cols {
         let colspec = ctx.add(NodeKind::Colspec, tgroup)?;
-        if let Some(width) = widths.get(index) {
-            ctx.doc.get_mut(colspec)?.attrs.set_str("colwidth", width);
+        {
+            let node = ctx.doc.get_mut(colspec)?;
+            if let Some(width) = widths.get(index) {
+                node.attrs.set_str("colwidth", width);
+            }
+            if index < stub_columns {
+                node.attrs.set_bool("stub", true);
+            }
         }
     }
     let mut rows = Vec::new();
@@ -1270,8 +1300,20 @@ fn build_table(
         let row = ctx.add(NodeKind::Row, tgroup)?;
         for cell in data {
             let entry = ctx.add(NodeKind::Entry, row)?;
-            let paragraph = ctx.add(NodeKind::Paragraph, entry)?;
-            ctx.parse_inline_into(cell, paragraph, line)?;
+            match cell {
+                DirectiveCell::Text(text) => {
+                    let paragraph = ctx.add(NodeKind::Paragraph, entry)?;
+                    ctx.parse_inline_into(text, paragraph, line)?;
+                }
+                DirectiveCell::Nodes(nodes) => {
+                    // Move the parsed body nodes into the entry verbatim. This
+                    // preserves nested tables and any unresolved `Pending`
+                    // directives they contain for the next fixpoint iteration.
+                    for &node in nodes {
+                        ctx.doc.append_child(entry, node)?;
+                    }
+                }
+            }
         }
         rows.push(row);
     }
@@ -1294,7 +1336,11 @@ fn column_widths(ctx: &DirectiveContext<'_>, cols: usize) -> Vec<String> {
             .map(|index| widths.get(index).cloned().unwrap_or_else(|| "1".to_owned()))
             .collect();
     }
-    vec!["50".to_owned(); cols]
+    if cols == 0 {
+        return Vec::new();
+    }
+    // Docutils `Table.get_column_widths()`: `[100 // n_cols] * n_cols`.
+    vec![(100 / cols).to_string(); cols]
 }
 
 fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -1323,7 +1369,16 @@ fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         .map_or(1, Vec::len);
     let widths = column_widths(ctx, cols);
     let title = ctx.argument(0).map(str::to_owned);
-    build_table(ctx, title.as_deref(), &header_rows, &body_rows, &widths)
+    let header = header_rows
+        .into_iter()
+        .map(|row| row.into_iter().map(DirectiveCell::Text).collect())
+        .collect::<Vec<_>>();
+    let body = body_rows
+        .into_iter()
+        .map(|row| row.into_iter().map(DirectiveCell::Text).collect())
+        .collect::<Vec<_>>();
+    let stub = ctx.option_int("stub-columns").unwrap_or(0).max(0) as usize;
+    build_table(ctx, title.as_deref(), &header, &body, &widths, stub)
 }
 
 fn list_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -1340,7 +1395,7 @@ fn list_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         });
     };
     let row_ids = ctx.doc.get(bullet)?.children.clone();
-    let mut table_data: Vec<Vec<String>> = Vec::new();
+    let mut table_data: Vec<Vec<DirectiveCell>> = Vec::new();
     for row_id in row_ids {
         let item_ids = ctx.doc.get(row_id)?.children.clone();
         let inner = item_ids
@@ -1350,20 +1405,50 @@ fn list_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         let mut cells = Vec::new();
         if let Some(inner) = inner {
             for cell_id in ctx.doc.get(inner)?.children.clone() {
-                let text = ctx.doc.get(cell_id).map_or_else(|_| String::new(), |node| node.astext(ctx.doc));
-                cells.push(text.trim().to_owned());
+                // A list-table cell's list item holds the cell's body nodes.
+                // Docutils copies `item.children` into the entry verbatim, so a
+                // nested directive (nested list-table / csv-table / table)
+                // must survive as a subtree to be resolved by the outer
+                // fixpoint. Plain cells are flattened to inline text as before
+                // (preserving the historical handling of inline roles such as
+                // `:ref:` inside list-table cells).
+                let nodes = ctx
+                    .doc
+                    .get(cell_id)
+                    .map_or_else(|_| Vec::new(), |node| node.children.clone());
+                let nested = nodes.iter().any(|&node| {
+                    ctx.doc
+                        .subtree_ids(node)
+                        .iter()
+                        .any(|&id| ctx.doc.get(id).is_ok_and(|n| n.kind == NodeKind::Pending))
+                });
+                if nested {
+                    cells.push(DirectiveCell::Nodes(nodes));
+                } else {
+                    let text = ctx
+                        .doc
+                        .get(cell_id)
+                        .map_or_else(|_| String::new(), |node| node.astext(ctx.doc));
+                    cells.push(DirectiveCell::Text(text.trim().to_owned()));
+                }
             }
         }
         table_data.push(cells);
     }
-    ctx.doc.remove_node(bullet)?;
     let cols = table_data.first().map_or(1, Vec::len);
     let header_count = ctx.option_int("header-rows").unwrap_or(0).max(0) as usize;
     let header_rows = table_data.iter().take(header_count).cloned().collect::<Vec<_>>();
     let body_rows = table_data.iter().skip(header_count).cloned().collect::<Vec<_>>();
     let widths = column_widths(ctx, cols);
     let title = ctx.argument(0).map(str::to_owned);
-    build_table(ctx, title.as_deref(), &header_rows, &body_rows, &widths)
+    let stub = ctx.option_int("stub-columns").unwrap_or(0).max(0) as usize;
+    // Build first: `build_table` moves each cell's body nodes out of the
+    // temporary bullet list and into the table's entries. Only then is it safe
+    // to remove the now-empty bullet list subtree (removing it earlier would
+    // mark the cell nodes dead before they can be reparented).
+    let result = build_table(ctx, title.as_deref(), &header_rows, &body_rows, &widths, stub);
+    ctx.doc.remove_node(bullet)?;
+    result
 }
 
 // ----- footnotes / citations -------------------------------------------------
