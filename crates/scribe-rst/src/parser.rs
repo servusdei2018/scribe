@@ -855,17 +855,33 @@ impl<'a> BlockParser<'a> {
     /// Computes `(start, end, body_indent)` of the indented block beginning at
     /// `from`, without moving the cursor. Blank lines are included when they
     /// are followed by another more-indented line.
+    ///
+    /// Leading blank lines are skipped so long as a more-indented line follows
+    /// (Docutils `StringList.get_indented(..., strip_top=True)`).  This is what
+    /// allows an item whose body starts on a later line to absorb a nested
+    /// list as a direct child instead of leaking it into a sibling
+    /// `block_quote` at the parent level.
     pub(crate) fn collect_indented_range(
         &self,
         from: usize,
         base_indent: usize,
     ) -> (usize, usize, usize) {
-        if from >= self.lines.len() || self.lines[from].blank {
+        let mut first = from;
+        while first < self.lines.len()
+            && self.lines[first].blank
+            && self.next_nonblank_indented(first + 1, base_indent + 1)
+        {
+            first += 1;
+        }
+        if first >= self.lines.len()
+            || self.lines[first].blank
+            || self.indent_at(first) <= base_indent
+        {
             return (from, from, base_indent + 1);
         }
-        let body_indent = self.min_indent_in_block(from, base_indent);
-        let mut end = from;
-        let mut i = from;
+        let body_indent = self.min_indent_in_block(first, base_indent);
+        let mut end = first;
+        let mut i = first;
         while i < self.lines.len() {
             let line = &self.lines[i];
             if line.blank {

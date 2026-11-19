@@ -30,8 +30,8 @@ test-highlight_options	html	0.973270	pass
 test-linkcheck	html	0.000000	skip
 test-markup-citation	pseudoxml	1.000000	pass
 test-markup-rubric	pseudoxml	0.784615	partial
-test-maxlistdepth	pseudoxml	0.875843	partial
-test-nested-enumerated-list	pseudoxml	0.891026	partial
+test-maxlistdepth	pseudoxml	1.000000	pass
+test-nested-enumerated-list	pseudoxml	1.000000	pass
 test-nested-tables	pseudoxml	0.625000	partial
 test-numfig	pseudoxml	0.824836	partial
 test-productionlist	pseudoxml	0.706562	partial
