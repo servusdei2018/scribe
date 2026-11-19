@@ -360,6 +360,12 @@ impl ConfigRegistry {
             entry("default_role", ConfigValue::None, ConfigType::Str, "env", "Default interpreted-text role."),
             entry("add_function_parentheses", ConfigValue::Bool(true), ConfigType::Bool, "env", "Append () to function names."),
             entry("add_module_names", ConfigValue::Bool(true), ConfigType::Bool, "env", "Prefix object names with module."),
+            // Phase 12: Python-domain configuration values (upstream
+            // `sphinx.domains.python.setup`).
+            entry("python_use_unqualified_type_names", ConfigValue::Bool(false), ConfigType::Bool, "env", "Display only the last component of type names."),
+            entry("python_display_short_literal_types", ConfigValue::Bool(false), ConfigType::Bool, "env", "Render Literal[...] annotations compactly."),
+            entry("python_trailing_comma_in_multi_line_signatures", ConfigValue::Bool(true), ConfigType::Bool, "env", "Trailing comma in multi-line signatures."),
+            entry("python_maximum_signature_line_length", ConfigValue::None, ConfigType::Int, "env", "Wrap signatures longer than this many characters."),
             entry("trim_footnote_reference_space", ConfigValue::Bool(false), ConfigType::Bool, "env", "Trim footnote spaces."),
             entry("show_authors", ConfigValue::Bool(false), ConfigType::Bool, "env", "Show authors."),
             entry("pygments_style", ConfigValue::None, ConfigType::Str, "html", "Pygments style."),
@@ -401,6 +407,27 @@ impl ConfigRegistry {
                 ConfigType::Enum { candidates: &["True", "False", "translated", "untranslated"] },
                 "env", "Translation progress classes."),
 
+            // ---- gettext / i18n (Phase 26) ----
+            // `gettext_compact` is bool|str upstream; the Bool default makes
+            // `-D gettext_compact=0` coerce correctly while a string loaded
+            // from conf.py is consumed verbatim by the builder helpers.
+            entry("gettext_compact", ConfigValue::Bool(true), ConfigType::Bool,
+                "gettext", "Compact gettext domains to the first path segment."),
+            entry("gettext_location", ConfigValue::Bool(true), ConfigType::Bool,
+                "gettext", "Emit `#: file:line` location comments."),
+            entry("gettext_uuid", ConfigValue::Bool(false), ConfigType::Bool,
+                "gettext", "Emit UUID location comments instead of files."),
+            entry("gettext_auto_build", ConfigValue::Bool(true), ConfigType::Bool,
+                "env", "Compile updated .po catalogs into .mo automatically."),
+            entry("gettext_additional_targets", string_list(&[]), ConfigType::List,
+                "env", "Additional nodes to extract (e.g. `index`, `literal-block`)."),
+            entry("gettext_last_translator", ConfigValue::from("FULL NAME <EMAIL@ADDRESS>"),
+                ConfigType::Str, "gettext", "POT last-translator header."),
+            entry("gettext_language_team", ConfigValue::from("LANGUAGE <LL@li.org>"),
+                ConfigType::Str, "gettext", "POT language-team header."),
+            entry("gettext_allow_fuzzy_translations", ConfigValue::Bool(false), ConfigType::Bool,
+                "gettext", "Include fuzzy entries when compiling .mo catalogs."),
+
             // ---- HTML builder ----
             computed("htmlhelp_basename", default_htmlhelp_basename, ConfigType::Str, "html", "HTML Help basename (legacy compatibility key)."),
             entry("html_theme", ConfigValue::from("alabaster"), ConfigType::Str, "html", "HTML theme name."),
@@ -430,9 +457,27 @@ impl ConfigRegistry {
             // ---- intersphinx ----
             entry("intersphinx_mapping", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "Intersphinx targets."),
             entry("intersphinx_cache_limit", ConfigValue::Int(5), ConfigType::Int, "", "Inventory cache lifetime."),
+            entry("intersphinx_timeout", ConfigValue::None, ConfigType::Float, "", "Intersphinx fetch timeout in seconds."),
+            entry("intersphinx_resolve_self", ConfigValue::from(""), ConfigType::Str, "env", "Name of the current project for self-referential intersphinx targets."),
             entry("intersphinx_disabled_reftypes", string_list(&[]), ConfigType::List, "env", "Intersphinx reference types to disable."),
             entry("extlinks", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "External link templates."),
             entry("linkcheck_timeout", ConfigValue::Float(30.0), ConfigType::Float, "", "Linkcheck timeout."),
+            entry("linkcheck_ignore", string_list(&[]), ConfigType::List, "", "Linkcheck ignore regexes."),
+            entry("linkcheck_exclude_documents", string_list(&[]), ConfigType::List, "", "Documents excluded from link checking."),
+            entry("linkcheck_allowed_redirects", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "", "Allowed linkcheck redirect patterns."),
+            entry("linkcheck_auth", string_list(&[]), ConfigType::List, "", "Linkcheck authentication patterns."),
+            entry("linkcheck_request_headers", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "", "Per-URL linkcheck request headers."),
+            entry("linkcheck_retries", ConfigValue::Int(1), ConfigType::Int, "", "Linkcheck retry count."),
+            entry("linkcheck_workers", ConfigValue::Int(5), ConfigType::Int, "", "Linkcheck worker count."),
+            entry("linkcheck_anchors", ConfigValue::Bool(true), ConfigType::Bool, "", "Check URL anchors."),
+            entry("linkcheck_anchor_re", string_list(&[]), ConfigType::List, "", "Additional anchor character classes."),
+            entry("linkcheck_anchors_ignore", string_list(&["^!"]), ConfigType::List, "", "Ignored anchor patterns."),
+            entry("linkcheck_anchors_ignore_for_url", string_list(&[]), ConfigType::List, "", "URLs whose anchors are ignored."),
+            entry("linkcheck_rate_limit_timeout", ConfigValue::Float(300.0), ConfigType::Float, "", "Maximum linkcheck rate-limit delay."),
+            entry("linkcheck_allow_unauthorized", ConfigValue::Bool(false), ConfigType::Bool, "", "Treat 401 as working."),
+            entry("linkcheck_report_timeouts_as_broken", ConfigValue::Bool(false), ConfigType::Bool, "", "Report timeouts as broken links."),
+            entry("linkcheck_case_insensitive_urls", string_list(&[]), ConfigType::List, "", "Case-insensitive URL patterns."),
+            entry("xml_pretty", ConfigValue::Bool(true), ConfigType::Bool, "", "Pretty-print Docutils XML output."),
             entry("coverage_c_path", string_list(&[]), ConfigType::List, "", "C coverage header paths."),
             entry("coverage_c_regexes", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "", "C coverage regexes."),
 
@@ -448,13 +493,36 @@ impl ConfigRegistry {
             entry("latex_additional_files", string_list(&[]), ConfigType::List, "", "Extra LaTeX files."),
             computed("man_pages", default_man_pages, ConfigType::List, "", "Manpage definitions."),
             entry("man_show_urls", ConfigValue::Bool(false), ConfigType::Bool, "", "Show URLs in manpages."),
+            entry("man_make_section_directory", ConfigValue::Bool(false), ConfigType::Bool, "", "Emit man pages into manN/ directories."),
             computed("texinfo_documents", default_texinfo_documents, ConfigType::List, "", "Texinfo document definitions."),
             entry("texinfo_show_urls", ConfigValue::from("footnote"), ConfigType::Str, "", "Show URLs in Texinfo."),
+            entry("texinfo_appendices", string_list(&[]), ConfigType::List, "", "Texinfo appendix documents."),
+            entry("texinfo_no_detailmenu", ConfigValue::Bool(false), ConfigType::Bool, "", "Suppress the Texinfo detail menu."),
+
+            // ---- Plain text ----
+            entry("text_width", ConfigValue::Int(80), ConfigType::Int, "text", "Plain-text wrap width (0 = terminal width, 80 fallback)."),
+            entry("text_newlines", ConfigValue::from("unix"), ConfigType::Str, "text", "Plain-text newline style (unix/windows/native)."),
+            entry("text_sectionchars", ConfigValue::from("*=-~\"+`"), ConfigType::Str, "text", "Heading underline characters by level."),
+            entry("text_add_secnumbers", ConfigValue::Bool(true), ConfigType::Bool, "text", "Prefix section titles with toctree numbers."),
+            entry("text_secnumber_suffix", ConfigValue::from(". "), ConfigType::Str, "text", "Separator after a section number."),
+            entry("text_unicode_tables", ConfigValue::Bool(false), ConfigType::Bool, "text", "Draw plain-text tables with Unicode box characters."),
 
             // ---- EPUB ----
             computed("epub_title", default_epub_title, ConfigType::Str, "epub", "EPUB title."),
             computed("epub_author", default_epub_author, ConfigType::Str, "epub", "EPUB author."),
             computed("epub_copyright", default_copyright, ConfigType::Str, "epub", "EPUB copyright."),
+            entry("epub_uid", ConfigValue::from("unknown"), ConfigType::Str, "epub", "EPUB unique identifier."),
+            entry("epub_publisher", ConfigValue::None, ConfigType::Str, "epub", "EPUB publisher."),
+            entry("epub_language", ConfigValue::from("en"), ConfigType::Str, "epub", "EPUB language."),
+            entry("epub_basename", ConfigValue::None, ConfigType::Str, "epub", "EPUB output basename."),
+            entry("epub_description", ConfigValue::from("unknown"), ConfigType::Str, "epub", "EPUB description."),
+            entry("epub_contributor", ConfigValue::from("unknown"), ConfigType::Str, "epub", "EPUB contributor."),
+            entry("epub_identifier", ConfigValue::from("unknown"), ConfigType::Str, "epub", "EPUB identifier value."),
+            entry("epub_scheme", ConfigValue::from("unknown"), ConfigType::Str, "epub", "EPUB identifier scheme."),
+            entry("epub_version", ConfigValue::from("3.0"), ConfigType::Str, "epub", "EPUB package version."),
+            entry("epub_tocdepth", ConfigValue::Int(6), ConfigType::Int, "epub", "Maximum EPUB navigation depth."),
+            entry("epub_writing_mode", ConfigValue::from("horizontal"), ConfigType::Str, "epub", "EPUB page progression direction."),
+            entry("epub_exclude_files", string_list(&[]), ConfigType::List, "epub", "Files to exclude from the EPUB archive."),
 
             // ---- autodoc / todo ----
             entry("autoclass_content", ConfigValue::from("class"),
@@ -468,8 +536,42 @@ impl ConfigRegistry {
             entry("autodoc_mock_imports", string_list(&[]), ConfigType::List, "env", "Mocked imports."),
             entry("autodoc_type_aliases", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "Type alias mappings."),
             entry("autodoc_default_options", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "Default autodoc options."),
+            // ---- Phase 27 third-party Python/Wasm interop bridge ----
+            entry("scribe_python_extensions", string_list(&[]), ConfigType::List, "env", "Python extension worker scripts to load via the JSON-RPC shim."),
+            entry("scribe_python", ConfigValue::from("python3"), ConfigType::Str, "", "Python interpreter used by the extension shim."),
+            entry("scribe_wasm_plugins", string_list(&[]), ConfigType::List, "env", "Wasm plugin manifests/modules to load via the plugin host."),
             entry("todo_include_todos", ConfigValue::Bool(false), ConfigType::Bool, "html", "Include todo nodes."),
             entry("todo_link_only", ConfigValue::Bool(false), ConfigType::Bool, "html", "Link-only todo nodes."),
+            entry("todo_emit_warnings", ConfigValue::Bool(false), ConfigType::Bool, "env", "Emit a warning for every unresolved todo entry."),
+
+            // ---- Phase 20 built-in extensions ----
+            entry("extlinks_detect_hardcoded_links", ConfigValue::Bool(false), ConfigType::Bool, "env", "Warn about hardcoded links that an extlink could replace."),
+            entry("viewcode_import", ConfigValue::None, ConfigType::Any, "", "Import hook hook for viewcode (native no-op)."),
+            entry("viewcode_enable_epub", ConfigValue::Bool(false), ConfigType::Bool, "", "Enable viewcode for EPUB builders."),
+            entry("viewcode_follow_imported_members", ConfigValue::Bool(true), ConfigType::Bool, "", "Follow imported members to their defining module."),
+            entry("viewcode_line_numbers", ConfigValue::Bool(false), ConfigType::Bool, "env", "Show line numbers in viewcode module pages."),
+            entry("graphviz_dot", ConfigValue::from("dot"), ConfigType::Str, "html", "Graphviz `dot` executable."),
+            entry("graphviz_dot_args", string_list(&[]), ConfigType::List, "html", "Extra arguments passed to `dot`."),
+            entry("graphviz_output_format", ConfigValue::from("png"), ConfigType::Str, "html", "Graphviz output format (`png` or `svg`)."),
+            entry("duration_print_total", ConfigValue::Bool(true), ConfigType::Bool, "", "Print the total reading duration report."),
+            entry("duration_print_slowest", ConfigValue::Bool(true), ConfigType::Bool, "", "Print the slowest reading durations report."),
+            entry("duration_n_slowest", ConfigValue::Int(5), ConfigType::Int, "", "Number of slowest documents to print."),
+            entry("duration_write_json", ConfigValue::None, ConfigType::Str, "", "Write reading durations to this JSON file."),
+            entry("duration_limit", ConfigValue::None, ConfigType::Float, "", "Warn when a document's reading duration exceeds this value."),
+
+            // ---- Phase 22 autosummary / doctest ----
+            entry("autosummary_generate", ConfigValue::Bool(true), ConfigType::Bool, "env", "Generate autosummary stub pages before reading."),
+            entry("autosummary_imported_members", ConfigValue::Bool(false), ConfigType::Bool, "env", "Include imported members in generated stubs."),
+            entry("autosummary_filename_map", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "Rename generated autosummary stub files."),
+            entry("autosummary_ignore_module_all", ConfigValue::Bool(false), ConfigType::Bool, "env", "Ignore __all__ when generating stubs."),
+            entry("autosummary_context", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "env", "Extra template context for autosummary stubs."),
+            entry("doctest_test_doctest_blocks", ConfigValue::from("default"), ConfigType::Str, "env", "Group name for free-standing doctest blocks (empty disables them)."),
+            entry("doctest_global_setup", ConfigValue::from(""), ConfigType::Str, "", "Python code run before every doctest group."),
+            entry("doctest_global_cleanup", ConfigValue::from(""), ConfigType::Str, "", "Python code run after every doctest group."),
+            entry("doctest_default_flags", ConfigValue::Int(41), ConfigType::Int, "", "Default doctest comparison option bitmask."),
+            entry("doctest_fail_fast", ConfigValue::Bool(false), ConfigType::Bool, "", "Stop at the first failing doctest."),
+            entry("doctest_show_successes", ConfigValue::Bool(true), ConfigType::Bool, "", "List successful groups in output.txt."),
+            entry("doctest_path", string_list(&[]), ConfigType::List, "", "Extra sys.path entries for doctest execution."),
         ];
 
         for candidate in entries {

@@ -555,15 +555,23 @@ pub fn load_config_with(request: LoadRequest) -> Result<(Config, Vec<ConfigWarni
                 config.add_warning(warning);
             }
             for (name, value) in values {
-                match config.set_explicit(&name, value) {
+                match config.set_explicit(&name, value.clone()) {
                     Ok(()) => {}
-                    Err(ConfigError::UnknownKey(key)) => config.add_warning(
-                        ConfigWarning::new(
-                            ConfigWarningKind::UnknownKey,
-                            format!("unknown config value `{key}` in {}, ignoring", path.display()),
-                        )
-                        .with_path(&path),
-                    ),
+                    Err(ConfigError::UnknownKey(key)) => {
+                        // Upstream's config namespace retains arbitrary
+                        // `conf.py` assignments; `sphinx.ext.ifconfig`
+                        // evaluates expressions against that full namespace.
+                        // Keep the value accessible while still warning that
+                        // it is not a registered Sphinx setting.
+                        config.set_raw(&name, value);
+                        config.add_warning(
+                            ConfigWarning::new(
+                                ConfigWarningKind::UnknownKey,
+                                format!("unknown config value `{key}` in {}, ignoring", path.display()),
+                            )
+                            .with_path(&path),
+                        );
+                    }
                     Err(error) => config.add_warning(
                         ConfigWarning::new(
                             ConfigWarningKind::TypeMismatch,
