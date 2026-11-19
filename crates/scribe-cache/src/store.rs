@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 /// Magic number at the start of every cache file.
 pub const CACHE_MAGIC: [u8; 4] = *b"SCRB";
 /// Current cache envelope version. Bump when the on-disk layout changes.
-pub const CACHE_FORMAT_VERSION: u32 = 1;
+pub const CACHE_FORMAT_VERSION: u32 = 2;
 const HEADER_LEN: usize = 4 + 4 + 8 + 32;
 
 static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);

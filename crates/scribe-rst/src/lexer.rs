@@ -83,6 +83,19 @@ impl<'a> SourceLine<'a> {
     }
 }
 
+/// Removes a single leading UTF-8 byte-order mark (`U+FEFF`), if present.
+///
+/// Python's `utf-8-sig` codec (Sphinx's default `source_encoding`) strips the
+/// BOM during source ingestion, before Docutils scans lines. Scribe therefore
+/// applies the same strip at the parse entry point so every builder and every
+/// direct caller of [`crate::parse`] sees BOM-free source and byte offsets.
+/// Only the *leading* mark is removed; a `U+FEFF` occurring elsewhere in the
+/// document is preserved as content.
+#[must_use]
+pub fn strip_utf8_bom(source: &str) -> &str {
+    source.strip_prefix('\u{feff}').unwrap_or(source)
+}
+
 /// Detects a uniform ASCII-punctuation adornment line.
 ///
 /// Returns `(character, visible_width)` or `None`. The character set is

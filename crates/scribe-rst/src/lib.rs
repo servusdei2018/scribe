@@ -57,7 +57,7 @@ pub use inline::{
     InlineWarning, MaterializedInline, XrefMeta,
 };
 pub use inline_seam::{parse_inline_placeholder, InlineContext};
-pub use lexer::{adornment_of, column_width, is_adornment_char, Lexer, SourceLine};
+pub use lexer::{adornment_of, column_width, is_adornment_char, strip_utf8_bom, Lexer, SourceLine};
 pub use parser::{ParseOutput, SubstitutionDirective};
 
 pub use directive_registry::{
@@ -121,6 +121,10 @@ pub fn parse(source: &str) -> ParseOutput {
 /// `sphinx.util.rst._prepend_prologue` / `_append_epilogue`), so every span in
 /// the resulting document refers to the augmented text.
 pub fn parse_with_options(source: &str, options: ParseOptions) -> ParseOutput {
+    // Upstream decodes sources with `utf-8-sig`, which removes a leading BOM
+    // before the RST scanner sees a single character. Strip it here so every
+    // line/byte offset in the resulting document is BOM-free.
+    let source = strip_utf8_bom(source);
     let mut effective = options;
     if effective.tab_width == 0 {
         effective.tab_width = 8;

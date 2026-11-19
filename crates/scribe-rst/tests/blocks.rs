@@ -354,3 +354,24 @@ fn spans_are_recorded_on_nodes() {
     assert_eq!(para.span.map(|s| s.start), Some(13));
     assert_eq!(para.source.as_ref().and_then(|s| s.line), Some(4));
 }
+
+#[test]
+fn leading_utf8_bom_is_stripped_before_scanning() {
+    // Sphinx decodes sources with `utf-8-sig`, so a leading BOM never reaches
+    // Docutils' line scanner. Scribe must produce byte-identical doctrees for
+    // a BOM-prefixed source and its plain equivalent.
+    let plain = parse("Title\n=====\n\nBody.\n");
+    let with_bom = parse("\u{feff}Title\n=====\n\nBody.\n");
+    assert_eq!(
+        plain.document.to_pseudoxml().expect("pseudoxml"),
+        with_bom.document.to_pseudoxml().expect("pseudoxml"),
+    );
+
+    let pseudo = pseudo("\u{feff}Title\n=====\n\nBody.\n");
+    assert!(!pseudo.contains('\u{feff}'), "BOM leaked into doctree: {pseudo}");
+    assert!(pseudo.contains("names=\"title\""));
+
+    // A BOM elsewhere in the document is ordinary content, not stripped.
+    let mid = parse("Title\n=====\n\nBody \u{feff} text.\n");
+    assert!(mid.document.to_pseudoxml().expect("pseudoxml").contains('\u{feff}'));
+}

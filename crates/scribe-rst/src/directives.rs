@@ -904,8 +904,14 @@ fn default_role_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 }
 
 fn title_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
-    if let Some(title) = ctx.argument(0) {
-        ctx.doc.metadata.title = Some(title.to_owned());
+    let title = ctx.argument(0).map(str::to_owned);
+    if let Some(title) = title {
+        // Docutils' `.. title::` directive stores its argument in the
+        // document's attribute dict (no node is emitted). Mirror that on the
+        // root node so `pseudoxml` reports `<document title="...">`, and keep
+        // `DocumentMetadata::title` as the long title used for HTML `<title>`.
+        ctx.doc.metadata.title = Some(title.clone());
+        ctx.doc.root_mut().attrs.set_str("title", title);
     }
     Ok(Vec::new())
 }

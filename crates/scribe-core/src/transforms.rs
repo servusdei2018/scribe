@@ -85,6 +85,9 @@ pub mod priority {
     pub const ADD_TRANSLATION_CLASSES: u32 = 950;
     /// `sphinx.transforms.FilterSystemMessages` / `i18n.RemoveTranslatableInline`.
     pub const FILTER_SYSTEM_MESSAGES: u32 = 999;
+    /// Sphinx `MetadataCollector` (doctree-read env collector). Runs after all
+    /// read transforms so the bibliographic preamble can be stripped safely.
+    pub const DOCINFO: u32 = 1000;
     /// `sphinx.transforms.post_transforms.OnlyNodeTransform`.
     pub const ONLY_NODE: u32 = 50;
     /// Post-transforms `SigElementFallbackTransform` / `PropagateDescDomain`.
@@ -571,6 +574,7 @@ impl TransformRegistry {
         registry.register_read(AddTranslationClasses);
         registry.register_read(FilterSystemMessages);
         registry.register_read(RemoveTranslatableInlineRead);
+        registry.register_read(DocInfoTransform);
         // ----- resolved phase -----
         registry.register_post(ReferencesResolver);
         registry.register_post(OnlyNodeTransform);
@@ -2026,6 +2030,79 @@ impl Transform for FilterSystemMessages {
         }
         if changed { TransformResult::changed() } else { TransformResult::unchanged() }
     }
+}
+
+/// `MetadataCollector` (priority 1000) — extract the leading docinfo field
+/// list into [`scribe_ast::DocumentMetadata::docinfo`] and remove it from the
+/// doctree.
+///
+/// Upstream's `MetadataCollector` runs on `doctree-read`, after every read
+/// transform, and pops the whole `docinfo` node once its bibliographic fields
+/// have been stored in `env.metadata`. Scribe represents the docinfo preamble
+/// as a plain `FieldList` at the document root, so this transform mirrors the
+/// same "collect then drop" behaviour. Only a field list that is the *first*
+/// root child qualifies: Docutils treats later field lists as ordinary body
+/// content and leaves them in the doctree.
+#[derive(Debug)]
+pub struct DocInfoTransform;
+
+impl Transform for DocInfoTransform {
+    fn name(&self) -> &'static str {
+        "MetadataCollector"
+    }
+
+    fn default_priority(&self) -> u32 {
+        priority::DOCINFO
+    }
+
+    fn apply(&self, document: &mut Document, _ctx: &TransformContext<'_>) -> TransformResult {
+        strip_docinfo(document)
+    }
+}
+
+/// Implements [`DocInfoTransform`] without panicking on malformed doctrees.
+fn strip_docinfo(document: &mut Document) -> TransformResult {
+    let root = document.root;
+    let first = match document.children(root).ok().and_then(|children| children.first().copied()) {
+        Some(id) => id,
+        None => return TransformResult::unchanged(),
+    };
+    if document.get(first).map(|node| node.kind).ok() != Some(NodeKind::FieldList) {
+        return TransformResult::unchanged();
+    }
+
+    let field_ids = document.children(first).unwrap_or_default().to_vec();
+    let mut collected = Vec::new();
+    for field in field_ids {
+        if document.get(field).map(|node| node.kind).ok() != Some(NodeKind::Field) {
+            continue;
+        }
+        let child_ids = document.children(field).unwrap_or_default().to_vec();
+        let mut name = None;
+        let mut body = None;
+        for child in child_ids {
+            match document.get(child).map(|node| node.kind).ok() {
+                Some(NodeKind::FieldName) if name.is_none() => {
+                    name = Some(document.get(child).map(|node| node.astext(document)).unwrap_or_default());
+                }
+                Some(NodeKind::FieldBody) if body.is_none() => {
+                    body = Some(document.get(child).map(|node| node.astext(document)).unwrap_or_default());
+                }
+                _ => {}
+            }
+        }
+        if let Some(name) = name.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+            collected.push((name, body.unwrap_or_default().trim().to_owned()));
+        }
+    }
+
+    if collected.is_empty() || document.remove_node(first).is_err() {
+        return TransformResult::unchanged();
+    }
+    for (name, body) in collected {
+        document.metadata.docinfo.insert(name, body);
+    }
+    TransformResult::changed()
 }
 
 /// Docutils `Footnotes` (priority 620) — assign numbers/symbols to footnotes,

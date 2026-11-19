@@ -272,7 +272,9 @@ pub fn prepare(
                 .collect();
 
             output.document.metadata.docname = Some(docname.clone());
-            output.document.metadata.title = extract_title(&output.document);
+            if output.document.metadata.title.is_none() {
+                output.document.metadata.title = extract_title(&output.document);
+            }
             Some((docname.clone(), output.document, doc_warnings))
         })
         .collect();

@@ -951,6 +951,13 @@ fn is_orphan(docs: &BTreeMap<String, Document>, docname: &str) -> bool {
     let Some(document) = docs.get(docname) else {
         return false;
     };
+    // `MetadataCollector` strips the leading docinfo field list into
+    // `DocumentMetadata` before toctree diagnostics run, so consult the
+    // collected metadata first. Keep the legacy AST scan as a fallback for
+    // callers that pass a freshly parsed (untransformed) doctree.
+    if document.metadata.is_orphan() {
+        return true;
+    }
     document.preorder_ids().into_iter().any(|id| {
         document.get(id).is_ok_and(|node| {
             node.kind == NodeKind::Field

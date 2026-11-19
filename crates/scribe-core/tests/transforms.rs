@@ -6,6 +6,7 @@
 //! `transform_differential.rs`.
 
 use scribe_ast::{Document, NodeId, NodeKind};
+use scribe_rst::parse;
 use scribe_config::{Config, ConfigValue, Tags};
 use scribe_core::{
     apply_transforms, Phase, Transform, TransformContext, TransformPipeline, TransformRegistry,
@@ -441,4 +442,58 @@ fn malformed_documents_never_panic() {
     let _ = apply_transforms(&mut doc, &ctx, Phase::Read);
     let _ = apply_transforms(&mut doc, &ctx, Phase::Resolved);
     let _ = doc.to_pseudoxml();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 41: docinfo field stripping (Sphinx MetadataCollector)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn docinfo_preamble_is_collected_and_removed() {
+    let cfg = config(&[]);
+    let mut doc = parse(
+        ":tocdepth: 2\n:orphan:\n:nocomments:\n:nosearch:\n:author: Jane Doe\n\nTitle\n=====\n\nBody.\n",
+    )
+    .document;
+
+    // A leading field list is present before the read transforms.
+    assert!(doc.children(doc.root).expect("arena").iter().any(|&id| {
+        doc.get(id).is_ok_and(|node| node.kind == NodeKind::FieldList)
+    }));
+
+    let report = run_read(&mut doc, &cfg);
+    assert!(report.applied_names().contains(&"MetadataCollector"));
+
+    // The docinfo node is gone from the doctree, exactly as upstream.
+    assert!(!doc.children(doc.root).expect("arena").iter().any(|&id| {
+        doc.is_live(id) && doc.get(id).is_ok_and(|node| node.kind == NodeKind::FieldList)
+    }));
+    assert!(!doc.to_pseudoxml().expect("pseudoxml").contains("tocdepth"));
+
+    // Sphinx-specific fields are available as document metadata.
+    assert_eq!(doc.metadata.tocdepth(), Some(2));
+    assert!(doc.metadata.is_orphan());
+    assert!(doc.metadata.nocomments());
+    assert!(doc.metadata.nosearch());
+    assert_eq!(doc.metadata.docinfo.get("author").map(String::as_str), Some("Jane Doe"));
+}
+
+#[test]
+fn non_preamble_field_list_is_preserved() {
+    let cfg = config(&[]);
+    let mut doc = parse("Title\n=====\n\n:tocdepth: 2\n\nBody.\n").document;
+    run_read(&mut doc, &cfg);
+    // Docutils only recognises bibliographic fields at the top of a document;
+    // a field list inside a section is ordinary body content.
+    assert!(doc.to_pseudoxml().expect("pseudoxml").contains("field_list"));
+    assert!(!doc.metadata.is_orphan());
+    assert_eq!(doc.metadata.tocdepth(), None);
+}
+
+#[test]
+fn invalid_tocdepth_coerces_to_zero() {
+    let cfg = config(&[]);
+    let mut doc = parse(":tocdepth: bogus\n\nTitle\n=====\n").document;
+    run_read(&mut doc, &cfg);
+    assert_eq!(doc.metadata.tocdepth(), Some(0));
 }

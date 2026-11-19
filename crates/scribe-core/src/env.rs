@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// Version of the serialized environment snapshot. Bump whenever a field is
 /// added, removed or retyped; incompatible caches are then treated as cold.
-pub const ENV_FORMAT_VERSION: u32 = 2;
+pub const ENV_FORMAT_VERSION: u32 = 3;
 
 /// Cache key used for the top-level environment artifact.
 pub const ENV_CACHE_KEY: &str = "environment";

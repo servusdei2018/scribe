@@ -368,12 +368,17 @@ impl<'a> HTML5Translator<'a> {
     fn doc_title(&self, docname: &str) -> Option<String> {
         self.ctx.env.documents.get(docname)
             .and_then(|snapshot| snapshot.doctree.as_ref())
-            .and_then(|doc| doc.metadata.title.clone().or_else(|| {
+            .and_then(|doc| {
+                // Upstream toctree captions use `env.titles` (the *short*
+                // title: first section heading), while HTML `<title>` uses
+                // `env.longtitles` (the `.. title::` override). Prefer the
+                // section heading here so an explicit title does not leak
+                // into navigation links.
                 doc.preorder_ids().into_iter().find_map(|id| {
                     let node = doc.get(id).ok()?;
                     if node.kind == NodeKind::Title { Some(node.astext(doc)) } else { None }
-                })
-            }))
+                }).or_else(|| doc.metadata.title.clone())
+            })
             .or_else(|| self.ctx.env.all_docs.get(docname).and_then(|meta| meta.title.clone()))
     }
 

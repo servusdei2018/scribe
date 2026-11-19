@@ -381,7 +381,11 @@ pub fn build_with_flavor(
             }
 
             output.document.metadata.docname = Some(docname.clone());
-            output.document.metadata.title = extract_title(&output.document);
+            // A `.. title::` directive already supplied the long title; only
+            // fall back to the first section title when it did not.
+            if output.document.metadata.title.is_none() {
+                output.document.metadata.title = extract_title(&output.document);
+            }
             let _ = events.emit("doctree-read", &Event::DoctreeRead {
                 docname: docname.clone(),
                 doctree: doctree_json(docname, &output.document),

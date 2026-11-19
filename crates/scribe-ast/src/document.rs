@@ -15,6 +15,8 @@
 //! These invariants make the arena cheap to mutate from the transform phases
 //! without ever invalidating an id held by a domain resolver or writer.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AstError, AstResult};
@@ -30,6 +32,41 @@ pub struct DocumentMetadata {
     pub title: Option<String>,
     /// Document language code (`en`, `ja`, ...).
     pub language: Option<String>,
+    /// Bibliographic fields collected from a leading docinfo field list.
+    ///
+    /// Sphinx's `MetadataCollector` reads these into `env.metadata[docname]`
+    /// and then removes the `docinfo` node from the doctree before any writer
+    /// sees it. `:tocdepth:`, `:orphan:`, `:nocomments:` and `:nosearch:` are
+    /// the Sphinx-specific fields; standard Docutils fields (author, date,
+    /// version, ...) are collected the same way.
+    #[serde(default)]
+    pub docinfo: BTreeMap<String, String>,
+}
+
+impl DocumentMetadata {
+    /// `:tocdepth:` docinfo value. Upstream coerces an unparsable value to 0.
+    #[must_use]
+    pub fn tocdepth(&self) -> Option<i32> {
+        self.docinfo.get("tocdepth").map(|value| value.trim().parse::<i32>().unwrap_or(0))
+    }
+
+    /// `true` when the document declares `:orphan:`.
+    #[must_use]
+    pub fn is_orphan(&self) -> bool {
+        self.docinfo.contains_key("orphan")
+    }
+
+    /// `true` when the document declares `:nocomments:`.
+    #[must_use]
+    pub fn nocomments(&self) -> bool {
+        self.docinfo.contains_key("nocomments")
+    }
+
+    /// `true` when the document declares `:nosearch:`.
+    #[must_use]
+    pub fn nosearch(&self) -> bool {
+        self.docinfo.contains_key("nosearch")
+    }
 }
 
 /// An arena of nodes forming one doctree.

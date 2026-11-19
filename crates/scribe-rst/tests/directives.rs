@@ -52,6 +52,20 @@ fn builtin_registry_covers_all_core_directives() {
 }
 
 #[test]
+fn title_directive_sets_document_metadata_without_a_node() {
+    let (output, report, _) = resolve(
+        ".. title:: Set by directive\n\nSection Title\n=============\n\nBody.\n",
+    );
+    assert!(report.is_clean(), "unexpected issues: {:?}", report.unresolved);
+    assert_eq!(output.document.metadata.title.as_deref(), Some("Set by directive"));
+    let pseudo = output.document.to_pseudoxml().expect("pseudoxml");
+    assert!(pseudo.contains("title=\"Set by directive\""), "{pseudo}");
+    assert!(!pseudo.contains("<title>\n            Set by directive"), "{pseudo}");
+    // The real section title is still rendered as the document's heading.
+    assert!(pseudo.contains("Section Title"), "{pseudo}");
+}
+
+#[test]
 fn admonitions_produce_upstream_nodes_and_attributes() {
     let out = pseudo(
         ".. note::\n   :class: special\n   :name: my note\n\n   Body with *em*.\n",
