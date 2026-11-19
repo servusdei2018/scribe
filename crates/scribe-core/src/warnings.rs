@@ -54,6 +54,101 @@ impl WarningCode {
     }
 }
 
+/// A source location attached to a warning, mirroring upstream's `location`
+/// keyword (either a `(docname, lineno)` tuple or a node source/line pair).
+///
+/// Sphinx renders a located warning as `path:LINE: WARNING: msg [code]` (see
+/// `SphinxLogRecord.getMessage` and `WarningLogRecordTranslator.filter`). When
+/// only a line is known, upstream uses `<unknown>:LINE`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WarningLocation {
+    /// Source path (absolute in upstream's node-location form), when known.
+    pub path: Option<String>,
+    /// 1-based source line, when known.
+    pub line: Option<u32>,
+}
+
+impl WarningLocation {
+    /// Creates a location from an optional source path and line.
+    pub fn new(path: Option<String>, line: Option<u32>) -> Self {
+        Self { path, line }
+    }
+
+    /// Creates a location from a path only.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self { path: Some(path.into()), line: None }
+    }
+
+    /// Creates a location carrying both a path and a 1-based line.
+    pub fn at(path: impl Into<String>, line: u32) -> Self {
+        Self { path: Some(path.into()), line: Some(line) }
+    }
+
+    /// Renders the `path:LINE` prefix upstream puts before the severity.
+    pub fn render(&self) -> String {
+        match (&self.path, self.line) {
+            (Some(path), Some(line)) => format!("{path}:{line}"),
+            (Some(path), None) => path.clone(),
+            (None, Some(line)) => format!("<unknown>:{line}"),
+            (None, None) => "<unknown>".to_owned(),
+        }
+    }
+}
+
+/// Formats one canonical Sphinx warning line.
+///
+/// Mirrors `sphinx.util.logging.WarningLogRecordTranslator.filter` (which
+/// appends ` [type.subtype]`) and `SphinxLogRecord.getMessage` (which prefixes
+/// `location: ` and `WARNING: `). The result is what the CLI prints after its
+/// own `scribe: warning: ` prefix.
+pub fn format_warning(message: &str, code: &WarningCode, location: Option<&WarningLocation>) -> String {
+    let suffix = format!(" [{}]", code.as_str());
+    match location {
+        Some(location) => format!("{}: WARNING: {}{}", location.render(), message, suffix),
+        None => format!("WARNING: {}{}", message, suffix),
+    }
+}
+
+/// Canonical code emitted by upstream's generic missing-reference warning.
+///
+/// `sphinx/transforms/post_transforms/__init__.py` logs these as
+/// `type='ref', subtype=<reftype>` (for example `ref.class`, `ref.identifier`,
+/// `ref.ref`). This differs from [`missing_reference_code`], which maps
+/// Python types to the documented `ref.python` *suppression family*; the
+/// display code must use the concrete reftype to match the oracle's suffix.
+pub fn missing_reference_display_code(typ: &str) -> WarningCode {
+    if typ.is_empty() {
+        WarningCode::bare("ref")
+    } else {
+        WarningCode::typed("ref", typ)
+    }
+}
+
+/// Canonical code for a duplicate-declaration warning of `domain`
+/// (`duplicate_declaration.cpp` / `.c`, or the bare family otherwise).
+pub fn duplicate_display_code(domain: &str) -> WarningCode {
+    match domain {
+        "cpp" | "c" => WarningCode::typed("duplicate_declaration", domain),
+        _ => WarningCode::bare("duplicate_declaration"),
+    }
+}
+
+/// Normalizes a source path to the absolute form upstream logs for node
+/// locations. Falls back to joining the current directory when the file is
+/// not (or no longer) present on disk, so rendering never needs an I/O
+/// result to succeed.
+pub fn absolute_source_path(path: &std::path::Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let resolved = absolute.canonicalize().unwrap_or(absolute);
+    resolved.to_string_lossy().into_owned()
+}
+
 /// Stable scribe diagnostic code → canonical Sphinx warning code.
 ///
 /// Each entry is `(scribe_code, upstream_type, upstream_subtype)`. The
@@ -244,6 +339,27 @@ mod tests {
         assert!(is_code_suppressed("scribe::toc::circular", &["toc.circular".to_owned()]));
         assert!(is_code_suppressed("scribe::rst::parse", &["docutils".to_owned()]));
         assert!(!is_code_suppressed("scribe::toc::circular", &["toc.not_included".to_owned()]));
+    }
+
+    #[test]
+    fn canonical_warning_lines_match_sphinx_logger_shape() {
+        let code = missing_reference_display_code("class");
+        assert_eq!(code.as_str(), "ref.class");
+        let located = WarningLocation::at("index.rst", 12);
+        assert_eq!(
+            format_warning("py:class reference target not found: foo.Age", &code, Some(&located)),
+            "index.rst:12: WARNING: py:class reference target not found: foo.Age [ref.class]"
+        );
+        assert_eq!(
+            format_warning("undefined label: 'x'", &missing_reference_display_code("ref"), Some(&WarningLocation::at("index.rst", 6))),
+            "index.rst:6: WARNING: undefined label: 'x' [ref.ref]"
+        );
+        assert_eq!(
+            format_warning("no location", &WarningCode::typed("toc", "not_included"), None),
+            "WARNING: no location [toc.not_included]"
+        );
+        assert_eq!(WarningLocation::new(None, Some(1)).render(), "<unknown>:1");
+        assert_eq!(duplicate_display_code("cpp").as_str(), "duplicate_declaration.cpp");
     }
 
     #[test]

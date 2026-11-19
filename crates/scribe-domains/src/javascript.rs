@@ -468,7 +468,8 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
         document.get(id).is_ok_and(|child| child.kind == NodeKind::DescSignature)
     })).unwrap_or(NodeId::NULL);
     if signature_id == NodeId::NULL { return Ok(()); }
-    let mut builder = SigBuilder::new(document, span, "js");
+    let source = document.get(desc).ok().and_then(|node| node.source.clone());
+    let mut builder = SigBuilder::new_with_source(document, span, "js", source);
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "js".to_owned()]);

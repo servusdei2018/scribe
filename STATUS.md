@@ -2210,3 +2210,64 @@ rather than inflating the metric or relaxing the gate.
 
 **Measurement honesty:** every figure above was produced by commands actually
 run on this machine during Phase 36.
+
+---
+
+## Phase 37 — span-carrying canonical warnings (subagent, tasks 2–4)
+
+### What changed
+
+- `scribe-core::warnings`: added `WarningLocation`, `format_warning`,
+  `missing_reference_display_code`, `duplicate_display_code` and
+  `absolute_source_path`. The formatter renders upstream's exact
+  `path:LINE: WARNING: msg [type.subtype]` shape.
+- `DomainDiagnostic` gained additive `source_path` / `line` fields plus a
+  `with_source` builder; they are populated from the offending AST node's
+  `SourcePos` at every structured emission site (missing refs, intersphinx,
+  `ref.any` ambiguity, malformed objects).
+- The Phase 10 transform seam no longer flattens `DomainDiagnostic` into a
+  `TransformDiagnostic` (which dropped code, typ, path and line). Builders now
+  render `TransformReport::domain_diagnostics()` canonically and keep the
+  remaining plain `TransformDiagnostic`s unchanged.
+- `SigBuilder` / Python signature `Builder` stamp a propagated `SourcePos` on
+  generated `PendingXref` nodes; `clone_subtree` now offsets the nested
+  `directive_line` attribute as well as `SourcePos::line`, fixing wrong
+  1-based lines for nested domain declarations.
+- `ToctreeWarning` gained an additive `line` field; `toc.secnum` warnings now
+  carry the directive's line.
+- Builders (`build_common`, standalone HTML, LaTeX) share one canonical warning
+  emitter; `suppress_warnings` and `-W` are untouched.
+
+### Measured results
+
+| Metric | Before | After |
+|---|---:|---:|
+| Aggregate parity | 70.8% | **71.5%** |
+| Fixture statuses | 4 pass / 26 partial / 4 fail | **6 pass / 24 partial / 4 fail** |
+| `test-domain-py-xref-warning` warning score | 0.000 | **1.000** |
+| `test-domain-py-python_use_unqualified_type_names` warning score | 0.000 | **0.333** |
+| `test-domain-c` warning score | 0.417 | **0.700** |
+| Self-host `sphinx/doc` warnings (identical command, local A/B) | 419 | 419 |
+
+The brief's 443 self-host warnings is stale for current `HEAD`: reverting the
+working tree in place (via `git apply -R` of a saved diff, restoring afterwards,
+no git history/stash touched) and rebuilding produced **419** on both sides.
+
+### Final verification (Phase 37)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | 0 warnings / 0 errors |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` (× 3 consecutive) | **1,109 passed, 0 failed** each run |
+| `cargo test -p scribe-cli --test conformance` | 2 passed; parity 71.5%; report regenerated |
+| `cargo test -p scribe-cli --test selfhost` | 2 passed; exit 0, 155 pages |
+| Benchmark (release, PAGES=150, RUNS=5) | **7.17×**, scribe 76,764 KB peak RSS |
+
+1,109 = 1,108 audited pre-existing tests + 1 new `warnings.rs` unit test.
+
+**Gate status:** span-carrying warnings improved aggregate parity 70.8% →
+71.5% and warning scores on several domain fixtures; all tests green with zero
+warnings; peak RSS 76,764 KB and speedup 7.17× both within limits. The
+aspirational ≥80% parity gate remains unmet, as in Phase 36. No commits, tags,
+branches or stash changes were made.

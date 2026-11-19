@@ -217,7 +217,8 @@ fn build_signature_into(
     scope: &CppScope,
     span: Span,
 ) -> DomainResult<()> {
-    let mut builder = SigBuilder::new(document, span, "cpp");
+    let source = document.get(signature_id).ok().and_then(|node| node.source.clone());
+    let mut builder = SigBuilder::new_with_source(document, span, "cpp", source);
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "cpp".to_owned()]);

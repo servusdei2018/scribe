@@ -241,7 +241,8 @@ fn build_signature_into(
     scope: &Scope,
     span: Span,
 ) -> DomainResult<()> {
-    let mut builder = SigBuilder::new(document, span, "c");
+    let source = document.get(signature_id).ok().and_then(|node| node.source.clone());
+    let mut builder = SigBuilder::new_with_source(document, span, "c", source);
     // Reset any previous children of the placeholder signature.
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();

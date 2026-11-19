@@ -81,9 +81,10 @@ pub use transforms::{
 };
 
 pub use warnings::{
-    canonical_code, classify_warning_message, is_code_suppressed, is_suppressed,
-    missing_reference_code, suppression_patterns, WarningCode, WARNING_CODE_MAP,
-    SUPPORTED_SUPPRESSION_CODES,
+    absolute_source_path, canonical_code, classify_warning_message, duplicate_display_code,
+    format_warning, is_code_suppressed, is_suppressed, missing_reference_code,
+    missing_reference_display_code, suppression_patterns, WarningCode, WarningLocation,
+    WARNING_CODE_MAP, SUPPORTED_SUPPRESSION_CODES,
 };
 
 pub use scribe_cache::{ContentDigest, CacheError};

@@ -1754,19 +1754,16 @@ pub(crate) fn run_domains(document: &mut Document, ctx: &TransformContext<'_>, r
     match resolve_pending_xrefs(registry, &domain_ctx, document) {
         Ok(report) => {
             let changed = report.resolved > 0 || report.unresolved > 0 || report.passed_through > 0;
-            let mut result = if changed {
+            let result = if changed {
                 TransformResult::changed()
             } else {
                 TransformResult::unchanged()
             };
-            for diagnostic in &report.diagnostics {
-                result = result.with_diagnostic(TransformDiagnostic::new(
-                    "SphinxDomains",
-                    TransformSeverity::Warning,
-                    diagnostic.message.clone(),
-                    diagnostic.span,
-                ));
-            }
+            // Domain diagnostics keep their structured form (code, typ, source
+            // path and line) so builders can render upstream's canonical
+            // `path:LINE: WARNING: msg [type.subtype]` line. Flattening them to
+            // `TransformDiagnostic` here would drop exactly those fields; the
+            // pipeline forwards them through `TransformReport::domain_diagnostics`.
             result
         }
         Err(error) => TransformResult::unchanged().with_diagnostic(TransformDiagnostic::new(

@@ -237,7 +237,8 @@ pub fn prepare_document(document: &mut Document) -> DomainResult<()> {
             document.get(child).is_ok_and(|child| child.kind == NodeKind::DescSignature)
         }));
         if let Some(signature_id) = signature_id {
-            let mut builder = crate::sigbuild::SigBuilder::new(document, span, "rst");
+            let source = document.get(id).ok().and_then(|node| node.source.clone());
+            let mut builder = crate::sigbuild::SigBuilder::new_with_source(document, span, "rst", source);
             if let Ok(node) = builder.doc.get_mut(signature_id) {
                 node.children.clear();
                 node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "rst".to_owned()]);

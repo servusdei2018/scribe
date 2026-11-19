@@ -18,11 +18,12 @@ use rayon::prelude::*;
 use scribe_ast::Document;
 use scribe_config::{Config, Tags};
 use scribe_core::{
-    apply_transforms, collect_toctrees_with_sources, extensions, ActivatedExtensions,
-    BuildEnvironment, Event, InteropBridge, Phase, ToctreeCollection, TransformContext,
-    UpdateOptions,
+    absolute_source_path, apply_transforms, canonical_code, collect_toctrees_with_sources,
+    duplicate_display_code, extensions, format_warning, missing_reference_display_code,
+    ActivatedExtensions, BuildEnvironment, Event, InteropBridge, Phase, ToctreeCollection,
+    TransformContext, UpdateOptions, WarningCode, WarningLocation,
 };
-use scribe_domains::{prepare_document, DomainRegistry};
+use scribe_domains::{prepare_document, diagnostics::DomainDiagnostic, DomainRegistry};
 use scribe_rst::{
     parse_with_options, resolve_output, Context as RstContext, Directive, DirectiveContext,
     DirectiveError, DirectiveRegistry, ParseOptions,
@@ -76,9 +77,69 @@ fn toctree_warning_lines(toctrees: &ToctreeCollection, source_dir: &std::path::P
         };
         let suffix = if docname.ends_with(".md") { "" } else { ".rst" };
         let path = base.join(format!("{docname}{suffix}"));
-        out.push(format!("{}: WARNING: {} [{}]", path.display(), message, canonical));
+        // Located toctree warnings (notably `toc.secnum`) carry the 1-based
+        // line of the offending directive; family warnings such as
+        // `toc.not_included` are logged without one upstream.
+        let location = match warning.line {
+            Some(line) => format!("{}:{line}", path.display()),
+            None => path.display().to_string(),
+        };
+        out.push(format!("{location}: WARNING: {message} [{canonical}]"));
     }
     out
+}
+
+/// Canonical Sphinx warning code for a structured domain diagnostic.
+///
+/// Upstream logs unresolved xrefs as `ref.<reftype>` (see
+/// `sphinx/transforms/post_transforms/__init__.py`), not as the documented
+/// `ref.python` suppression family. The other branches mirror the concrete
+/// `type`/`subtype` keywords used by upstream's domain loggers.
+pub fn diagnostic_code(diagnostic: &DomainDiagnostic) -> WarningCode {
+    let message = &diagnostic.message;
+    if diagnostic.is_missing_reference() {
+        return missing_reference_display_code(diagnostic.typ.as_deref().unwrap_or(""));
+    }
+    if message.contains("more than one target found for 'any'") {
+        return WarningCode::typed("ref", "any");
+    }
+    if message.contains("more than one target found for cross-reference") {
+        return WarningCode::typed("ref", "python");
+    }
+    if diagnostic.code == scribe_domains::diagnostics::codes::DUPLICATE_OBJECT {
+        if message.contains("C++") {
+            return duplicate_display_code("cpp");
+        }
+        if message.contains("C declaration") {
+            return duplicate_display_code("c");
+        }
+        return duplicate_display_code("");
+    }
+    canonical_code(&diagnostic.code).unwrap_or_else(|| WarningCode::bare("misc"))
+}
+
+/// Formats one structured domain diagnostic as an upstream-style warning line.
+///
+/// The source path is resolved from the build environment (which knows the
+/// real source file for `docname`) and canonicalized to the absolute form
+/// upstream logs for node locations. The 1-based line comes from the AST node
+/// carried on the diagnostic by the span plumbing.
+pub fn domain_warning_line(
+    diagnostic: &DomainDiagnostic,
+    docname: &str,
+    env: &BuildEnvironment,
+) -> String {
+    let path = env
+        .doc2path(docname)
+        .map(absolute_source_path)
+        .or_else(|| {
+            diagnostic
+                .source_path
+                .as_deref()
+                .map(|path| absolute_source_path(std::path::Path::new(path)))
+        });
+    let location = path.map(|path| WarningLocation::new(Some(path), diagnostic.line));
+    format_warning(&diagnostic.message, &diagnostic_code(diagnostic), location.as_ref())
 }
 
 /// Refresh the environment and prepare all documents for rendering.
@@ -264,6 +325,13 @@ pub fn prepare(
         let _ = events.emit("doctree-resolved", &Event::DoctreeResolved {
             docname: docname.clone(), doctree,
         });
+        for diagnostic in read_report
+            .domain_diagnostics()
+            .iter()
+            .chain(resolved_report.domain_diagnostics().iter())
+        {
+            warnings.push(domain_warning_line(diagnostic, docname, env));
+        }
         for diagnostic in read_report
             .diagnostics
             .iter()

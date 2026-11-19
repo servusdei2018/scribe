@@ -182,6 +182,11 @@ pub struct ToctreeWarning {
     pub span: SourceSpan,
     /// Source name used for diagnostic rendering.
     pub source_name: String,
+    /// 1-based source line of the offending directive, when known.
+    ///
+    /// Additive span field: located toctree warnings (for example
+    /// `toc.secnum`) include `:LINE:` in upstream's log prefix.
+    pub line: Option<u32>,
     /// Source text used for diagnostic rendering.
     pub source_text: Arc<String>,
 }
@@ -223,8 +228,15 @@ impl ToctreeWarning {
                 .map(|value| SourceSpan::new((value.start as usize).into(), value.end.saturating_sub(value.start) as usize))
                 .unwrap_or_else(|| SourceSpan::new(0usize.into(), 0usize)),
             source_name: source_name.to_owned(),
+            line: None,
             source_text: Arc::new(String::new()),
         }
+    }
+
+    /// Attaches the 1-based source line of the offending toctree directive.
+    pub fn with_line(mut self, line: Option<u32>) -> Self {
+        self.line = line;
+        self
     }
 }
 
@@ -1244,13 +1256,16 @@ fn walk_numbered_toctree(
             continue;
         };
         if assigned.contains(docname) {
-            warnings.push(ToctreeWarning::new(
-                "scribe::toc::nested_numbered",
-                format!("{docname} is already assigned section numbers (nested numbered toctree?)"),
-                "remove the nested :numbered: toctree or accept the shared numbering",
-                tree.span,
-                docname,
-            ));
+            warnings.push(
+                ToctreeWarning::new(
+                    "scribe::toc::nested_numbered",
+                    format!("{docname} is already assigned section numbers (nested numbered toctree?)"),
+                    "remove the nested :numbered: toctree or accept the shared numbering",
+                    tree.span,
+                    &tree.docname,
+                )
+                .with_line(tree.line),
+            );
             continue;
         }
         assigned.insert(docname.to_owned());

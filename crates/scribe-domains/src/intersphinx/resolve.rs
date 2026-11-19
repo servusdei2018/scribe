@@ -487,6 +487,12 @@ pub fn external_missing_reference_diagnostic(
     diagnostic.help = Some(format!(
         "check the intersphinx inventory for `{target}` or fix the external reference"
     ));
+    if let Ok(node) = document.get(node_id) {
+        if let Some(source) = &node.source {
+            diagnostic.source_path = source.source.clone();
+            diagnostic.line = source.line;
+        }
+    }
     diagnostic
 }
 
@@ -505,6 +511,12 @@ pub fn inventory_not_found_diagnostic(
         ctx.span_of(document, node_id),
     );
     diagnostic.code = codes::INTERSPHINX.to_owned();
+    if let Ok(node) = document.get(node_id) {
+        if let Some(source) = &node.source {
+            diagnostic.source_path = source.source.clone();
+            diagnostic.line = source.line;
+        }
+    }
     diagnostic
 }
 

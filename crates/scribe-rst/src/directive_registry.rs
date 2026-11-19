@@ -384,6 +384,16 @@ pub fn clone_subtree(
         pos.line = pos.line.map(|line| line.saturating_add(line_offset));
         pos.offset = None;
     }
+    // `Pending` directive nodes also carry their marker line as an attribute,
+    // which `resolve_output` reads to stamp `DirectiveContext::line`. Offset it
+    // as well; otherwise nested directives (and every signature xref they
+    // generate) keep the sub-parse's relative line and diagnostics report a
+    // wrong 1-based location.
+    if let Ok(Some(line)) = clone.attrs.get_int(crate::pending::KEY_DIRECTIVE_LINE) {
+        clone
+            .attrs
+            .set_int(crate::pending::KEY_DIRECTIVE_LINE, line.saturating_add(i64::from(line_offset)));
+    }
     // Spans into the nested content string cannot be mapped to the parent
     // source without the original byte offset, which the frozen Pending
     // contract does not carry.

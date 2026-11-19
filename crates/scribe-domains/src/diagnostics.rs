@@ -8,7 +8,7 @@
 use std::fmt::Display;
 
 use miette::{Diagnostic, LabeledSpan, SourceSpan};
-use scribe_ast::Span;
+use scribe_ast::{SourcePos, Span};
 use thiserror::Error;
 
 /// Stable diagnostic codes emitted by this crate.
@@ -67,6 +67,13 @@ pub struct DomainDiagnostic {
     pub docname: Option<String>,
     /// Byte span of the offending node.
     pub span: Option<Span>,
+    /// Source path carried by the offending AST node, when present.
+    ///
+    /// Additive span plumbing: builders use this (together with `line`) to
+    /// render the `path:LINE: WARNING:` prefix upstream emits.
+    pub source_path: Option<String>,
+    /// 1-based source line carried by the offending AST node, when present.
+    pub line: Option<u32>,
     /// Corrective hint shown by `miette`.
     pub help: Option<String>,
     /// Severity.
@@ -131,6 +138,8 @@ impl DomainDiagnostic {
             target: Some(target),
             docname,
             span,
+            source_path: None,
+            line: None,
             help: Some(help),
             severity: DomainSeverity::Warning,
         }
@@ -151,6 +160,8 @@ impl DomainDiagnostic {
             target: Some(target.into()),
             docname,
             span,
+            source_path: None,
+            line: None,
             help: Some("remove or rename the duplicate declaration".to_owned()),
             severity: DomainSeverity::Warning,
         }
@@ -171,6 +182,8 @@ impl DomainDiagnostic {
             target,
             docname,
             span,
+            source_path: None,
+            line: None,
             help: Some("check the directive signature or role payload".to_owned()),
             severity: DomainSeverity::Warning,
         }
@@ -185,9 +198,22 @@ impl DomainDiagnostic {
             target: None,
             docname,
             span,
+            source_path: None,
+            line: None,
             help: None,
             severity: DomainSeverity::Error,
         }
+    }
+
+    /// Attaches the source path and 1-based line of an AST node to the
+    /// diagnostic. Builders use these to render upstream's located-warning
+    /// prefix. Returns `self` unchanged when the node carries no source.
+    pub fn with_source(mut self, source: Option<&SourcePos>) -> Self {
+        if let Some(source) = source {
+            self.source_path = source.source.clone();
+            self.line = source.line;
+        }
+        self
     }
 
     /// True when this diagnostic is a missing-reference report.

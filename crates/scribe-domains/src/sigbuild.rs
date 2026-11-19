@@ -8,7 +8,7 @@
 //! the C, C++ and JavaScript domains, matching Sphinx's shared
 //! `addnodes.desc_sig_*` helpers.
 
-use scribe_ast::{Document, Node, NodeId, NodeKind, Span};
+use scribe_ast::{Document, Node, NodeId, NodeKind, SourcePos, Span};
 
 use crate::error::{DomainError, DomainResult};
 
@@ -71,12 +71,26 @@ pub struct SigBuilder<'a> {
     pub span: Span,
     /// Owning domain (used for error reporting).
     pub domain: &'static str,
+    /// Source position inherited from the enclosing directive, propagated to
+    /// every materialized node (notably `PendingXref`) so diagnostics keep the
+    /// 1-based line through post-transform resolution.
+    pub source: Option<SourcePos>,
 }
 
 impl<'a> SigBuilder<'a> {
-    /// Creates a builder.
+    /// Creates a builder without a source position.
     pub fn new(doc: &'a mut Document, span: Span, domain: &'static str) -> Self {
-        Self { doc, span, domain }
+        Self { doc, span, domain, source: None }
+    }
+
+    /// Creates a builder that stamps every node with `source`.
+    pub fn new_with_source(
+        doc: &'a mut Document,
+        span: Span,
+        domain: &'static str,
+        source: Option<SourcePos>,
+    ) -> Self {
+        Self { doc, span, domain, source }
     }
 
     fn err(&self, error: scribe_ast::AstError) -> DomainError {
@@ -90,6 +104,7 @@ impl<'a> SigBuilder<'a> {
     pub fn add(&mut self, kind: NodeKind, parent: NodeId) -> DomainResult<NodeId> {
         let mut node = Node::new(kind);
         node.span = Some(self.span);
+        node.source = self.source.clone();
         self.doc.add_node(node, Some(parent)).map_err(|error| self.err(error))
     }
 
@@ -97,6 +112,7 @@ impl<'a> SigBuilder<'a> {
     pub fn text(&mut self, text: impl Into<String>, parent: NodeId) -> DomainResult<NodeId> {
         let mut node = Node::text(text);
         node.span = Some(self.span);
+        node.source = self.source.clone();
         self.doc.add_node(node, Some(parent)).map_err(|error| self.err(error))
     }
 

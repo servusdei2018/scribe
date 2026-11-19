@@ -37,6 +37,7 @@ use super::support::SUPPORT_FILES;
 use super::translator::{LatexContext, LaTeXTranslator};
 use super::{BuildOptions, BuildResult, LatexError, Result};
 
+use crate::build_common::domain_warning_line;
 use crate::register_code_directives;
 
 /// The LaTeX builder.
@@ -201,6 +202,13 @@ fn build_impl(
         }
         let read_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Read);
         let resolved_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Resolved);
+        for diagnostic in read_report
+            .domain_diagnostics()
+            .iter()
+            .chain(resolved_report.domain_diagnostics().iter())
+        {
+            warnings.push(domain_warning_line(diagnostic, docname, env));
+        }
         for diagnostic in read_report.diagnostics.iter().chain(resolved_report.diagnostics.iter()) {
             warnings.push(format!("{docname}: {}", diagnostic.message));
         }

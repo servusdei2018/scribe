@@ -37,6 +37,7 @@ use scribe_rst::{
     parse_with_options, resolve_output, Context as RstContext,
     DirectiveRegistry, ParseOptions,
 };
+use crate::build_common::domain_warning_line;
 use crate::register_code_directives;
 use scribe_theme::{RenderContext, ThemeError, ThemeManager};
 
@@ -498,6 +499,13 @@ pub fn build_with_flavor(
             // transform pipeline, so collect/inject after both phases.
             if extensions.contains("viewcode") {
                 viewcode.collect(docname, &mut outcome.document, config, source_dir);
+            }
+            for diagnostic in read_report
+                .domain_diagnostics()
+                .iter()
+                .chain(resolved_report.domain_diagnostics().iter())
+            {
+                warnings.push(domain_warning_line(diagnostic, docname, env));
             }
             for diagnostic in read_report.diagnostics.iter().chain(resolved_report.diagnostics.iter()) {
                 warnings.push(format!("{docname}: {}", diagnostic.message));

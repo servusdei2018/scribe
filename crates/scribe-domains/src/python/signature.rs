@@ -564,12 +564,16 @@ fn tokenize_arglist(arglist: &str) -> Vec<ParamToken> {
 struct Builder<'a> {
     doc: &'a mut Document,
     span: Span,
+    /// Source position of the enclosing directive / field list, propagated to
+    /// generated `PendingXref` nodes so diagnostics keep their 1-based line.
+    source: Option<scribe_ast::SourcePos>,
 }
 
 impl<'a> Builder<'a> {
     fn add(&mut self, kind: NodeKind, parent: NodeId) -> DomainResult<NodeId> {
         let mut node = Node::new(kind);
         node.span = Some(self.span);
+        node.source = self.source.clone();
         self.doc.add_node(node, Some(parent)).map_err(|error| DomainError::InvalidData {
             domain: "py".to_owned(),
             detail: error.to_string(),
@@ -579,6 +583,7 @@ impl<'a> Builder<'a> {
     fn add_text(&mut self, text: impl Into<String>, parent: NodeId) -> DomainResult<NodeId> {
         let mut node = Node::text(text);
         node.span = Some(self.span);
+        node.source = self.source.clone();
         self.doc.add_node(node, Some(parent)).map_err(|error| DomainError::InvalidData {
             domain: "py".to_owned(),
             detail: error.to_string(),
@@ -851,7 +856,8 @@ pub fn build_desc_signature(
             doc.get(child).is_ok_and(|child| child.kind == NodeKind::DescSignature)
         })
     });
-    let mut builder = Builder { doc, span };
+    let source = doc.get(desc_id).ok().and_then(|node| node.source.clone());
+    let mut builder = Builder { doc, span, source };
 
     let modname = options.module.clone().or_else(|| context.module.clone());
     let classname_in = context.class.clone();
@@ -1154,7 +1160,8 @@ fn rewrite_fieldlist(
     // Returns, Return type, then everything else preserved verbatim.
     let mut rebuilt: Vec<NodeId> = Vec::new();
     let span = doc.get(fieldlist).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
-    let mut builder = Builder { doc, span };
+    let source = doc.get(fieldlist).ok().and_then(|node| node.source.clone());
+    let mut builder = Builder { doc, span, source };
 
     if !param_names.is_empty() {
         let field = builder.add(NodeKind::Field, fieldlist)?;
