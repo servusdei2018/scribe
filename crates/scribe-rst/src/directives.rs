@@ -614,37 +614,29 @@ fn glossary(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn productionlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let owned_argument = ctx.argument(0).unwrap_or("").replace("\\\n", "");
-    let argument = owned_argument.as_str();
-    let mut lines: Vec<&str> = argument.lines().collect();
+    let mut lines: Vec<&str> = owned_argument.lines().collect();
+
+    // Upstream `ProductionList.production_group`: when the first line has no
+    // ':' it names the production group and is removed from the rule list.
     let mut group = "";
-    // Phase 04 joins first-body-line arguments with spaces; a production group
-    // line (`group` followed by `name: tokens`) therefore arrives as one line.
-    if lines.len() == 1 {
-        if let Some(line) = lines.first().copied() {
-            if !line.contains(':') {
-                // no group, single definition
-            } else if let Some((first, rest)) = line.split_once(' ') {
-                if !first.contains(':') {
-                    group = first;
-                    lines = vec![rest];
-                }
-            }
-        }
-    }
     if lines.first().is_some_and(|line| !line.contains(':')) {
-        group = lines.first().copied().unwrap_or("");
+        group = lines.first().copied().unwrap_or("").trim();
         lines.remove(0);
     }
     let definitions: Vec<(String, String)> = lines
         .iter()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, tokens)| (name.trim().to_owned(), tokens.trim().to_owned()))
+        .filter(|line| line.contains(':'))
+        .map(|line| {
+            let (name, tokens) = line.split_once(':').unwrap_or((line, ""));
+            (name.trim().to_owned(), tokens.trim().to_owned())
+        })
         .collect();
     let max_len = definitions
         .iter()
         .map(|(name, _)| name.len())
         .max()
         .unwrap_or(0);
+
     let id = ctx.add(NodeKind::Productionlist, ctx.parent)?;
     for (name, tokens) in definitions {
         let production = ctx.add(NodeKind::Production, id)?;
@@ -655,10 +647,7 @@ fn productionlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         }
         if !name.is_empty() {
             let target = ctx.add(NodeKind::LiteralStrong, production)?;
-            let mut target_id = crate::names::make_id(&format!("grammar-token-{group}-{name}"));
-            if target_id.starts_with("grammar-token--") {
-                target_id = crate::names::make_id(&format!("grammar-token-{name}"));
-            }
+            let target_id = grammar_token_id(group, &name);
             ctx.doc
                 .get_mut(target)?
                 .attrs
@@ -668,10 +657,123 @@ fn productionlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         let pad = max_len.saturating_sub(name.len()) + 5;
         let separator = format!("{:>pad$}", " ::= ");
         ctx.add_text(separator, production, ctx.line)?;
-        ctx.add_text(format!("{tokens}\n"), production, ctx.line)?;
+        add_production_tokens(ctx, production, &tokens, group)?;
         ctx.add_text("\n", production, ctx.line)?;
     }
     Ok(vec![id])
+}
+
+/// Sphinx's `_make_id` preserves case (unlike docutils' `nodes.make_id`).
+fn grammar_token_id(group: &str, name: &str) -> String {
+    let raw = if group.is_empty() {
+        format!("grammar-token-{name}")
+    } else {
+        format!("grammar-token-{group}-{name}")
+    };
+    let mut result = String::new();
+    let mut previous_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' {
+            result.push(ch);
+            previous_dash = false;
+        } else if !previous_dash {
+            result.push('-');
+            previous_dash = true;
+        }
+    }
+    result.trim_matches('-').to_owned()
+}
+
+/// Matches upstream's `token_re = r'`((~?[\w-]*:)?\w+)`'` for a single token.
+fn is_grammar_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let (prefix, name) = match token.split_once(':') {
+        Some((prefix, name)) => (prefix, name),
+        None => ("", token),
+    };
+    let prefix = prefix.strip_prefix('~').unwrap_or(prefix);
+    prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-')
+        && !name.is_empty()
+        && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+/// Emulates Sphinx's `token_xrefs`: backticked tokens inside a production
+/// definition become `pending_xref(reftype="token")` nodes wrapping a
+/// `literal` with `classes=["xref"]`.
+fn add_production_tokens(
+    ctx: &mut DirectiveContext<'_>,
+    parent: NodeId,
+    tokens: &str,
+    group: &str,
+) -> Result<(), DirectiveError> {
+    let mut pos = 0usize;
+    while pos < tokens.len() {
+        let Some(relative_start) = tokens[pos..].find('`') else {
+            ctx.add_text(&tokens[pos..], parent, ctx.line)?;
+            break;
+        };
+        let start = pos + relative_start;
+        if start > pos {
+            ctx.add_text(&tokens[pos..start], parent, ctx.line)?;
+        }
+        let Some(relative_end) = tokens[start + 1..].find('`') else {
+            ctx.add_text(&tokens[start..], parent, ctx.line)?;
+            break;
+        };
+        let end = start + 1 + relative_end;
+        let token = &tokens[start + 1..end];
+        if is_grammar_token(token) {
+            add_token_xref(ctx, parent, token, group)?;
+        } else {
+            ctx.add_text(&tokens[start..=end], parent, ctx.line)?;
+        }
+        pos = end + 1;
+    }
+    Ok(())
+}
+
+/// Builds one `pending_xref` exactly as upstream's `token_xrefs` does,
+/// including the `~domain:token` / `:token` title and target rules.
+fn add_token_xref(
+    ctx: &mut DirectiveContext<'_>,
+    parent: NodeId,
+    token: &str,
+    group: &str,
+) -> Result<(), DirectiveError> {
+    let (title, target) = if let Some((prefix, name)) = token.split_once(':') {
+        if prefix.starts_with('~') {
+            // `~domain:token` links to the qualified name but displays only the
+            // token itself.
+            (name.to_owned(), token.trim_start_matches('~').to_owned())
+        } else if prefix.is_empty() {
+            // A leading ':' is a display modifier: show the bare token.
+            (name.to_owned(), name.to_owned())
+        } else {
+            (token.to_owned(), token.to_owned())
+        }
+    } else if group.is_empty() {
+        (token.to_owned(), token.to_owned())
+    } else {
+        (token.to_owned(), format!("{group}:{token}"))
+    };
+
+    let xref = ctx.add(NodeKind::PendingXref, parent)?;
+    {
+        let node = ctx.doc.get_mut(xref)?;
+        node.attrs.set_str("reftype", "token");
+        node.attrs.set_str("refdomain", "std");
+        node.attrs.set_str("reftarget", &target);
+        node.attrs.set_bool("refwarn", false);
+    }
+    let literal = ctx.add(NodeKind::Literal, xref)?;
+    ctx.doc
+        .get_mut(literal)?
+        .attrs
+        .set_list("classes", vec!["xref".to_owned()]);
+    ctx.add_text(&title, literal, ctx.line)?;
+    Ok(())
 }
 
 // ----- document parts --------------------------------------------------------

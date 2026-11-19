@@ -402,6 +402,42 @@ fn process_doc_registers_glossary_and_production_tokens() {
 }
 
 #[test]
+fn production_tokens_are_group_qualified() {
+    let env = TestEnv::default();
+    let config = config_with(&[]);
+    let sink = DiagnosticSink::default();
+    let ctx = context(&env, &config, &sink, "index");
+    let mut doc = Document::new(Some("index.rst".to_owned()));
+    let list = doc.add(NodeKind::Productionlist, Some(doc.root)).expect("list");
+    // Mirrors ``.. productionlist:: P1`` (A) and two unqualified productions.
+    for anchor in [
+        "grammar-token-A",
+        "grammar-token-P1-A",
+        "grammar-token-P2-A",
+    ] {
+        let production = doc.add(NodeKind::Production, Some(list)).expect("production");
+        let target = doc.add(NodeKind::LiteralStrong, Some(production)).expect("target");
+        doc.get_mut(target)
+            .expect("target node")
+            .attrs
+            .set_list("ids", vec![anchor.to_owned()]);
+        doc.get_mut(production)
+            .expect("production node")
+            .attrs
+            .set_str("tokenname", "A");
+    }
+    let registry = DomainRegistry::with_standard();
+    registry.process_document(&ctx, "index", &doc).expect("process");
+    let objects = registry.get_objects();
+    for name in ["A", "P1:A", "P2:A"] {
+        assert!(
+            objects.iter().any(|entry| entry.name == name && entry.objtype == "token"),
+            "missing group-qualified token {name}"
+        );
+    }
+}
+
+#[test]
 fn pipeline_resolves_pending_xrefs_in_place() {
     use scribe_core::{apply_transforms, Phase, TransformContext};
 

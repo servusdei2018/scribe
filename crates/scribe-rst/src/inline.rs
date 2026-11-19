@@ -1672,8 +1672,21 @@ fn emit_xref_role(
     let explicit = split_explicit_title(payload);
     let mut title = explicit.as_ref().map_or_else(|| payload.to_owned(), |e| e.title.clone());
     let mut target = explicit.as_ref().map_or_else(|| payload.to_owned(), |e| e.target.clone());
+    // Upstream's `TokenXRefRole.process_link` overrides the generic modifiers:
+    // an implicit leading `~` drops the `domain:` prefix from the displayed
+    // token, while an explicit title keeps its literal `~`.
+    let token_tilde_implicit = reftype == "token" && explicit.is_none() && title.starts_with('~');
+    let token_tilde_explicit = reftype == "token" && explicit.is_some() && title.starts_with('~');
+    let original_token_title = title.clone();
     let mut specific = false;
     apply_modifiers(&mut title, &mut target, &mut specific);
+    if token_tilde_implicit {
+        if let Some((_, bare)) = title.split_once(':') {
+            title = bare.to_owned();
+        }
+    } else if token_tilde_explicit {
+        title = original_token_title;
+    }
 
     // Compute spans of title/target within the payload. After `~`/`.` modifier
     // processing the displayed title and normalized target are substrings of

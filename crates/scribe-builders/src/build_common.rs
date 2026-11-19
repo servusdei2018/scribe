@@ -164,6 +164,37 @@ pub fn domain_warning_line(
     format_warning(&diagnostic.message, &diagnostic_code(diagnostic), location.as_ref())
 }
 
+/// True for standard-domain `note_object` duplicate messages, which upstream
+/// logs without a `type`/`subtype` (hence no `[code]` suffix). The JS domain's
+/// spelling uses "other <type> in", not "other instance in", so it is excluded.
+fn is_bare_duplicate_message(message: &str) -> bool {
+    message.starts_with("duplicate ")
+        && message.contains(" description of ")
+        && message.contains(", other instance in ")
+}
+
+/// Formats a domain diagnostic that upstream logs with no warning code.
+fn bare_domain_warning_line(
+    diagnostic: &DomainDiagnostic,
+    docname: &str,
+    env: &BuildEnvironment,
+) -> String {
+    let path = env
+        .doc2path(docname)
+        .map(absolute_source_path)
+        .or_else(|| {
+            diagnostic
+                .source_path
+                .as_deref()
+                .map(|path| absolute_source_path(std::path::Path::new(path)))
+        });
+    let location = path.map(|path| WarningLocation::new(Some(path), diagnostic.line));
+    match location {
+        Some(location) => format!("{}: WARNING: {}", location.render(), diagnostic.message),
+        None => format!("WARNING: {}", diagnostic.message),
+    }
+}
+
 /// Refresh the environment and prepare all documents for rendering.
 pub fn prepare(
     options: &BuildOptions,
@@ -371,7 +402,11 @@ pub fn prepare(
         }
     }
     // Register domain objects for the whole project before resolving xrefs.
-    {
+    // Upstream logs `StandardDomain.note_object` duplicates (e.g. two
+    // `.. productionlist::` rules defining the same token) with no
+    // `type`/`subtype`, so they carry no `[code]` suffix. Surface those here —
+    // the registration context's diagnostics would otherwise be dropped.
+    let registration_warnings: Vec<String> = {
         let transform_ctx = TransformContext::new(Some(config), Some(&tags), builder_name, builder_name)
             .with_domains(&registry)
             .with_env(env);
@@ -381,7 +416,20 @@ pub fn prepare(
                 warnings.push(format!("{docname}: domain registration failed: {error}"));
             }
         }
-    }
+        transform_ctx
+            .take_domain_diagnostics()
+            .into_iter()
+            .filter(|diagnostic| {
+                diagnostic.code == scribe_domains::diagnostics::codes::DUPLICATE_OBJECT
+                    && is_bare_duplicate_message(&diagnostic.message)
+            })
+            .map(|diagnostic| {
+                let docname = diagnostic.docname.as_deref().unwrap_or("");
+                bare_domain_warning_line(&diagnostic, docname, env)
+            })
+            .collect()
+    };
+    warnings.extend(registration_warnings);
     let compact = crate::i18n::compact_setting(config);
     for (docname, document) in &mut parsed {
         let domain = crate::i18n::docname_to_domain(docname, &compact);

@@ -351,6 +351,17 @@ fn resolve_one(
         arguments.clear();
         split.clear();
     }
+    // `productionlist` takes the whole multi-line body as its single final
+    // argument. When the marker carries no inline argument, Phase 04 promotes
+    // the body lines and space-joins them (explicit.rs); restore the original
+    // line breaks so each `name: tokens` rule is parsed separately.
+    if name == "productionlist"
+        && !body_lines.is_empty()
+        && arguments == body_lines.join(" ")
+    {
+        arguments = body_lines.join("\n");
+        split = split_arguments(&arguments, directive.final_argument_whitespace(), maximum);
+    }
     // Docutils accepts a directive argument on the first content line even
     // when a blank line separates it from the marker. Phase 04 cannot know a
     // directive's arity, so apply that fallback here where the spec is known.

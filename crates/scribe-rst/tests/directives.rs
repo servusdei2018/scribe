@@ -132,6 +132,30 @@ fn centered_acks_hlist_glossary_productionlist_tabularcolumns() {
 }
 
 #[test]
+fn productionlist_emits_group_qualified_token_xrefs() {
+    let (output, report, _) = resolve(".. productionlist:: P1\n   A: `A` | `~P1:B` | plain\n   B: `B`\n");
+    assert!(report.is_clean(), "{:?}", report.unresolved);
+    let xrefs: Vec<_> = output
+        .document
+        .preorder_ids()
+        .into_iter()
+        .filter_map(|id| output.document.get(id).ok())
+        .filter(|node| node.kind == NodeKind::PendingXref)
+        .collect();
+    assert_eq!(xrefs.len(), 3, "expected one pending_xref per backticked token");
+    let targets: Vec<_> = xrefs
+        .iter()
+        .map(|node| node.get_str("reftarget").ok().flatten().unwrap_or(""))
+        .collect();
+    assert_eq!(targets, ["P1:A", "P1:B", "P1:B"]);
+    assert!(xrefs.iter().all(|node| node.get_str("reftype").ok().flatten() == Some("token")));
+    assert!(xrefs.iter().all(|node| node.get_str("refdomain").ok().flatten() == Some("std")));
+    let pseudo = output.document.to_pseudoxml().expect("pseudo");
+    assert!(pseudo.contains("<productionlist>"), "{pseudo}");
+    assert_eq!(pseudo.matches("<production ").count(), 2, "{pseudo}");
+}
+
+#[test]
 fn include_with_line_ranges_and_literal_mode() {
     let root = std::env::temp_dir().join(format!("scribe-include-test-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("create temp dir");

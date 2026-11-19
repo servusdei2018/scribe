@@ -192,19 +192,37 @@ impl StandardDomain {
         labelid: &str,
         span: Option<scribe_ast::Span>,
     ) {
+        self.note_object_at(ctx, objtype, name, labelid, span, None);
+    }
+
+    /// Like [`Self::note_object`], but attaches the source position of the
+    /// declaring node so builders can render the located duplicate warning
+    /// upstream emits from `StandardDomain.note_object`.
+    pub fn note_object_at(
+        &self,
+        ctx: &DomainContext<'_>,
+        objtype: &str,
+        name: &str,
+        labelid: &str,
+        span: Option<scribe_ast::Span>,
+        source: Option<&scribe_ast::SourcePos>,
+    ) {
         let key = object_key(objtype, name);
         let mut data = self.data.write();
         if let Some((other_doc, _)) = data.objects.get(&key) {
             if other_doc != ctx.docname {
-                ctx.push_diagnostic(DomainDiagnostic::duplicate_object(
-                    format!(
-                        "duplicate {objtype} description of {name}, other instance in {other_doc}"
-                    ),
-                    objtype,
-                    name,
-                    Some(ctx.docname.to_owned()),
-                    span,
-                ));
+                ctx.push_diagnostic(
+                    DomainDiagnostic::duplicate_object(
+                        format!(
+                            "duplicate {objtype} description of {name}, other instance in {other_doc}"
+                        ),
+                        objtype,
+                        name,
+                        Some(ctx.docname.to_owned()),
+                        span,
+                    )
+                    .with_source(source),
+                );
             }
         }
         data.objects.insert(key, (ctx.docname.to_owned(), labelid.to_owned()));
@@ -662,7 +680,21 @@ impl StandardDomain {
                 .and_then(|node| node.ids().ok())
                 .and_then(|ids| ids.first().cloned())
                 .unwrap_or_else(|| make_id("grammar-token", &name));
-            self.note_object(ctx, "token", &name, &anchor, span);
+            // Upstream qualifies token names with the production group, so
+            // `P1:A` and `P2:A` are distinct targets (and `A` its own target).
+            // The parser encodes that group in the anchor id emitted by
+            // `grammar-token-{group}-{name}`, so recover it from there without
+            // adding an extra attribute to the frozen AST.
+            let group = anchor
+                .strip_prefix("grammar-token-")
+                .and_then(|rest| rest.strip_suffix(&format!("-{name}")))
+                .unwrap_or("");
+            let obj_name = if group.is_empty() {
+                name
+            } else {
+                format!("{group}:{name}")
+            };
+            self.note_object_at(ctx, "token", &obj_name, &anchor, span, node.source.as_ref());
         }
     }
 }
