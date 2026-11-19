@@ -338,6 +338,8 @@ impl StandardDomain {
         target: &str,
         cont_title: String,
         explicit: bool,
+        node_id: NodeId,
+        document: &Document,
     ) -> Option<ResolvedReference> {
         let data = self.data.read();
         let (docname, labelid, figname) = if let Some((docname, labelid, name)) = data.labels.get(target) {
@@ -347,6 +349,21 @@ impl StandardDomain {
             (docname, labelid, None)
         };
         drop(data);
+
+        // Upstream logs every numfig diagnostic at the location of the pending
+        // xref itself and passes no `type`/`subtype`, so the rendered line has
+        // no `[code]` suffix (see `build_common::domain_warning_line`).
+        let warn = |message: String| {
+            let source = document.get(node_id).ok().and_then(|node| node.source.as_ref());
+            ctx.push_diagnostic(
+                DomainDiagnostic::bare_warning(
+                    message,
+                    Some(ctx.docname.to_owned()),
+                    ctx.span_of(document, node_id),
+                )
+                .with_source(source),
+            );
+        };
 
         let doctree = ctx.env.and_then(|env| env.doctree(&docname));
         let target_node = doctree.and_then(|tree| {
@@ -375,10 +392,14 @@ impl StandardDomain {
             _ => return None,
         };
         if figtype != "section" && !ctx.get_bool("numfig").unwrap_or(false) {
+            warn("numfig is disabled. :numref: is ignored.".to_owned());
             return Some(ResolvedReference::default().passthrough());
         }
         let number = numref_number(doctree, target_node, figtype).unwrap_or_default();
         if number.is_empty() {
+            warn(format!(
+                "Failed to create a cross reference. Any number is not assigned: {labelid}"
+            ));
             return Some(ResolvedReference::default().passthrough());
         }
 
@@ -387,7 +408,17 @@ impl StandardDomain {
         } else {
             numfig_format(ctx, figtype)
         };
-        let newtitle = apply_numref_format(&format, figname.as_deref(), &number)?;
+        if figname.is_none() && format.contains("{name}") {
+            warn(format!("the link has no caption: {format}"));
+            return Some(ResolvedReference::default().passthrough());
+        }
+        let newtitle = match apply_numref_format(&format, figname.as_deref(), &number) {
+            Some(title) => title,
+            None => {
+                warn(numfig_format_error_message(&format));
+                return Some(ResolvedReference::default().passthrough());
+            }
+        };
         let mut reference = self.make_refnode(ctx, &docname, &labelid, Some(newtitle), &["std", "std-numref"]);
         reference.node_kind = crate::types::ReferenceNodeKind::NumberReference;
         reference.reftitle = Some(format);
@@ -786,7 +817,7 @@ fn numfig_format(ctx: &DomainContext<'_>, figtype: &str) -> String {
         "figure" => "Fig. %s".to_owned(),
         "table" => "Table %s".to_owned(),
         "code-block" => "Listing %s".to_owned(),
-        "section" => "§ %s".to_owned(),
+        "section" => "Section %s".to_owned(),
         _ => "%s".to_owned(),
     })
 }
@@ -809,8 +840,15 @@ fn numref_number(document: Option<&Document>, node: &Node, figtype: &str) -> Opt
 }
 
 fn apply_numref_format(format: &str, figname: Option<&str>, number: &str) -> Option<String> {
-    if format.contains("{name}") || format.contains("{number}") {
+    // Upstream selects the new-style branch when the format mentions
+    // `{name}` or the word "number" (cf. `Fig.{number}`).
+    if format.contains("{name}") || format.contains("number") {
         if format.contains("{name}") && figname.is_none() {
+            return None;
+        }
+        // Python's `str.format(name=..., number=...)` raises KeyError for any
+        // other placeholder; surface that as a failed application.
+        if unknown_format_field(format).is_some() {
             return None;
         }
         let mut result = format.to_owned();
@@ -819,9 +857,51 @@ fn apply_numref_format(format: &str, figname: Option<&str>, number: &str) -> Opt
         }
         Some(result.replace("{number}", number))
     } else if format.contains("%s") {
-        Some(format.replace("%s", number))
+        // Old-style `%` with the single `fignum` argument raises TypeError
+        // when more than one conversion is requested.
+        if format.matches("%s").count() > 1 {
+            return None;
+        }
+        Some(format.replacen("%s", number, 1))
     } else {
         Some(format.to_owned())
+    }
+}
+
+/// First `{...}` placeholder in `format` that is neither `name` nor `number`
+/// (ignoring Python's doubled-brace escapes). Mirrors the `KeyError` upstream
+/// catches while formatting a `numfig_format` string.
+fn unknown_format_field(format: &str) -> Option<&str> {
+    let bytes = format.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if bytes.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
+            let rest = &format[i + 1..];
+            let end = rest.find('}')?;
+            let field = &rest[..end];
+            if field != "name" && field != "number" {
+                return Some(field);
+            }
+            i += end + 2;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Exact upstream message for a `numfig_format` that raised while formatting.
+/// A missing placeholder is a `KeyError` (its repr is embedded); an
+/// incompatible `%s` count is a `TypeError` (bare message).
+fn numfig_format_error_message(format: &str) -> String {
+    if let Some(field) = unknown_format_field(format) {
+        format!("invalid numfig_format: {format} ({})", py_repr(field))
+    } else {
+        format!("invalid numfig_format: {format}")
     }
 }
 
@@ -958,7 +1038,7 @@ impl Domain for StandardDomain {
                     })
                 }
             }
-            "numref" => self.resolve_numref(ctx, &lowered, cont_title, explicit),
+            "numref" => self.resolve_numref(ctx, &lowered, cont_title, explicit, node_id, document),
             "keyword" | "label" => {
                 let data = self.data.read();
                 data.labels.get(target).map(|(docname, labelid, _)| {

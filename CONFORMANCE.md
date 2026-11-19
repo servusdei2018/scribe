@@ -28,7 +28,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 91.3% over 34 applicable fixtures (26 pass, 6 partial, 2 fail, 5 skip)
+## Aggregate semantic parity: 91.8% over 34 applicable fixtures (27 pass, 5 partial, 2 fail, 5 skip)
 
 ## Per-fixture results
 
@@ -62,7 +62,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-maxlistdepth | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
 | test-nested-enumerated-list | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-nested-tables | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
-| test-numfig | pseudoxml | directive | partial | 0.825 | 0.970 | 0.000 | 24/22 | 0/0 | html classes, parser, warning codes |
+| test-numfig | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 24/24 | 0/0 | — |
 | test-productionlist | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 13/13 | 0/0 | — |
 | test-prolog | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-reST-code-block | html | parser | pass | 0.978 | 0.975 | 1.000 | 20/20 | 0/0 | html classes |
@@ -86,7 +86,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 - **directive**: test-changes (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
 - **domain**: test-changes (pseudoxml), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-domain-py (pseudoxml), test-toctree-glob (pseudoxml)
-- **html classes**: test-basic (html), test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-highlight_options (html), test-numfig (pseudoxml), test-reST-code-block (html), test-reST-code-role (html), test-root (html), test-theming (html), test-toctree-glob (pseudoxml), test-toctree-maxdepth (html)
-- **parser**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-numfig (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
-- **warning codes**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-py-python_use_unqualified_type_names (pseudoxml), test-numfig (pseudoxml), test-root (html), test-toctree (pseudoxml), test-toctree-maxdepth (html)
+- **html classes**: test-basic (html), test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-js (pseudoxml), test-highlight_options (html), test-reST-code-block (html), test-reST-code-role (html), test-root (html), test-theming (html), test-toctree-glob (pseudoxml), test-toctree-maxdepth (html)
+- **parser**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
+- **warning codes**: test-changes (pseudoxml), test-directive-code (html), test-domain-c (pseudoxml), test-domain-cpp (pseudoxml), test-domain-py-python_use_unqualified_type_names (pseudoxml), test-root (html), test-toctree (pseudoxml), test-toctree-maxdepth (html)
 

@@ -151,6 +151,11 @@ pub fn domain_warning_line(
     docname: &str,
     env: &BuildEnvironment,
 ) -> String {
+    // Upstream's numfig diagnostics pass no `type`/`subtype` to
+    // `logger.warning`, so their log lines carry no `[code]` suffix.
+    if diagnostic.code == scribe_domains::diagnostics::codes::NUMFIG {
+        return bare_domain_warning_line(diagnostic, docname, env);
+    }
     let path = env
         .doc2path(docname)
         .map(absolute_source_path)
@@ -430,6 +435,18 @@ pub fn prepare(
             .collect()
     };
     warnings.extend(registration_warnings);
+
+    // Snapshot every doctree into the environment *before* resolving xrefs.
+    // Upstream's `ReferencesResolver` runs after the `TocTreeCollector`, so a
+    // `:numref:` can locate its target node (and the section/figure number the
+    // collector writes onto it) through `env.get_doctree()`. Recording here
+    // makes that state available during the read/resolved transform passes.
+    for (docname, document) in &parsed {
+        env.record_document(docname, document, BTreeMap::new());
+    }
+    let sources: BTreeMap<String, Arc<String>> = BTreeMap::new();
+    let toctrees = collect_toctrees_with_sources(env, config, &sources);
+
     let compact = crate::i18n::compact_setting(config);
     for (docname, document) in &mut parsed {
         let domain = crate::i18n::docname_to_domain(docname, &compact);
@@ -468,13 +485,6 @@ pub fn prepare(
         }
     }
 
-    // Snapshot doctrees into the environment so the toctree collector can
-    // derive section numbers and navigation relations from the frozen AST.
-    for (docname, document) in &parsed {
-        env.record_document(docname, document, BTreeMap::new());
-    }
-    let sources: BTreeMap<String, Arc<String>> = BTreeMap::new();
-    let toctrees = collect_toctrees_with_sources(env, config, &sources);
     warnings.extend(toctree_warning_lines(&toctrees, source_dir));
     warnings.extend(bridge.warnings());
     warnings.extend(bridge.take_event_diagnostics());

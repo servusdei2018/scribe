@@ -1443,7 +1443,14 @@ fn collect_number_updates(
                 NodeKind::Section => {
                     if let Ok(ids) = node.ids() {
                         for id_value in ids {
-                            if let Some(number) = numbers.get(docname, &id_value) {
+                            // Section numbers are keyed by the `#anchor`
+                            // spelling from the toctree; `lookup_secnumber`
+                            // tries both that and the bare id so the number
+                            // reaches the node's `secnumber` attribute (which
+                            // `:numref:` resolution reads from env doctrees).
+                            if let Some(number) = lookup_secnumber(numbers, docname, &id_value)
+                                .or_else(|| numbers.get(docname, ""))
+                            {
                                 if !number.is_empty() {
                                     let display = number.iter().map(i64::to_string).collect::<Vec<_>>().join(".");
                                     updates.push((docname.clone(), id, "secnumber".to_owned(), display.clone()));

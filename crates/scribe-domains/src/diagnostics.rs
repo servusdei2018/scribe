@@ -23,6 +23,10 @@ pub mod codes {
     pub const INCONSISTENCY: &str = "scribe::domains::inconsistency";
     /// A malformed intersphinx mapping or missing external inventory.
     pub const INTERSPHINX: &str = "scribe::domains::intersphinx";
+    /// A `:numref:` warning upstream logs without a `type`/`subtype`, so it
+    /// has no `[code]` suffix in the build log. Rendered through the same
+    /// located-warning path as other domain diagnostics but without a suffix.
+    pub const NUMFIG: &str = "scribe::domains::numfig";
 }
 
 /// Severity of a domain diagnostic.
@@ -141,6 +145,27 @@ impl DomainDiagnostic {
             source_path: None,
             line: None,
             help: Some(help),
+            severity: DomainSeverity::Warning,
+        }
+    }
+
+    /// Creates a warning upstream logs with no `type`/`subtype` (hence no
+    /// `[code]` suffix), such as the `:numref:` numfig diagnostics.
+    pub fn bare_warning(
+        message: impl Into<String>,
+        docname: Option<String>,
+        span: Option<Span>,
+    ) -> Self {
+        Self {
+            code: codes::NUMFIG.to_owned(),
+            message: message.into(),
+            typ: None,
+            target: None,
+            docname,
+            span,
+            source_path: None,
+            line: None,
+            help: None,
             severity: DomainSeverity::Warning,
         }
     }

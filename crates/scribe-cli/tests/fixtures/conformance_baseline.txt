@@ -36,7 +36,7 @@ test-markup-rubric	pseudoxml	1.000000	pass
 test-maxlistdepth	pseudoxml	1.000000	pass
 test-nested-enumerated-list	pseudoxml	1.000000	pass
 test-nested-tables	pseudoxml	1.000000	pass
-test-numfig	pseudoxml	0.824836	partial
+test-numfig	pseudoxml	1.000000	pass
 test-productionlist	pseudoxml	1.000000	pass
 test-prolog	pseudoxml	1.000000	pass
 test-reST-code-block	html	0.978344	pass
