@@ -182,6 +182,9 @@ pub struct DirectiveContext<'a> {
     pub line: u32,
     /// Byte span of the whole directive.
     pub span: Span,
+    /// For `only`, the number of ancestor sections its content is raised
+    /// through (Sphinx `Only.run` section raising). Zero for other directives.
+    pub only_raise: i64,
     /// Shared build context.
     pub global: &'a Context,
 }

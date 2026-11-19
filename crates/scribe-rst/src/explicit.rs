@@ -183,6 +183,24 @@ impl<'a> BlockParser<'a> {
             line_no,
             &body_lines,
         );
+        if normalize_name(name) == "only" {
+            // Sphinx's `Only.run` parses nested sections with `match_titles`
+            // and then *raises* the `only` node when the first nested title
+            // style matches a shallower level of the surrounding document.
+            // The block parser still owns the title-style table here, so
+            // record the raise count for the resolve phase to apply.
+            let raise = only_section_raise(
+                &body_lines,
+                self.title_styles(),
+                self.section_depth(),
+            );
+            if raise > 0 {
+                self.doc.get_mut(node)?.attrs.set_int(
+                    crate::pending::KEY_ONLY_RAISE,
+                    raise,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -242,7 +260,10 @@ impl<'a> BlockParser<'a> {
         index: usize,
         rest: &str,
     ) -> RstResult<()> {
-        let extra = self.take_body(index, base_indent);
+        // A substitution body may start after a blank line (`.. |x| raw:: html`
+        // followed by an indented raw payload). `take_body` stops at blanks;
+        // `take_directive_body` is the Docutils-faithful variant that skips them.
+        let (extra, _) = self.take_directive_body(index, base_indent);
         let mut text = rest.to_owned();
         for line in extra {
             // Preserve line boundaries: option lines (`:name: value`) in a
@@ -287,6 +308,25 @@ impl<'a> BlockParser<'a> {
         let line_no = self.line_number(index);
         let node = self.add(NodeKind::SubstitutionDefinition, parent, span, line_no)?;
         self.set_list(node, "names", vec![name])?;
+        if replacement_directive == "raw" {
+            // Docutils builds a `raw` node directly inside the substitution
+            // definition (the format is the first argument, the dedented body
+            // is the raw text). Phase 05 clones that node into every `|name|`
+            // reference, exactly like any other replacement.
+            let mut lines = replacement.lines();
+            let format = lines
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let body = lines.collect::<Vec<_>>().join("\n");
+            let raw = self.add(NodeKind::Raw, node, span, line_no)?;
+            self.set_str(raw, "format", format)?;
+            self.set_str(raw, "xml:space", "preserve")?;
+            self.add_text(body, raw, span, line_no)?;
+            return Ok(());
+        }
         if matches!(
             replacement_directive,
             "replace" | "unicode" | "image" | "date"
@@ -400,6 +440,41 @@ fn trim_blank_edges(lines: &mut Vec<String>) {
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
+}
+
+/// Returns the adornment character of the first section title in a directive
+/// body (the first non-blank line followed by a matching adornment line).
+fn first_body_section_style(body: &[String]) -> Option<String> {
+    for pair in body.windows(2) {
+        let title = pair[0].trim();
+        if title.is_empty() {
+            continue;
+        }
+        if let Some((ch, width)) = crate::lexer::adornment_of(pair[1].trim()) {
+            if width >= crate::lexer::column_width(title) {
+                return Some(ch.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Number of ancestor sections an `only` wrapper must be raised through so a
+/// section parsed inside it lands at the same level as the surrounding
+/// document's matching title style. This is `n_sects_to_raise` from Sphinx's
+/// `sphinx.directives.other.Only.run`:
+/// `current_depth - nested_depth + 1`, where `current_depth` is
+/// ``section_stack.len() - 1`` here (docutils subtracts 2 after walking to the
+/// document root). A nested style absent from the surrounding styles needs no
+/// raising — the content stays at the current level.
+fn only_section_raise(body: &[String], title_styles: &[String], section_depth: usize) -> i64 {
+    let Some(nested_style) = first_body_section_style(body) else {
+        return 0;
+    };
+    let Some(nested_depth) = title_styles.iter().position(|style| *style == nested_style) else {
+        return 0;
+    };
+    (section_depth as i64).saturating_sub(nested_depth as i64).max(0)
 }
 
 #[cfg(test)]

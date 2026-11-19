@@ -52,6 +52,80 @@ pub(crate) struct EnumMarker {
     pub len: usize,
 }
 
+/// Docutils `Body.is_enumerated_list_item`: after an enumerator marker the
+/// following line must be blank, indented, or start with the *next*
+/// enumerator (or its auto-`#` form).  Otherwise the marker line is not a list
+/// item — it is a section title whose adornment follows on the next line —
+/// and the block must be re-classified as plain text.  This is the exact rule
+/// that lets `1. Title` / `================` be parsed as a section.
+pub(crate) fn is_enumerated_list_item(content: &str, next_line: Option<&str>) -> bool {
+    let Some(marker) = enumerator_marker(content) else {
+        return false;
+    };
+    let Some(next) = next_line else {
+        // Docutils returns true on EOF (no line to contradict the list).
+        return true;
+    };
+    // `next_line[:1].strip()` is empty for a blank or indented line.
+    if next.chars().next().is_none_or(char::is_whitespace) {
+        return true;
+    }
+    let after_prefix = &content[marker.prefix.len()..];
+    let token = if marker.suffix.is_empty() {
+        after_prefix
+    } else {
+        &after_prefix[..after_prefix.find(&marker.suffix).unwrap_or(after_prefix.len())]
+    };
+    let token_text = if token == "#" {
+        "#".to_owned()
+    } else {
+        let ordinal = marker.start + 1;
+        match marker.enumtype.as_str() {
+            "arabic" => ordinal.to_string(),
+            "loweralpha" | "upperalpha" if (1..=26).contains(&ordinal) => {
+                let letter = char::from(b'a' + (ordinal - 1) as u8);
+                if marker.enumtype == "upperalpha" {
+                    letter.to_ascii_uppercase().to_string()
+                } else {
+                    letter.to_string()
+                }
+            }
+            "lowerroman" | "upperroman" => {
+                let roman = int_to_roman(ordinal);
+                if marker.enumtype == "upperroman" {
+                    roman.to_uppercase()
+                } else {
+                    roman.to_lowercase()
+                }
+            }
+            _ => String::new(),
+        }
+    };
+    let next_enumerator = format!("{}{}{} ", marker.prefix, token_text, marker.suffix);
+    let auto_enumerator = format!("{}#{} ", marker.prefix, marker.suffix);
+    next.starts_with(&next_enumerator) || next.starts_with(&auto_enumerator)
+}
+
+/// Minimal Roman-numeral formatter (Docutils `RomanNumeral.to_uppercase`) used
+/// only to recognise the *next* enumerator in an already-started roman list.
+fn int_to_roman(mut value: i64) -> String {
+    const TABLE: [(i64, &str); 13] = [
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+        (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut out = String::new();
+    if value <= 0 {
+        return out;
+    }
+    for (amount, numeral) in TABLE {
+        while value >= amount {
+            out.push_str(numeral);
+            value -= amount;
+        }
+    }
+    out
+}
+
 /// Recognizes a Docutils enumerated-list marker at the start of `content`.
 pub(crate) fn enumerator_marker(content: &str) -> Option<EnumMarker> {
     let formats = [

@@ -367,16 +367,21 @@ fn hlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn only(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let expression = ctx.argument(0).unwrap_or("").to_owned();
-    let span = miette::SourceSpan::new((ctx.span.start as usize).into(), ctx.span.len() as usize);
-    match ctx.global.eval_condition(&expression) {
-        Ok(true) => ctx.parse_nested(),
-        Ok(false) => Ok(Vec::new()),
-        Err(error) => Err(DirectiveError::InvalidOnlyExpression {
-            expression,
-            detail: error.to_string(),
-            span,
-        }),
+    // Docutils retains the `only` wrapper in the doctree during parsing and
+    // evaluates it only in `OnlyNodeTransform` (post priority 50). Keeping the
+    // wrapper here is what lets the post phase replace a false branch with an
+    // exact id-transfer `comment` instead of silently dropping its content.
+    let id = ctx.add(NodeKind::Only, ctx.parent)?;
+    {
+        let node = ctx.doc.get_mut(id)?;
+        node.attrs.set_str("expr", &expression);
+        if ctx.only_raise > 0 {
+            node.attrs
+                .set_int(crate::pending::KEY_ONLY_RAISE, ctx.only_raise);
+        }
     }
+    ctx.parse_nested_into(id)?;
+    Ok(vec![id])
 }
 
 fn tabularcolumns(ctx: &mut DirectiveContext<'_>) -> HandlerResult {

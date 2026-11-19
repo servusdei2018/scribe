@@ -39,6 +39,11 @@ pub const KEY_DIRECTIVE_LINE: &str = "directive_line";
 /// restores those lines for zero-argument directives (e.g. `toctree`).
 pub const KEY_BODY_LINES: &str = "body_lines";
 
+/// Additive key on a `pending` (and, after resolution, `only`) node recording
+/// how many ancestor sections Sphinx's `Only.run` raises its content through.
+/// Computed by the block parser from the surrounding title styles.
+pub const KEY_ONLY_RAISE: &str = "only_raise";
+
 /// Typed, read-only view over a `pending` node's directive attributes.
 #[derive(Clone, Copy, Debug)]
 pub struct PendingDirective<'a> {

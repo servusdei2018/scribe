@@ -134,7 +134,65 @@ pub fn resolve_pending(
             break;
         }
     }
+    raise_only_nodes(document);
     report
+}
+
+/// Applies Sphinx's `Only.run` section raising: each `only` wrapper tagged
+/// with `only_raise` is re-parented that many levels up so its nested sections
+/// land at the level of the matching surrounding title style. Nodes are
+/// processed in source order and inserted before the first sibling that
+/// starts on a later line, preserving document order at the target level.
+fn raise_only_nodes(document: &mut Document) {
+    let mut pending: Vec<(usize, NodeId, i64)> = document
+        .preorder_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let node = document.get(id).ok()?;
+            if node.kind != NodeKind::Only {
+                return None;
+            }
+            let raise = node
+                .attrs
+                .get_int(crate::pending::KEY_ONLY_RAISE)
+                .ok()
+                .flatten()?;
+            if raise <= 0 {
+                return None;
+            }
+            let line = node.source.as_ref().and_then(|pos| pos.line).unwrap_or(0) as usize;
+            Some((line, id, raise))
+        })
+        .collect();
+    pending.sort_by_key(|(line, _, _)| *line);
+    for (line, id, raise) in pending {
+        let mut target = match document.parent(id).ok().flatten() {
+            Some(parent) => parent,
+            None => continue,
+        };
+        for _ in 0..raise {
+            match document.parent(target).ok().flatten() {
+                Some(parent) => target = parent,
+                None => break,
+            }
+        }
+        let index = document.children(target).map_or(0, |children| {
+            children
+                .iter()
+                .position(|&child| {
+                    document
+                        .get(child)
+                        .ok()
+                        .and_then(|node| node.source.as_ref().and_then(|pos| pos.line))
+                        .is_some_and(|other| other as usize > line)
+                })
+                .unwrap_or(children.len())
+        });
+        let _ = document.insert_child(target, index, id);
+        if let Ok(node) = document.get_mut(id) {
+            node.attrs.remove(crate::pending::KEY_ONLY_RAISE);
+        }
+    }
 }
 
 /// Resolves a [`crate::ParseOutput`] and copies its additive side table into
@@ -164,7 +222,51 @@ pub fn resolve_output(
         index += 1;
         keep
     });
+    process_only_nodes(&mut output.document, Some(local.tags.as_ref()));
     report
+}
+
+/// Docutils `sphinx.util.nodes.process_only_nodes` (mirrored by
+/// `scribe_core::OnlyNodeTransform`).  Matching `only` wrappers are replaced by
+/// their children; non-matching wrappers become empty `comment` nodes so a
+/// preceding target cannot lose its ids (docutils' "Losing ids" guard).  The
+/// `xml:space="preserve"` attribute mirrors the oracle's pseudo-XML exactly.
+fn process_only_nodes(document: &mut Document, tags: Option<&scribe_config::Tags>) {
+    let total = document
+        .preorder_ids()
+        .iter()
+        .filter(|&&id| document.get(id).is_ok_and(|node| node.kind == NodeKind::Only))
+        .count();
+    // Re-walk after each replacement so nested `only` nodes are also handled.
+    for _ in 0..total {
+        let Some(id) = document.preorder_ids().into_iter().find(|&id| {
+            document.get(id).is_ok_and(|node| node.kind == NodeKind::Only)
+        }) else {
+            break;
+        };
+        let expr = document
+            .get(id)
+            .ok()
+            .and_then(|node| node.get_str("expr").ok().flatten().map(str::to_owned))
+            .unwrap_or_default();
+        // Upstream keeps the children and logs a warning on an invalid
+        // expression; with no diagnostic channel here we still keep them.
+        let keep = tags.is_none_or(|tags| tags.eval_condition(&expr).unwrap_or(true));
+        if keep {
+            let _ = document.replace_with_children(id);
+            continue;
+        }
+        let mut comment = scribe_ast::Node::new(NodeKind::Comment);
+        comment.attrs.set_str("xml:space", "preserve");
+        if let Ok(node) = document.get(id) {
+            for key in ["ids", "names", "dupnames", "classes", "backrefs"] {
+                if let Some(value) = node.attrs.get(key) {
+                    comment.attrs.insert(key.to_owned(), value.clone());
+                }
+            }
+        }
+        let _ = document.replace_node(id, comment);
+    }
 }
 
 fn directive_pending_ids(document: &Document) -> Vec<NodeId> {
@@ -317,6 +419,11 @@ fn resolve_one(
     // attach their result to the same parent, so reading it afterwards would
     // include the produced nodes twice when we splice.
     let children_before = document.children(parent).map(|c| c.to_vec()).unwrap_or_default();
+    let only_raise = document
+        .get(id)
+        .ok()
+        .and_then(|node| node.attrs.get_int(crate::pending::KEY_ONLY_RAISE).ok().flatten())
+        .unwrap_or(0);
     let mut ctx = DirectiveContext {
         doc: document,
         parent,
@@ -327,6 +434,7 @@ fn resolve_one(
         content: &content,
         line,
         span,
+        only_raise,
         global: context,
     };
     let produced = match directive.run(&mut ctx) {

@@ -146,6 +146,17 @@ pub(crate) struct BlockParser<'a> {
 }
 
 impl<'a> BlockParser<'a> {
+    /// Section title styles seen so far, outermost first. Used to compute the
+    /// section-raising count for `only` directives.
+    pub(crate) fn title_styles(&self) -> &[AdornmentStyle] {
+        &self.title_styles
+    }
+
+    /// Depth of the currently open section stack.
+    pub(crate) fn section_depth(&self) -> usize {
+        self.section_stack.len()
+    }
+
     /// Creates a parser over an already-augmented source string.
     pub(crate) fn with_source(source: &'a str, options: ParseOptions) -> Self {
         let lexer = Lexer::with_tab_width(source, options.tab_width);
@@ -232,7 +243,12 @@ impl<'a> BlockParser<'a> {
                     .filter_map(|&id| self.doc.get(id).ok().cloned())
                     .collect::<Vec<_>>();
                 for name in names {
-                    substitutions.insert(name, children.clone());
+                    // Inline `|name|` references carry a lower-cased refname
+                    // (Docutils `normalize_name`) while definitions preserve
+                    // the original case (`whitespace_normalize_name`). Index
+                    // both spellings so `|HTML_RAW|` finds `HTML_RAW`.
+                    substitutions.insert(crate::names::normalize_name(&name), children.clone());
+                    substitutions.insert(name.clone(), children.clone());
                 }
             }
         }
@@ -630,8 +646,15 @@ impl<'a> BlockParser<'a> {
             return self.parse_bullet_list(parent, base_indent);
         }
 
-        // 5. Enumerated list.
-        if crate::lists::enumerator_marker(&content).is_some() {
+        // 5. Enumerated list. Docutils rejects an enumerator whose next line
+        //    is neither blank, indented, nor the following enumerator; the
+        //    marker then belongs to a section title (`1. Title` / `======`).
+        if crate::lists::enumerator_marker(&content).is_some()
+            && crate::lists::is_enumerated_list_item(
+                &content,
+                self.line(index + 1).map(|line| line.text()),
+            )
+        {
             return self.parse_enumerated_list(parent, base_indent);
         }
 
