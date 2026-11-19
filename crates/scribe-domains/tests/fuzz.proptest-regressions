@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 71ada78ddc249e4892694a0f1f22ff315877c1f99b2293b1a9156d7415454af0 # shrinks to input = "=aa", objtype = "function", domain = "cpp"

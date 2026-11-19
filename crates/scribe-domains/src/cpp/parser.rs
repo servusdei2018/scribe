@@ -1,0 +1,441 @@
+//! Hand-written C++ declaration parser (Phase 13).
+//!
+//! Covers the common subset of `sphinx/domains/cpp/_parser.py`: `::`-qualified
+//! names, templates, references (`&` / `&&`), cv-qualifiers, builtin and named
+//! types, function parameter lists, operators, constructors/destructors and
+//! trailing `= alias` declarations.  Malformed input degrades gracefully.
+
+use crate::c::parser::{tokenize, Tok, TokKind};
+use crate::cpp::ids::{MangleDecl, MangleParam};
+use crate::sigbuild::SigToken;
+
+/// One segment of a C++ qualified name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameSegment {
+    /// Segment text (may include an operator spelling).
+    pub text: String,
+    /// Separator emitted after this segment (`::` or `.`).
+    pub sep_after: String,
+}
+
+/// A parsed C++ declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CppDecl {
+    /// Leading tokens (template header, cv-qualifiers, return type, ...).
+    pub prefix: Vec<SigToken>,
+    /// Qualified name segments; last is the declared name.
+    pub segments: Vec<NameSegment>,
+    /// Function parameter lists.
+    pub params: Vec<Vec<SigToken>>,
+    /// Tokens after the name.
+    pub suffix: Vec<SigToken>,
+    /// `::`-joined full name.
+    pub name: String,
+    /// Whether a function parameter list was present.
+    pub is_function: bool,
+    /// Template arguments on the declared name (`f<int>`).
+    pub template_args: Vec<String>,
+    /// Alias target tokens (`type X = Y`).
+    pub alias: Option<Vec<SigToken>>,
+}
+
+impl CppDecl {
+    /// Final (unqualified) name.
+    pub fn short_name(&self) -> &str {
+        self.segments.last().map_or(self.name.as_str(), |segment| segment.text.as_str())
+    }
+}
+
+/// Builtin C++ type keywords.
+pub const BUILTIN_TYPES: &[&str] = &[
+    "void", "bool", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
+    "wchar_t", "char16_t", "char32_t", "auto", "size_t", "std::size_t",
+];
+
+/// Declaration keywords rendered as `desc_sig_keyword`.
+pub const KEYWORDS: &[&str] = &[
+    "const", "volatile", "constexpr", "static", "inline", "virtual", "explicit", "friend",
+    "public", "protected", "private", "typename", "class", "struct", "union", "enum", "typedef",
+    "template", "mutable",
+];
+
+fn normalized(src: &str) -> &str {
+    let mut src = src.trim();
+    while src.ends_with(';') {
+        src = src[..src.len() - 1].trim_end();
+    }
+    src
+}
+
+/// Parses a C++ declaration for the given object type.
+pub fn parse_cpp_declaration(signature: &str, objtype: &str, domain: &str) -> CppDecl {
+    let toks = tokenize(normalized(signature));
+    if toks.is_empty() {
+        return CppDecl {
+            prefix: Vec::new(), segments: Vec::new(), params: Vec::new(), suffix: Vec::new(),
+            name: String::new(), is_function: false, template_args: Vec::new(), alias: None,
+        };
+    }
+    parse_tokens(&toks, objtype, domain)
+}
+
+fn parse_tokens(toks: &[Tok], objtype: &str, domain: &str) -> CppDecl {
+    // Split off a trailing `= alias` at depth zero.
+    let mut depth = 0i32;
+    let mut alias_at = None;
+    for (index, token) in toks.iter().enumerate() {
+        match token.text.as_str() {
+            "(" | "[" | "{" | "<" => depth += 1,
+            ")" | "]" | "}" | ">" | ">>" => depth -= 1,
+            "=" if depth == 0 => alias_at = Some(index),
+            _ => {}
+        }
+    }
+    let (head, alias) = match alias_at {
+        Some(index) => (&toks[..index], Some(type_tokens(&toks[index + 1..], domain))),
+        None => (toks, None),
+    };
+
+    // An alias with nothing before it (e.g. `= aa`) leaves no declaration head.
+    // Return a well-formed empty declaration instead of indexing `head[0]` below
+    // (which panicked before the Phase 29 fuzz campaign exposed it).
+    if head.is_empty() {
+        return CppDecl {
+            prefix: Vec::new(), segments: Vec::new(), params: Vec::new(), suffix: Vec::new(),
+            name: String::new(), is_function: false, template_args: Vec::new(), alias,
+        };
+    }
+
+    // Find the last top-level word that can be the declared name.
+    let mut nesting = 0i32;
+    let mut candidate = None;
+    for (index, token) in head.iter().enumerate() {
+        match token.text.as_str() {
+            "(" | "[" | "{" => nesting += 1,
+            ")" | "]" | "}" => nesting -= 1,
+            "<" => nesting += 1,
+            ">" | ">>" => nesting -= 1,
+            _ => {}
+        }
+        if nesting != 0 || token.kind != TokKind::Word {
+            continue;
+        }
+        if BUILTIN_TYPES.contains(&token.text.as_str()) || KEYWORDS.contains(&token.text.as_str()) {
+            continue;
+        }
+        candidate = Some(index);
+    }
+    let name_index = candidate.unwrap_or_else(|| head.iter().position(|token| token.kind == TokKind::Word).unwrap_or(0));
+
+    // Extend backwards across `::` chains.
+    let mut start = name_index;
+    while start >= 2 {
+        let sep = &head[start - 1];
+        if sep.kind != TokKind::Punct || !matches!(sep.text.as_str(), "::" | "." | "->") {
+            break;
+        }
+        if head[start - 2].kind != TokKind::Word {
+            break;
+        }
+        start -= 2;
+    }
+    let mut end = name_index + 1;
+    // Operator names (`operator+`, `operator()`, `operator[]`, `operator""_x`).
+    if head[name_index].text == "operator" {
+        if let Some(next) = head.get(end) {
+            if next.kind == TokKind::Punct && next.text != "(" {
+                end += 1;
+            } else if matches!(next.text.as_str(), "(" | "[")
+                && head.get(end + 1).is_some_and(|t| matches!(t.text.as_str(), ")" | "]"))
+            {
+                end += 2;
+            }
+        }
+        if head.get(end).is_some_and(|t| t.kind == TokKind::Literal) {
+            end += 1;
+        }
+    }
+    // Constructor / destructor names are already full words (`~A`).
+    // Template arguments on the name (`f<int>`).
+    let mut template_args = Vec::new();
+    if head.get(end).is_some_and(|t| t.text == "<") {
+        let close = matching_close(head, end, "<", ">");
+        template_args = if close > end + 1 { split_top(&head[end + 1..close]) } else { Vec::new() }
+            .into_iter()
+            .map(|tokens| tokens.iter().map(|token| token.text.as_str()).collect::<String>())
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        end = close + 1;
+    }
+
+    // Name segments.
+    let mut word_indices = Vec::new();
+    let mut index = start;
+    while index < end.min(name_index + 1) {
+        if head[index].kind == TokKind::Word {
+            word_indices.push(index);
+        }
+        index += 1;
+    }
+    let mut segments = Vec::new();
+    for (position, &word_index) in word_indices.iter().enumerate() {
+        let sep_after = if position + 1 < word_indices.len() {
+            head[word_indices[position + 1] - 1].text.clone()
+        } else {
+            String::new()
+        };
+        if head[word_index].text == "operator" {
+            let mut text = String::from("operator");
+            for token in &head[word_index + 1..end] {
+                text.push_str(&token.text);
+            }
+            segments.push(NameSegment { text, sep_after });
+            break;
+        }
+        segments.push(NameSegment { text: head[word_index].text.clone(), sep_after });
+    }
+    if segments.is_empty() {
+        segments.push(NameSegment { text: String::new(), sep_after: String::new() });
+    }
+
+    // Prefix tokens before the name chain. Upstream strips visibility
+    // specifiers from class-like declarations and renders the class keyword.
+    let leading: Vec<Tok> = if matches!(objtype, "class" | "struct" | "union") {
+        head[..start].iter()
+            .filter(|token| !matches!(token.text.as_str(), "public" | "protected" | "private"))
+            .cloned()
+            .collect()
+    } else {
+        head[..start].to_vec()
+    };
+    let mut prefix = type_tokens(&leading, domain);
+    let keyword = match objtype {
+        "class" | "struct" => Some("class"),
+        "union" => Some("union"),
+        "enum" => Some("enum"),
+        "enum-class" => Some("enum-class"),
+        "enum-struct" => Some("enum-struct"),
+        "enumerator" => Some("enumerator"),
+        "concept" => Some("concept"),
+        "type" if prefix.is_empty() => Some("type"),
+        "type" => Some("typedef"),
+        _ => None,
+    };
+    if let Some(keyword) = keyword {
+        let mut with_keyword = Vec::new();
+        if keyword == "enum-class" {
+            with_keyword.push(SigToken::Keyword("enum".to_owned()));
+            with_keyword.push(SigToken::Space);
+            with_keyword.push(SigToken::Keyword("class".to_owned()));
+        } else if keyword == "enum-struct" {
+            with_keyword.push(SigToken::Keyword("enum".to_owned()));
+            with_keyword.push(SigToken::Space);
+            with_keyword.push(SigToken::Keyword("struct".to_owned()));
+        } else {
+            with_keyword.push(SigToken::Keyword(keyword.to_owned()));
+        }
+        with_keyword.push(SigToken::Space);
+        with_keyword.append(&mut prefix);
+        prefix = with_keyword;
+    }
+
+    // Suffix tokens / parameters.
+    let rest = &head[end..];
+    let mut params = Vec::new();
+    let mut suffix_tokens = rest;
+    if rest.first().is_some_and(|token| token.text == "(") {
+        let close = matching_close(rest, 0, "(", ")");
+        if close > 0 {
+            params = split_top(&rest[1..close])
+                .into_iter()
+                .map(|param| param_tokens(&param, domain))
+                .collect();
+        }
+        suffix_tokens = rest.get(close + 1..).unwrap_or(&[]);
+    }
+    let suffix = type_tokens(suffix_tokens, domain);
+    let is_function = !rest.is_empty() && rest[0].text == "(";
+    let name = segments.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>().join("::");
+
+    CppDecl { prefix, segments, params, suffix, name, is_function, template_args, alias }
+}
+
+/// Converts tokens to signature tokens.
+pub fn type_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < toks.len() {
+        let token = &toks[index];
+        match token.kind {
+            TokKind::Number => out.push(SigToken::Number(token.text.clone())),
+            TokKind::Literal => out.push(SigToken::Literal(token.text.clone())),
+            TokKind::Word if BUILTIN_TYPES.contains(&token.text.as_str()) => {
+                out.push(SigToken::KeywordType(token.text.clone()));
+            }
+            TokKind::Word if KEYWORDS.contains(&token.text.as_str()) => {
+                out.push(SigToken::Keyword(token.text.clone()));
+            }
+            TokKind::Word => {
+                if index > 0 && matches!(toks[index - 1].text.as_str(), "::" | "." | "->") {
+                    out.push(SigToken::Punctuation(toks[index - 1].text.clone()));
+                }
+                out.push(SigToken::reference(domain, token.text.clone(), "type", "cpp-type"));
+            }
+            TokKind::Punct => match token.text.as_str() {
+                "::" | "." | "->" => {}
+                "&" | "&&" | "*" | "(" | ")" | "[" | "]" | "," | "..." | "template" => {
+                    out.push(SigToken::Punctuation(token.text.clone()));
+                }
+                "<" | ">" => out.push(SigToken::Punctuation(token.text.clone())),
+                "~" | "+" | "-" | "==" | "!=" | "<<" | ">>" | "++" | "--" => {
+                    out.push(SigToken::Operator(token.text.clone()));
+                }
+                _ => out.push(SigToken::Punctuation(token.text.clone())),
+            },
+        }
+        // Whitespace between word-ish tokens.
+        let next = toks.get(index + 1);
+        if let Some(next) = next {
+            // No space between a pointer/reference marker and the following
+            // name (`char *name`, `T& value` → upstream `T`, `&`, `value`).
+            let pointer_marker = matches!(token.text.as_str(), "*" | "&" | "&&");
+            let word = token.kind == TokKind::Word || matches!(token.text.as_str(), ">" | ">>");
+            let next_word = next.kind == TokKind::Word || matches!(next.text.as_str(), ">" | "*" | "&" | "&&");
+            if !pointer_marker && word && next_word {
+                out.push(SigToken::Space);
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+fn param_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {
+    let mut tokens = type_tokens(toks, domain);
+    if let Some(last) = tokens.iter_mut().rev().find(|token| !matches!(token, SigToken::Space)) {
+        if let SigToken::Ref { text, .. } = last {
+            *last = SigToken::Name(text.clone());
+        }
+    }
+    tokens
+}
+
+fn split_top(toks: &[Tok]) -> Vec<Vec<Tok>> {
+    let mut result = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0i32;
+    for token in toks {
+        match token.text.as_str() {
+            "(" | "[" | "{" | "<" => depth += 1,
+            ")" | "]" | "}" | ">" | ">>" => depth -= 1,
+            "," if depth == 0 => {
+                result.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(token.clone());
+    }
+    if !current.is_empty() || !result.is_empty() {
+        result.push(current);
+    }
+    result.into_iter().filter(|param| !param.is_empty()).collect()
+}
+
+fn matching_close(toks: &[Tok], start: usize, open: &str, close: &str) -> usize {
+    let mut depth = 0i32;
+    for (index, token) in toks.iter().enumerate().skip(start) {
+        if token.text == open {
+            depth += 1;
+        } else if token.text == close {
+            depth -= 1;
+            if depth == 0 {
+                return index;
+            }
+        }
+    }
+    toks.len().saturating_sub(1)
+}
+
+/// Builds the input for Itanium-style mangling from a parsed declaration.
+pub fn mangle_input(decl: &CppDecl) -> MangleDecl {
+    let names = decl.segments.iter().map(|segment| segment.text.clone()).collect();
+    let params = decl
+        .params
+        .iter()
+        .map(|param| {
+            let mut ty = String::new();
+            let mut pointers = 0usize;
+            let mut reference = 0u8;
+            let mut is_const = false;
+            for token in param {
+                match token {
+                    SigToken::KeywordType(text) | SigToken::Name(text) => {
+                        if text == "const" {
+                            is_const = true;
+                        } else {
+                            ty.push_str(text);
+                        }
+                    }
+                    SigToken::Ref { text, .. } => ty.push_str(text),
+                    SigToken::Punctuation(text) if text == "*" => pointers += 1,
+                    SigToken::Punctuation(text) if text == "&" => reference = 1,
+                    SigToken::Punctuation(text) if text == "&&" => reference = 2,
+                    SigToken::Keyword(text) if text == "const" => is_const = true,
+                    _ => {}
+                }
+            }
+            MangleParam { ty, pointers, reference, is_const }
+        })
+        .collect();
+    MangleDecl { names, params, template_args: decl.template_args.clone() }
+}
+
+/// Parses a C++ xref target into a normalized spelling.
+pub fn parse_cpp_xref(signature: &str) -> String {
+    let toks = tokenize(normalized(signature));
+    toks.iter().map(|token| token.text.as_str()).collect::<Vec<_>>().join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_qualified_member() {
+        let decl = parse_cpp_declaration("float Sphinx::version", "member", "cpp");
+        assert_eq!(decl.name, "Sphinx::version");
+        assert_eq!(decl.segments.len(), 2);
+        assert_eq!(decl.segments[0].sep_after, "::");
+    }
+
+    #[test]
+    fn parses_template_type() {
+        let decl = parse_cpp_declaration("std::vector<int> List", "type", "cpp");
+        assert_eq!(decl.name, "List");
+        assert!(decl.prefix.iter().any(|token| matches!(token, SigToken::Ref { .. })));
+    }
+
+    #[test]
+    fn parses_operator_function() {
+        let decl = parse_cpp_declaration("int operator+(int, int)", "function", "cpp");
+        assert_eq!(decl.name, "operator+");
+        assert_eq!(decl.params.len(), 2);
+        assert!(decl.is_function);
+    }
+
+    #[test]
+    fn parses_alias() {
+        let decl = parse_cpp_declaration("Alias = int;", "type", "cpp");
+        assert_eq!(decl.name, "Alias");
+        assert!(decl.alias.is_some());
+    }
+
+    #[test]
+    fn malformed_input_never_panics() {
+        for src in ["", "<", "::", "template<", "void f(", "operator", "a >>> b"] {
+            let decl = parse_cpp_declaration(src, "function", "cpp");
+            let _ = mangle_input(&decl);
+        }
+    }
+}
