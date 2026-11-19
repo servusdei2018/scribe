@@ -10,6 +10,27 @@ description = "Shared core types, errors and traits for scribe"
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+bincode.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+scribe-ast.workspace = true
+scribe-config.workspace = true
+scribe-cache.workspace = true
+scribe-domains.workspace = true
+scribe-autodoc.workspace = true
+scribe-rst.workspace = true
+unicode-normalization.workspace = true
+miette.workspace = true
+
+[features]
+# Enables the Wasm plugin ABI host backend (manifest + native trampolines).
+# Default builds stay lightweight: no WebAssembly runtime dependency is pulled
+# in unless this feature is enabled. See `src/plugin.rs` for the ABI spec.
+wasm-plugins = []
 
 [lints]
 workspace = true

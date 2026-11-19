@@ -9,6 +9,17 @@ repository.workspace = true
 description = "MyST Markdown parser integration for scribe"
 
 [dependencies]
+thiserror.workspace = true
+miette.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pulldown-cmark.workspace = true
+serde_yaml.workspace = true
+scribe-ast.workspace = true
+scribe-rst.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

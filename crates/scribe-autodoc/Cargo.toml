@@ -9,6 +9,24 @@ repository.workspace = true
 description = "Native Python autodoc and napoleon engine for scribe"
 
 [dependencies]
+thiserror.workspace = true
+miette.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+blake3.workspace = true
+rustpython-parser.workspace = true
+rustpython-ast.workspace = true
+scribe-ast.workspace = true
+scribe-config.workspace = true
+scribe-rst.workspace = true
+scribe-domains.workspace = true
+scribe-theme.workspace = true
+minijinja.workspace = true
+
+[dev-dependencies]
+scribe-core.workspace = true
 
 [lints]
 workspace = true

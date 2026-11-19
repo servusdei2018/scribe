@@ -9,6 +9,21 @@ repository.workspace = true
 description = "Theme system and Jinja-compatible templating for scribe"
 
 [dependencies]
+scribe-config.workspace = true
+
+minijinja.workspace = true
+dashmap.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+once_cell.workspace = true
+indexmap.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+similar.workspace = true
 
 [lints]
 workspace = true

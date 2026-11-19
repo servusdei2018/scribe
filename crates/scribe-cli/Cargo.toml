@@ -13,6 +13,28 @@ clap.workspace = true
 thiserror.workspace = true
 miette.workspace = true
 scribe-config.workspace = true
+scribe-core.workspace = true
+scribe-builders.workspace = true
+# Phase 31 process tooling: `check` reuses the RST parser and the domain/xref
+# engine instead of reimplementing parsing or validation.
+scribe-ast.workspace = true
+scribe-rst.workspace = true
+scribe-domains.workspace = true
+
+# Phase 28 live-reload dev server: filesystem watching + async HTTP/SSE server.
+notify.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "io-util", "sync", "signal"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# Phase 29 conformance harness + regression guard: bounded parallel oracle runs
+# and cross-crate adversarial corpora replay.
+rayon.workspace = true
+proptest.workspace = true
+scribe-ast.workspace = true
+scribe-rst.workspace = true
+scribe-myst.workspace = true
+scribe-domains.workspace = true
 
 [lints]
 workspace = true

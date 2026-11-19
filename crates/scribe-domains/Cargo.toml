@@ -6,9 +6,32 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Sphinx domain architecture for scribe"
+description = "Sphinx domain architecture, xref resolution and intersphinx (Phases 11-14)"
 
 [dependencies]
+thiserror.workspace = true
+miette.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+unicode-normalization.workspace = true
+flate2.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+url.workspace = true
+strsim.workspace = true
+rayon.workspace = true
+blake3.workspace = true
+scribe-ast.workspace = true
+scribe-config.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+scribe-core.workspace = true
+scribe-rst.workspace = true
 
 [lints]
 workspace = true
