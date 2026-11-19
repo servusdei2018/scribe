@@ -48,6 +48,7 @@ pub fn parse_inline_placeholder(text: &str, ctx: &InlineContext) -> RstResult<Ve
         source_name: ctx.source_name.clone(),
         extlinks: crate::extlinks::empty_roles(),
         default_role: None,
+        custom_roles: std::collections::HashMap::new(),
     });
     Ok(parsed.nodes)
 }

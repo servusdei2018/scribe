@@ -135,6 +135,42 @@ impl<'a> BlockParser<'a> {
         }
         let content = lines.join("\n");
 
+        // `.. default-role::` and `.. role::` change Docutils' inliner state
+        // *while it scans*, so they affect inline content that follows them in
+        // source order. The block parser walks blocks in document order, so
+        // updating its inline state here makes subsequent `add_inline` calls
+        // observe the declaration. The `Pending` node is still emitted so the
+        // Phase 06 resolve pass keeps updating the shared build context.
+        let normalized = normalize_name(name);
+        if normalized == "default-role" {
+            // An empty argument resets to Docutils' default `title-reference`
+            // (which is represented by `None` = no explicit default role).
+            let selected = arguments
+                .split_whitespace()
+                .next()
+                .map(|role| role.to_ascii_lowercase())
+                .filter(|role| !role.is_empty());
+            self.options.default_role = selected;
+        } else if normalized == "role" {
+            let spec = arguments.trim();
+            let (role_name, base_role) = match spec.split_once('(') {
+                Some((name, rest)) => {
+                    let name = name.trim();
+                    let base = rest
+                        .trim_end()
+                        .trim_end_matches(')')
+                        .trim()
+                        .to_ascii_lowercase();
+                    (name, if base.is_empty() { "generic".to_owned() } else { base })
+                }
+                None => (spec, "generic".to_owned()),
+            };
+            if !role_name.is_empty() {
+                self.custom_roles
+                    .insert(role_name.to_ascii_lowercase(), base_role);
+            }
+        }
+
         let span = self.span_of(index, self.pos.max(index + 1));
         let line_no = self.line_number(index);
         let node = self.add(NodeKind::Pending, parent, span, line_no)?;

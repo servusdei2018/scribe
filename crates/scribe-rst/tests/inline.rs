@@ -267,3 +267,39 @@ fn prolog_epilog_symbols_default_role_and_line_mapping() {
         .expect("body paragraph source position");
     assert_eq!(body_line, 1);
 }
+
+#[test]
+fn body_default_role_applies_in_source_order_and_resets() {
+    // Phase 43: `.. default-role::` in the document body changes the inliner
+    // state for all inline content that follows it. An empty argument restores
+    // the default `title-reference` role (Docutils deletes roles._roles['']).
+    let p = pseudo(
+        ".. default-role:: pep\n\n`8`\n\n.. default-role::\n\n`plain`\n",
+    );
+    // The first paragraph used the PEP reference role (index + target +
+    // reference[classes=pep] + strong), exactly like the oracle.
+    assert!(p.contains("<index"), "{p}");
+    assert!(p.contains("<target"), "{p}");
+    assert!(p.contains("<reference classes=\"pep\""), "{p}");
+    assert!(p.contains("<strong>\n                PEP 8"), "{p}");
+    // After the empty-argument reset, bare interpreted text is a plain
+    // title_reference again, and no second PEP reference was emitted.
+    assert!(p.contains("<title_reference>\n            plain"), "{p}");
+    assert_eq!(p.matches("<reference classes=\"pep\"").count(), 1, "{p}");
+}
+
+#[test]
+fn body_custom_role_declaration_applies_to_inline() {
+    // Phase 43: `.. role:: name(base)` maps the local name to the base role's
+    // node kind while overriding the `classes` attribute with the custom name.
+    let p = pseudo(".. role:: python(code)\n\n:python:`x` and `y`\n");
+    // Docutils merges the base role's class with the custom role name.
+    assert!(p.contains("<literal classes=\"code python\">"), "{p}");
+    // A bare interpreted text without a default role stays a title_reference.
+    assert!(p.contains("<title_reference>\n            y"), "{p}");
+
+    // A custom role promoted to the default applies to bare interpreted text.
+    let p = pseudo(".. role:: python(code)\n.. default-role:: python\n\n`x`\n");
+    assert!(p.contains("<literal classes=\"code python\">"), "{p}");
+    assert!(!p.contains("<title_reference>"), "{p}");
+}

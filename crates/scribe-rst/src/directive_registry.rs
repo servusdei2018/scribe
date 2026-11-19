@@ -314,6 +314,13 @@ impl<'a> DirectiveContext<'a> {
                     .read()
                     .ok()
                     .and_then(|guard| guard.clone()),
+                custom_roles: self
+                    .global
+                    .custom_roles
+                    .read()
+                    .ok()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default(),
             },
         );
         let ctx = InlineContext {

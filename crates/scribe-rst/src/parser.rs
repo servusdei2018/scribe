@@ -128,6 +128,9 @@ pub(crate) struct BlockParser<'a> {
     pub(crate) tight_lists: HashMap<u32, bool>,
     /// Role xref contract side table (forwarded to `ParseOutput`).
     pub(crate) inline_xrefs: Vec<(NodeId, XrefMeta)>,
+    /// Custom roles declared by `.. role:: name(base)` in document order.
+    /// Maps the local name to its base role; consumed by inline parsing.
+    pub(crate) custom_roles: HashMap<String, String>,
     /// Substitution-directive side table (forwarded to `ParseOutput`).
     pub(crate) substitution_directives: Vec<(NodeId, SubstitutionDirective)>,
     /// Exclusive upper bound for the current parse region (`usize::MAX` at root).
@@ -160,6 +163,7 @@ impl<'a> BlockParser<'a> {
             used_ids: HashMap::new(),
             tight_lists: HashMap::new(),
             inline_xrefs: Vec::new(),
+            custom_roles: HashMap::new(),
             substitution_directives: Vec::new(),
             limit: usize::MAX,
             indent_override: None,
@@ -432,6 +436,7 @@ impl<'a> BlockParser<'a> {
                 source_name: self.options.source_name.clone(),
                 extlinks: Arc::clone(&self.options.extlinks),
                 default_role: self.options.default_role.clone(),
+                custom_roles: self.custom_roles.clone(),
             },
         );
         // Tab-expanded lines have normalized-text byte offsets that can drift

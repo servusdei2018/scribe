@@ -24,6 +24,8 @@
 //! can fail (and only on an invalid parent id). This split makes the recogniser
 //! directly fuzzable with `proptest`.
 
+use std::collections::HashMap;
+
 use scribe_ast::{AttributeValue, Document, Node, NodeId, NodeKind, Span};
 
 use crate::InlineContext;
@@ -235,8 +237,13 @@ pub struct InlineOptions {
     pub source_name: Option<String>,
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
     pub extlinks: crate::extlinks::ExtLinkRoles,
-    /// Role selected by a `.. default-role::` declaration in `rst_prolog`.
+    /// Role selected by a `.. default-role::` declaration (prolog or body).
     pub default_role: Option<String>,
+    /// Custom roles declared by `.. role:: name(base)` in document order.
+    /// Maps the local role name to its base role name. The base role supplies
+    /// the emitted node kind, while the custom name supplies the `classes`
+    /// attribute (matching Docutils' `roles.CustomRole`).
+    pub custom_roles: HashMap<String, String>,
 }
 
 // ----- tokenizer ------------------------------------------------------------
@@ -1413,10 +1420,31 @@ fn emit_role(
     options: &InlineOptions,
     out: &mut Vec<InlineNode>,
 ) {
+    let out_start = out.len();
+
+    // Resolve a custom role declared by `.. role:: name(base)` in document
+    // order. Docutils' `roles.CustomRole` delegates node construction to the
+    // base role but overrides the `classes` attribute with the custom name.
+    let base = options.custom_roles.get(&role.to_ascii_lowercase());
+    let custom_class = base.map(|_| role.to_owned());
+    let effective_role = base.map_or(role, String::as_str);
+
+    // A custom role with no explicit base uses Docutils' generic custom role:
+    // a plain `inline` node classed with the custom role name.
+    if base.is_some() && effective_role == "generic" {
+        let mut node = InlineNode::element(NodeKind::Inline, full_span, 0)
+            .with_text_child(payload.to_owned(), payload_span, 0);
+        if let Some(name) = custom_class {
+            node = node.with_attr("classes", vec![name]);
+        }
+        out.push(node);
+        return;
+    }
+
     // `sphinx.ext.extlinks` registers roles dynamically from configuration.
     // They take precedence over the static role table and produce a plain
     // external `Reference` (never a `pending_xref`).
-    if let Some(spec) = options.extlinks.get(role) {
+    if let Some(spec) = options.extlinks.get(effective_role) {
         let explicit = split_explicit_title(payload);
         let target = explicit.as_ref().map_or(payload, |e| e.target.as_str());
         let (uri, implicit_title) = spec.resolve(target);
@@ -1424,14 +1452,15 @@ fn emit_role(
         let mut reference = InlineNode::element(NodeKind::Reference, full_span, 0)
             .with_attr("refuri", uri)
             .with_attr("internal", false)
-            .with_attr("classes", vec![format!("extlink-{role}")]);
+            .with_attr("classes", vec![format!("extlink-{effective_role}")]);
         reference = reference.with_child(InlineNode::element(NodeKind::Strong, payload_span, 0)
             .with_child(InlineNode::text_node(title, payload_span, 0)));
         out.push(reference);
+        apply_custom_class(out, out_start, custom_class);
         return;
     }
 
-    let Some(class) = classify_role(role) else {
+    let Some(class) = classify_role(effective_role) else {
         // Unknown role → problematic node, matching docutils.
         let mut node = InlineNode::element(NodeKind::Problematic, full_span, 0);
         node = node.with_child(InlineNode::text_node(payload.to_owned(), payload_span, 0));
@@ -1441,13 +1470,15 @@ fn emit_role(
 
     match class {
         RoleClass::Direct { kind, classes, behavior, .. } => {
-            emit_direct_role(role, kind, classes, behavior, payload, payload_span, full_span, out);
+            emit_direct_role(effective_role, kind, classes, behavior, payload, payload_span, full_span, out);
         }
         RoleClass::External { prefix, title_prefix, classes } => {
             let explicit = split_explicit_title(payload);
             let target = explicit.as_ref().map_or(payload, |e| &e.target);
             let number = target.trim_start_matches('#').split('#').next().unwrap_or(target);
-            let uri = if role == "pep" {
+            let is_pep = effective_role == "pep";
+            let is_rfc = effective_role == "rfc";
+            let uri = if is_pep {
                 format!("{prefix}{:0>4}/", number.parse::<u32>().unwrap_or(0))
             } else {
                 format!("{prefix}{number}")
@@ -1456,6 +1487,24 @@ fn emit_role(
                 || format!("{title_prefix}{}", crate::names::whitespace_normalize_name(target)),
                 |e| e.title.clone(),
             );
+            // Sphinx's `sphinx.roles.PEP`/`RFC` are `ReferenceRole`s: alongside
+            // the reference they emit an `index` entry and an explicit
+            // `target` carrying a generated `index-N` id. Emit them in the
+            // same order so the pseudoxml doctree matches the oracle.
+            if is_pep || is_rfc {
+                let serial = out.iter().filter(|n| n.kind == NodeKind::Index).count();
+                let index_id = format!("index-{serial}");
+                let label = if is_pep {
+                    format!("Python Enhancement Proposals; PEP {target}")
+                } else {
+                    format!("RFC; RFC {target}")
+                };
+                let entries = format!("['single', '{label}', '{index_id}', '', None]");
+                out.push(InlineNode::element(NodeKind::Index, full_span, 0)
+                    .with_attr("entries", entries));
+                out.push(InlineNode::element(NodeKind::Target, full_span, 0)
+                    .with_attr("ids", vec![index_id]));
+            }
             let mut reference = InlineNode::element(NodeKind::Reference, full_span, 0)
                 .with_attr("refuri", uri)
                 .with_attr("internal", false)
@@ -1467,9 +1516,41 @@ fn emit_role(
         }
         RoleClass::Xref { domain, reftype, inner, warn } => {
             emit_xref_role(
-                role, &domain, &reftype, inner, warn, payload, payload_span, full_span, options, out,
+                effective_role, &domain, &reftype, inner, warn, payload, payload_span, full_span, options, out,
             );
         }
+    }
+
+    apply_custom_class(out, out_start, custom_class);
+}
+
+/// Merges the custom role's name into the `classes` attribute of the element(s)
+/// emitted by its base role, mirroring Docutils' `CustomRole`.
+fn apply_custom_class(out: &mut [InlineNode], from: usize, custom_class: Option<String>) {
+    let Some(class_name) = custom_class else { return };
+    for node in &mut out[from..] {
+        // Text leaves and the index/target carried by reference roles are not
+        // the class-bearing element; leave them untouched.
+        if node.text.is_some() || matches!(node.kind, NodeKind::Index | NodeKind::Target) {
+            continue;
+        }
+        // Docutils' `CustomRole` merges the base role's default classes with
+        // the custom name (e.g. `.. role:: shiny(code)` → `code shiny`).
+        let mut classes = node
+            .attrs
+            .iter()
+            .find(|(key, _)| key == "classes")
+            .and_then(|(_, value)| match value {
+                AttributeValue::List(values) => Some(values.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if !classes.iter().any(|c| c == &class_name) {
+            classes.push(class_name.clone());
+        }
+        node.attrs.retain(|(key, _)| key != "classes");
+        node.attrs
+            .push(("classes".to_owned(), AttributeValue::List(classes)));
     }
 }
 
