@@ -180,6 +180,7 @@ fn kind_from_tag(tag: &str) -> Option<NodeKind> {
         NodeKind::Centered, NodeKind::Acks, NodeKind::Hlist, NodeKind::Hlistcol,
         NodeKind::TabularColSpec, NodeKind::NumberReference, NodeKind::DownloadReference,
         NodeKind::LiteralEmphasis, NodeKind::LiteralStrong, NodeKind::Manpage,
+        NodeKind::TitleReference, NodeKind::Classifier, NodeKind::OptionGroup,
     ];
     all.into_iter().find(|k| k.tag_name() == tag)
 }

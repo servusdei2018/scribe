@@ -455,6 +455,17 @@ pub enum NodeKind {
     LiteralEmphasis,
     LiteralStrong,
     Manpage,
+
+    // ----- Phase 34: upstream Docutils/Sphinx node gaps -----
+    // Appended at the end to preserve serde discriminant / serialization
+    // compatibility (frozen AST §7: additive, append-only changes only).
+    /// Default interpreted-text role (`` `text` ``), upstream `title_reference`.
+    TitleReference,
+    /// Definition-list classifier (`term : classifier`), upstream `classifier`.
+    Classifier,
+    /// Group of option strings in an option list (`-a, --all <file>`), upstream
+    /// `option_group`.
+    OptionGroup,
 }
 
 impl NodeKind {
@@ -591,6 +602,10 @@ impl NodeKind {
             NodeKind::LiteralEmphasis => "literal_emphasis",
             NodeKind::LiteralStrong => "literal_strong",
             NodeKind::Manpage => "manpage",
+
+            NodeKind::TitleReference => "title_reference",
+            NodeKind::Classifier => "classifier",
+            NodeKind::OptionGroup => "option_group",
         }
     }
 
@@ -645,6 +660,7 @@ impl NodeKind {
                 | NodeKind::PendingXref
                 | NodeKind::PendingXrefCondition
                 | NodeKind::DescInline
+                | NodeKind::TitleReference
         )
     }
 
@@ -984,6 +1000,26 @@ mod tests {
         assert_eq!(NodeKind::Text.tag_name(), "#text");
         assert_eq!(NodeKind::VersionAdded.tag_name(), "versionmodified");
         assert_eq!(NodeKind::VersionAdded.version_type(), Some("versionadded"));
+        // Phase 34 node gaps use their exact upstream tag names.
+        assert_eq!(NodeKind::TitleReference.tag_name(), "title_reference");
+        assert_eq!(NodeKind::Classifier.tag_name(), "classifier");
+        assert_eq!(NodeKind::OptionGroup.tag_name(), "option_group");
+        assert!(NodeKind::TitleReference.is_inline());
+        assert!(!NodeKind::Classifier.is_inline());
+        assert!(!NodeKind::OptionGroup.is_inline());
+    }
+
+    #[test]
+    fn phase34_variants_are_append_only() {
+        // serde derives assign discriminants in declaration order, so new
+        // variants must sit at the END of the enum (frozen AST §7). The JSON
+        // representation is the variant name, so older documents still decode.
+        let kinds = [NodeKind::TitleReference, NodeKind::Classifier, NodeKind::OptionGroup];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap_or_default();
+            let back: NodeKind = serde_json::from_str(&json).unwrap_or(NodeKind::Text);
+            assert_eq!(back, kind, "round-trip failed for {json}");
+        }
     }
 
     #[test]
