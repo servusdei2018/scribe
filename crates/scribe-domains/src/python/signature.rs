@@ -723,6 +723,140 @@ fn emit_annotation(
     Ok(())
 }
 
+/// Mirrors `sphinx.domains.python._object.PyXrefMixin.make_xrefs` for a typed
+/// field's type string. Unlike signature annotations (which go through the
+/// `ast`-based `_parse_annotation`), upstream splits the raw string on
+/// `_delimiters_re` and wraps **every** sub-target — names and delimiters alike
+/// — in the field's `innernode` (`addnodes.literal_emphasis`). Delimiter pieces
+/// (including any adjacent whitespace, e.g. `", "`) are emitted verbatim as
+/// `literal_emphasis`; name pieces become `pending_xref` nodes whose content is
+/// a `literal_emphasis` inner node.
+fn emit_field_type_xrefs(
+    builder: &mut Builder<'_>,
+    text: &str,
+    parent: NodeId,
+    context: &SigContext,
+    options: &PyOptions,
+) -> DomainResult<()> {
+    // Upstream `_delimiters_re`:
+    //   r'(\s*[\[\]\(\),](?:\s*o[rf]\s)?\s*|\s+o[rf]\s+|\s*\|\s*|\.\.\.)'
+    const DELIMITER_PATTERN: &str =
+        r"(\s*[\[\]\(\),](?:\s*o[rf]\s)?\s*|\s+o[rf]\s+|\s*\|\s*|\.\.\.)";
+    static DELIMS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let delims = if let Some(re) = DELIMS.get() {
+        re
+    } else {
+        let compiled = regex::Regex::new(DELIMITER_PATTERN).map_err(|error| DomainError::InvalidData {
+            domain: "py".to_owned(),
+            detail: format!("field-type delimiter regex: {error}"),
+        })?;
+        DELIMS.get_or_init(|| compiled)
+    };
+    let mut pieces: Vec<(String, bool)> = Vec::new();
+    let mut pos = 0usize;
+    for matched in delims.find_iter(text) {
+        if matched.start() > pos {
+            pieces.push((text[pos..matched.start()].to_owned(), false));
+        }
+        pieces.push((matched.as_str().to_owned(), true));
+        pos = matched.end();
+    }
+    if pos < text.len() {
+        pieces.push((text[pos..].to_owned(), false));
+    }
+
+    let mut in_literal = false;
+    for (piece, is_delimiter) in pieces {
+        if piece.is_empty() {
+            continue;
+        }
+        if is_delimiter || in_literal {
+            let emphasis = builder.add(NodeKind::LiteralEmphasis, parent)?;
+            builder.add_text(&piece, emphasis)?;
+        } else {
+            emit_field_type_xref(builder, &piece, parent, context, options)?;
+        }
+        if matches!(piece.as_str(), "Literal" | "typing.Literal" | "~typing.Literal") {
+            in_literal = true;
+        }
+    }
+    Ok(())
+}
+
+/// Emits one name sub-target of a typed field as a `pending_xref` mirroring
+/// upstream `PyXrefMixin.make_xref` with `innernode=addnodes.literal_emphasis`.
+fn emit_field_type_xref(
+    builder: &mut Builder<'_>,
+    target: &str,
+    parent: NodeId,
+    context: &SigContext,
+    options: &PyOptions,
+) -> DomainResult<()> {
+    let xref = builder.add(NodeKind::PendingXref, parent)?;
+    let (parsed_reftype, parsed_reftarget, title, _) = parse_reftarget(target, false);
+    // `Field.make_xref` seeds reftype with the rolename ('class') and reftarget
+    // with the raw target; `PyXrefMixin.make_xref` only overrides them when the
+    // parsed definition target differs from the display title. It also always
+    // sets `refspecific`, regardless of the target's `.`/`~` prefix.
+    let override_target = parsed_reftarget != title;
+    let reftype = if override_target { parsed_reftype } else { "class" };
+    let reftarget = if override_target { parsed_reftarget } else { target.to_owned() };
+    {
+        let node = builder.doc.get_mut(xref)?;
+        let mut view = node.pending_xref_mut().ok_or_else(|| DomainError::InvalidData {
+            domain: "py".to_owned(),
+            detail: "pending_xref view".to_owned(),
+        })?;
+        view.set_refdomain(Some("py".to_owned()));
+        view.set_reftype(Some(reftype.to_owned()));
+        view.set_reftarget(Some(reftarget));
+        view.set_refspecific(Some(true));
+        view.set_refexplicit(Some(false));
+        view.set_classes(vec![
+            "xref".to_owned(),
+            "py".to_owned(),
+            format!("py-{reftype}"),
+        ]);
+    }
+    {
+        let node = builder.doc.get_mut(xref)?;
+        if let Some(module) = &context.module {
+            node.attrs.set_str("py:module", module);
+        }
+        if let Some(class) = &context.class {
+            node.attrs.set_str("py:class", class);
+        }
+    }
+    if override_target {
+        // reftarget != reftitle: the inner node always uses the display title.
+        let emphasis = builder.add(NodeKind::LiteralEmphasis, xref)?;
+        builder.add_text(&title, emphasis)?;
+    } else if options.use_unqualified_type_names {
+        // Upstream emits a `resolved` condition with the short name and a `*`
+        // fallback condition with the full title, both wrapped in the innernode.
+        let short = target.rsplit('.').next().unwrap_or(target).to_owned();
+        let resolved = builder.add(NodeKind::PendingXrefCondition, xref)?;
+        if let Ok(node) = builder.doc.get_mut(resolved) {
+            node.attrs.set_str("condition", "resolved");
+        }
+        let short_emphasis = builder.add(NodeKind::LiteralEmphasis, resolved)?;
+        builder.add_text(&short, short_emphasis)?;
+        let fallback = builder.add(NodeKind::PendingXrefCondition, xref)?;
+        if let Ok(node) = builder.doc.get_mut(fallback) {
+            node.attrs.set_str("condition", "*");
+        }
+        let full_emphasis = builder.add(NodeKind::LiteralEmphasis, fallback)?;
+        builder.add_text(&title, full_emphasis)?;
+        if let Ok(node) = builder.doc.get_mut(xref) {
+            node.attrs.set_node_ids("resolve_conditions", vec![resolved, fallback]);
+        }
+    } else {
+        let emphasis = builder.add(NodeKind::LiteralEmphasis, xref)?;
+        builder.add_text(&title, emphasis)?;
+    }
+    Ok(())
+}
+
 fn prefix_keywords(builder: &mut Builder<'_>, signode: NodeId, words: &[&str]) -> DomainResult<()> {
     if words.is_empty() {
         return Ok(());
@@ -1161,6 +1295,20 @@ fn rewrite_fieldlist(
     let mut rebuilt: Vec<NodeId> = Vec::new();
     let span = doc.get(fieldlist).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
     let source = doc.get(fieldlist).ok().and_then(|node| node.source.clone());
+    // Upstream's typed-field `pending_xref` nodes carry no `line`; docutils'
+    // `get_source_line()` therefore attributes their warnings to the enclosing
+    // section (whose line is the title underline). Scribe's section node stores
+    // the title line instead, so bump by one to reproduce the oracle's line.
+    let xref_source = doc
+        .ancestors(fieldlist)
+        .filter_map(|id| doc.get(id).ok())
+        .find(|node| node.kind == NodeKind::Section)
+        .and_then(|node| node.source.clone())
+        .map(|mut position| {
+            position.line = position.line.map(|line| line.saturating_add(1));
+            position
+        })
+        .or_else(|| source.clone());
     let mut builder = Builder { doc, span, source };
 
     if !param_names.is_empty() {
@@ -1177,8 +1325,11 @@ fn rewrite_fieldlist(
             builder.add_text(param, strong)?;
             if let Some(annotation) = type_map.get(param) {
                 builder.add_text(" (", para)?;
-                let emphasis = builder.add(NodeKind::LiteralEmphasis, para)?;
-                emit_annotation(&mut builder, &parse_annotation(annotation), emphasis, context, options)?;
+                let saved_source = builder.source.clone();
+                builder.source = xref_source.clone();
+                let result = emit_field_type_xrefs(&mut builder, annotation, para, context, options);
+                builder.source = saved_source;
+                result?;
                 builder.add_text(")", para)?;
             }
             if !description.is_empty() {
@@ -1535,5 +1686,66 @@ mod tests {
         assert!(matches!(tokens[5], ParamToken::Param { var: 2, .. }));
         let keyword_only = tokenize_arglist("a, *, b");
         assert_eq!(keyword_only[1], ParamToken::KeywordOnlySeparator);
+    }
+
+    #[test]
+    fn field_type_xrefs_split_delimiters_and_emit_conditions() {
+        let mut doc = Document::new(None);
+        let root = doc.root;
+        let context = SigContext::default();
+        let options = PyOptions::default();
+
+        // `tuple(str, float)` splits into six sub-targets: three names (xrefs)
+        // and three delimiters, each wrapped in a `literal_emphasis`.
+        let paragraph = doc.add_node(Node::new(NodeKind::Paragraph), Some(root)).unwrap();
+        {
+            let mut builder = Builder { doc: &mut doc, span: Span::new(0, 0), source: None };
+            emit_field_type_xrefs(&mut builder, "tuple(str, float)", paragraph, &context, &options)
+                .unwrap();
+        }
+        let kinds: Vec<NodeKind> = doc
+            .children(paragraph)
+            .unwrap()
+            .iter()
+            .map(|&id| doc.get(id).unwrap().kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                NodeKind::PendingXref,
+                NodeKind::LiteralEmphasis,
+                NodeKind::PendingXref,
+                NodeKind::LiteralEmphasis,
+                NodeKind::PendingXref,
+                NodeKind::LiteralEmphasis,
+            ]
+        );
+        let delimiter_text: String = doc
+            .children(paragraph)
+            .unwrap()
+            .iter()
+            .filter(|&&id| doc.get(id).unwrap().kind == NodeKind::LiteralEmphasis)
+            .map(|&id| doc.get(id).unwrap().astext(&doc))
+            .collect();
+        assert_eq!(delimiter_text, "(, )");
+
+        // With unqualified type names, each name xref carries `resolved` and
+        // `*` `pending_xref_condition` children whose content is the innernode.
+        let options = PyOptions { use_unqualified_type_names: true, ..PyOptions::default() };
+        let paragraph = doc.add_node(Node::new(NodeKind::Paragraph), Some(root)).unwrap();
+        {
+            let mut builder = Builder { doc: &mut doc, span: Span::new(0, 0), source: None };
+            emit_field_type_xrefs(&mut builder, "foo.Bar", paragraph, &context, &options).unwrap();
+        }
+        let xref = doc.children(paragraph).unwrap()[0];
+        let view = doc.get(xref).unwrap().pending_xref().unwrap();
+        let conditions = view.resolve_conditions();
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(doc.get(conditions[0]).unwrap().condition().ok().flatten(), Some("resolved"));
+        assert_eq!(doc.get(conditions[1]).unwrap().condition().ok().flatten(), Some("*"));
+        for condition in conditions {
+            let child = doc.get(condition).unwrap().children[0];
+            assert_eq!(doc.get(child).unwrap().kind, NodeKind::LiteralEmphasis);
+        }
     }
 }
