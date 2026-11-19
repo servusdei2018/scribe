@@ -249,10 +249,22 @@ fn prepare_siblings(document: &mut Document, children: &[NodeId], scope: &Scope)
             if !matches!(kind.as_str(), "namespace" | "namespace-push" | "namespace-pop") {
                 return None;
             }
-            let name = match kind.as_str() {
-                "namespace" => node.get_str("c:namespace").ok().flatten().unwrap_or(""),
-                "namespace-push" => node.get_str("c:namespace-push").ok().flatten().unwrap_or(""),
-                _ => "",
+            // Only C namespace markers belong to this pass. The C++ domain
+            // uses the same `objtype` values for its own markers; stripping
+            // those here would silently discard the C++ read-time scope.
+            let attr = match kind.as_str() {
+                "namespace" => "c:namespace",
+                "namespace-push" => "c:namespace-push",
+                "namespace-pop" => "c:namespace-pop",
+                _ => return None,
+            };
+            if kind != "namespace-pop" && node.get_str(attr).ok().flatten().is_none() {
+                return None;
+            }
+            let name = if kind == "namespace-pop" {
+                ""
+            } else {
+                node.get_str(attr).ok().flatten().unwrap_or("")
             };
             Some((kind, name.to_owned()))
         });

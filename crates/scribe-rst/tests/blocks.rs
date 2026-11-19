@@ -302,6 +302,7 @@ fn prolog_and_epilog_injection() {
         prolog: Some(".. |x| replace:: X".into()),
         epilog: Some(".. _e: https://example.com".into()),
         default_role: None,
+        default_domain: None,
         extlinks: scribe_rst::extlinks::empty_roles(),
     };
     let output = parse_with_options("Body.\n", options);

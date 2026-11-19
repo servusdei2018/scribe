@@ -241,6 +241,14 @@ impl DomainDiagnostic {
         self
     }
 
+    /// Sets the 1-based source line used in the rendered warning location.
+    pub fn with_line(mut self, line: Option<u32>) -> Self {
+        if line.is_some() {
+            self.line = line;
+        }
+        self
+    }
+
     /// True when this diagnostic is a missing-reference report.
     pub fn is_missing_reference(&self) -> bool {
         self.code == codes::MISSING_REFERENCE

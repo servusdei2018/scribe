@@ -454,7 +454,14 @@ impl DomainRegistry {
             }
         }
         if !domain_name.is_empty() && domain_name != "std" {
-            Some(format!("{domain_name}:{typ} reference target not found: {target}"))
+            // Upstream's C++ `fix_parens` adds `()` to function targets for
+            // lookup, then strips it again for the dangling-reference warning.
+            let shown = if domain_name == "cpp" && matches!(typ, "func" | "any") {
+                target.strip_suffix("()").unwrap_or(target)
+            } else {
+                target
+            };
+            Some(format!("{domain_name}:{typ} reference target not found: {shown}"))
         } else if document.get(node_id).is_ok_and(|node| node.pending_xref().is_some_and(|xref| xref.refdomain().is_none())) {
             // Empty refdomain is the upstream default for `:download:` etc.
             Some(format!("'{typ}' reference target not found: {target}"))

@@ -89,7 +89,7 @@ fn emit_pseudo_attrs(node: &Node, out: &mut String) {
     // Attributes is a BTreeMap, so iteration is already sorted — matching
     // Docutils' sorted `attlist()`.
     for (key, value) in node.attrs.iter() {
-        if is_default_list(key, value) || is_internal(value) {
+        if is_default_list(key, value) || is_internal(value) || is_domain_internal(key) {
             continue;
         }
         out.push(' ');
@@ -107,6 +107,17 @@ fn is_default_list(key: &str, value: &AttributeValue) -> bool {
 
 fn is_internal(value: &AttributeValue) -> bool {
     matches!(value, AttributeValue::NodeId(_) | AttributeValue::NodeIds(_))
+}
+
+/// Scribe-internal domain bookkeeping attributes (raw signatures, scopes,
+/// anchors) are not part of upstream's doctree and are omitted from pseudo-XML.
+/// Besides faithfulness, this avoids leaking `<...>` from raw signatures into
+/// the serialized output as spurious element-like text.
+fn is_domain_internal(key: &str) -> bool {
+    matches!(
+        key.split_once(':').map(|(prefix, _)| prefix),
+        Some("cpp" | "py" | "c" | "js" | "rst" | "std" | "math")
+    )
 }
 
 fn write_pseudo_value(value: &AttributeValue, out: &mut String) {
@@ -153,7 +164,7 @@ fn emit_xml(doc: &Document, id: NodeId, level: usize, out: &mut String) -> AstRe
     out.push('<');
     out.push_str(node.kind.tag_name());
     for (key, value) in node.attrs.iter() {
-        if is_default_list(key, value) || is_internal(value) {
+        if is_default_list(key, value) || is_internal(value) || is_domain_internal(key) {
             continue;
         }
         out.push(' ');

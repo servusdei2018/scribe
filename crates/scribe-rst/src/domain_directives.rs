@@ -55,10 +55,50 @@ fn object(
     domain: &'static str,
     objtype: &'static str,
 ) -> HandlerResult {
-    let signature = ctx.argument(0).unwrap_or("").trim().to_owned();
+    let mut signature = ctx.argument(0).unwrap_or("").trim().to_owned();
+    let mut content = ctx.content;
+    // reStructuredText folds a trailing `\` into the following indented
+    // lines as a single directive argument. Phase 04 leaves those lines in
+    // the directive content, so rejoin them here (up to the first blank line,
+    // which starts the real description body).
+    let mut continuation_lines = 0usize;
+    if signature.ends_with('\\') {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut taken = 0usize;
+        let mut joined = String::new();
+        for line in &lines {
+            if line.trim().is_empty() {
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(line.trim());
+            taken += line.len() + 1;
+            continuation_lines += 1;
+        }
+        signature.push_str(&joined);
+        content = content.get(taken.min(content.len())..).unwrap_or("").trim_start_matches('\n');
+    }
+    // A directive may declare several overloaded entities by placing extra
+    // declaration lines (indented under the first argument) before a blank
+    // line. Upstream packs them into one `desc` with several signatures.
+    let mut extra_signatures = Vec::new();
+    let mut extra_lines = 0usize;
+    if content.starts_with([' ', '\t']) {
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                break;
+            }
+            extra_signatures.push(line.trim().to_owned());
+            extra_lines += line.len() + 1;
+        }
+        content = content.get(extra_lines.min(content.len())..).unwrap_or("").trim_start_matches('\n');
+    }
     if signature.is_empty() {
         return Ok(Vec::new());
     }
+    let mut all_signatures = vec![signature.clone()];
+    all_signatures.extend(extra_signatures.clone());
+    let signatures_json = serde_json::to_string(&all_signatures).unwrap_or_default();
     let options = options_json(ctx);
     let mut ids = emit_index(ctx)?;
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
@@ -71,6 +111,7 @@ fn object(
         node.attrs.set_str("objtype", objtype);
         node.attrs.set_str("desctype", objtype);
         node.attrs.set_str(format!("{domain}:signature"), &signature);
+        node.attrs.set_str(format!("{domain}:signatures"), &signatures_json);
         node.attrs.set_str(format!("{domain}:options"), &options);
         node.attrs.set_str(format!("{domain}:sig_base"), (ctx.span.start as u64).to_string());
         node.attrs.set_list("classes", vec![domain.to_owned(), objtype.to_owned()]);
@@ -80,8 +121,16 @@ fn object(
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), domain.to_owned()]);
         node.span = Some(ctx.span);
     }
-    let content = ctx.add(NodeKind::DescContent, desc)?;
-    ctx.parse_nested_into(content)?;
+    for _ in 0..extra_signatures.len() {
+        let extra = ctx.add(NodeKind::DescSignature, desc)?;
+        if let Ok(node) = ctx.doc.get_mut(extra) {
+            node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), domain.to_owned()]);
+            node.span = Some(ctx.span);
+        }
+    }
+    let content_node = ctx.add(NodeKind::DescContent, desc)?;
+    let base_line = ctx.line + 1 + ctx.raw_options.len() as u32 + continuation_lines as u32 + extra_lines as u32;
+    let _ = ctx.parse_block_text(content, content_node, base_line);
     ids.push(desc);
     Ok(ids)
 }
@@ -134,6 +183,17 @@ fn js_module(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     Ok(ids)
 }
 
+/// Emits a `default-domain` directive: switches the active default domain for
+/// the rest of this source, so unprefixed domain directives and roles resolve
+/// against it (mirroring `sphinx.directives.other.DefaultDomain`).
+fn default_domain(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let name = ctx.argument(0).unwrap_or("").trim().to_ascii_lowercase();
+    if let Ok(mut guard) = ctx.global.default_domain.write() {
+        *guard = if name.is_empty() { None } else { Some(name) };
+    }
+    Ok(Vec::new())
+}
+
 /// Registers every new-domain directive.
 pub fn register(registry: &DirectiveRegistry) {
     let spec = object_spec();
@@ -161,6 +221,13 @@ pub fn register(registry: &DirectiveRegistry) {
     object_directive!("c", "enumerator", "enumerator");
     object_directive!("c", "type", "type");
     object_directive!("c", "alias", "alias");
+    // `.. default-domain::` is a standard directive that selects which domain
+    // handles subsequent unprefixed names. It is registered here because the
+    // domain directives are the reason it exists.
+    registry.register(crate::directives::FnDirective::new(
+        "default-domain", 1, 0, false, OptionSpec::empty(), false,
+        default_domain,
+    ));
     registry.register(crate::directives::FnDirective::new(
         "c:namespace", 1, 0, true, OptionSpec::empty(), false,
         |ctx: &mut DirectiveContext<'_>| marker(ctx, "c", "namespace"),

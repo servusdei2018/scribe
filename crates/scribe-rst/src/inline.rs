@@ -239,6 +239,9 @@ pub struct InlineOptions {
     pub extlinks: crate::extlinks::ExtLinkRoles,
     /// Role selected by a `.. default-role::` declaration (prolog or body).
     pub default_role: Option<String>,
+    /// Domain selected by `.. default-domain::`; unprefixed domain roles are
+    /// resolved against it before falling back to the standard domain.
+    pub default_domain: Option<String>,
     /// Custom roles declared by `.. role:: name(base)` in document order.
     /// Maps the local role name to its base role name. The base role supplies
     /// the emitted node kind, while the custom name supplies the `classes`
@@ -685,7 +688,25 @@ use crate::role_registry::{classify_builtin, RoleClass};
 
 /// Classifies a role through the Phase 06 registry, with a fallback for
 /// fully-qualified `domain:role` spellings (`:std:ref:`, `:py:func:`, ...).
-fn classify_role(role: &str) -> Option<RoleClass> {
+fn classify_role(role: &str, default_domain: Option<&str>) -> Option<RoleClass> {
+    // An unprefixed role is first looked up in the active default domain
+    // (Sphinx's `SphinxRole` lookup in `util/docutils.py`). Only when the
+    // default domain does not register the name do we fall back to the
+    // standard/builtin roles. `:ref:` is a std role and never reaches here
+    // with a cpp registration; `:class:`/`:func:` do.
+    if !role.contains(':') {
+        if let Some(domain) = default_domain {
+            let qualified = format!("{domain}:{role}");
+            if let Some(RoleClass::Xref { reftype, inner, warn, .. }) = classify_builtin(&qualified) {
+                return Some(RoleClass::Xref {
+                    domain: domain.to_owned(),
+                    reftype,
+                    inner,
+                    warn,
+                });
+            }
+        }
+    }
     if let Some(class) = classify_builtin(role) {
         return Some(class);
     }
@@ -1475,7 +1496,7 @@ fn emit_role(
         return;
     }
 
-    let Some(class) = classify_role(effective_role) else {
+    let Some(class) = classify_role(effective_role, options.default_domain.as_deref()) else {
         // Unknown role → problematic node, matching docutils.
         let mut node = InlineNode::element(NodeKind::Problematic, full_span, 0);
         node = node.with_child(InlineNode::text_node(payload.to_owned(), payload_span, 0));

@@ -323,7 +323,24 @@ fn resolve_one(
         return false;
     };
 
-    let Some(directive) = registry.get(&name) else {
+    // Sphinx resolves unprefixed directive names against the active default
+    // domain *first*, then falls back to the standard/Python aliases. The
+    // `default-domain` directive (resolved earlier in document order)
+    // populates this state. Preferring the domain binding is essential when a
+    // bare name such as `function` or `class` is also registered by the Python
+    // domain's compatibility aliases.
+    let domain_directive = if name.contains(':') {
+        None
+    } else {
+        context
+            .default_domain
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .and_then(|domain| registry.get(&format!("{domain}:{name}")))
+    };
+    let directive = domain_directive.or_else(|| registry.get(&name));
+    let Some(directive) = directive else {
         push_issue(
             report,
             &name,

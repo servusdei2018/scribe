@@ -54,6 +54,10 @@ pub struct Context {
     pub custom_roles: Arc<RwLock<HashMap<String, String>>>,
     /// Role selected by `.. default-role::`.
     pub default_role: Arc<RwLock<Option<String>>>,
+    /// Domain selected by `.. default-domain::`. Unprefixed directives and
+    /// roles are resolved against this domain first (mirroring
+    /// `SphinxDirective`'s `env.current_document.default_domain` lookup).
+    pub default_domain: Arc<RwLock<Option<String>>>,
     /// Dynamic external-link roles installed by `sphinx.ext.extlinks`.
     pub extlinks: crate::extlinks::ExtLinkRoles,
 }
@@ -71,6 +75,7 @@ impl Default for Context {
             substitution_directives: BTreeMap::new(),
             custom_roles: Arc::new(RwLock::new(HashMap::new())),
             default_role: Arc::new(RwLock::new(None)),
+            default_domain: Arc::new(RwLock::new(None)),
             extlinks: crate::extlinks::empty_roles(),
         }
     }
@@ -317,6 +322,12 @@ impl<'a> DirectiveContext<'a> {
                     .read()
                     .ok()
                     .and_then(|guard| guard.clone()),
+                default_domain: self
+                    .global
+                    .default_domain
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone()),
                 custom_roles: self
                     .global
                     .custom_roles
@@ -373,6 +384,12 @@ impl<'a> DirectiveContext<'a> {
                 prolog: None,
                 epilog: None,
                 default_role: None,
+                default_domain: self
+                    .global
+                    .default_domain
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone()),
                 extlinks: Arc::clone(&self.global.extlinks),
             },
         );

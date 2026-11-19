@@ -68,6 +68,17 @@ pub fn role_names() -> &'static [&'static str] {
     })
 }
 
+/// Maps a directive `objtype` onto upstream's canonical C++ object type.
+/// `.. var::` and `.. member::` both create a `member`; the three enum
+/// directives all create an `enum`.
+fn canonical_objtype(objtype: &str) -> &str {
+    match objtype {
+        "var" => "member",
+        "enum-struct" | "enum-class" => "enum",
+        other => other,
+    }
+}
+
 /// Object types addressable by a role.
 pub fn objtypes_for_role(role: &str) -> Vec<&'static str> {
     if role == "identifier" || role == "any" {
@@ -93,6 +104,8 @@ pub struct CppObjectEntry {
     pub declaration: String,
     /// True for an alias declaration.
     pub aliased: bool,
+    /// 1-based source line of the declaration (for duplicate warnings).
+    pub line: Option<u32>,
 }
 
 /// Serializable C++ inventory: canonical name → overload list.
@@ -146,17 +159,27 @@ impl CppDomain {
         declaration: &str,
         aliased: bool,
         span: Option<Span>,
+        line: Option<u32>,
+        directive_type: &str,
     ) {
+        let objtype = canonical_objtype(objtype);
         let mut data = self.data.write();
         let entries = data.objects.entry(name.to_owned()).or_default();
-        if entries.iter().any(|entry| entry.declaration == declaration && entry.aliased == aliased) {
-            let other = entries.iter().find(|entry| entry.declaration == declaration).map_or("", |entry| &entry.docname);
+        let normalized = declaration.trim_end_matches(';').trim();
+        if let Some(other) = entries.iter().find(|entry| entry.declaration.trim_end_matches(';').trim() == normalized && entry.aliased == aliased) {
+            // Upstream's C++ domain reports duplicates through the symbol
+            // table with a distinct message and `duplicate_declaration.cpp`.
             let message = format!(
-                "duplicate object description of {name}, other instance in {other}, use :no-index: for one of them"
+                "Duplicate C++ declaration, also defined at {}:{}.\nDeclaration is '.. cpp:{}:: {}'.",
+                other.docname,
+                other.line.unwrap_or(0),
+                directive_type,
+                declaration,
             );
-            ctx.push_diagnostic(DomainDiagnostic::duplicate_object(
+            let diagnostic = DomainDiagnostic::duplicate_object(
                 message, objtype, name, Some(ctx.docname.to_owned()), span,
-            ));
+            ).with_line(line);
+            ctx.push_diagnostic(diagnostic);
         }
         entries.retain(|entry| !(entry.aliased && !aliased));
         if !aliased || !entries.iter().any(|entry| !entry.aliased) {
@@ -166,35 +189,57 @@ impl CppDomain {
                 objtype: objtype.to_owned(),
                 declaration: declaration.to_owned(),
                 aliased,
+                line,
             });
         }
     }
 
     /// Finds candidate declarations for a C++ target with scope awareness.
-    pub fn find_obj(&self, target: &str, role: &str, scope: &str, specific: bool) -> Vec<(String, CppObjectEntry)> {
+    ///
+    /// When `filter_by_role` is `true` only object types addressable by `role`
+    /// are returned (upstream `resolve_any_xref`). Normal `resolve_xref` uses
+    /// `false`: upstream looks the symbol up by name regardless of the role and
+    /// emits a separate "targets a …" warning on a type mismatch.
+    pub fn find_obj(
+        &self,
+        target: &str,
+        role: &str,
+        scope: &str,
+        specific: bool,
+        filter_by_role: bool,
+    ) -> Vec<(String, CppObjectEntry)> {
         let mut target = parse_cpp_xref(target);
         if target.starts_with("::") {
             target = target[2..].to_owned();
-        }
-        if matches!(role, "func") {
-            target = target.strip_suffix("()").unwrap_or(&target).to_owned();
         }
         if target.is_empty() {
             return Vec::new();
         }
         let allowed = objtypes_for_role(role);
-        let data = self.data.read();
-        let candidates = if specific {
-            let scoped = if scope.is_empty() { target.clone() } else { format!("{scope}::{target}") };
-            vec![scoped, target.clone()]
-        } else {
-            vec![target.clone()]
+        let matches_allowed = |entry: &CppObjectEntry| {
+            !filter_by_role || allowed.is_empty() || allowed.contains(&entry.objtype.as_str())
         };
+        let data = self.data.read();
+        // Upstream resolves C++ names relative to `cpp:parent_key`, walking
+        // outward through enclosing scopes until a match is found. Try every
+        // enclosing scope prefix (innermost first), then the bare name.
+        let mut candidates = Vec::new();
+        if !scope.is_empty() {
+            let mut prefix = scope.to_owned();
+            loop {
+                candidates.push(format!("{prefix}::{target}"));
+                match prefix.rsplit_once("::") {
+                    Some((head, _)) => prefix = head.to_owned(),
+                    None => break,
+                }
+            }
+        }
+        candidates.push(target.clone());
         for candidate in candidates {
             if let Some(entries) = data.objects.get(&candidate) {
                 let allowed_entries: Vec<_> = entries
                     .iter()
-                    .filter(|entry| allowed.is_empty() || allowed.contains(&entry.objtype.as_str()))
+                    .filter(|entry| matches_allowed(entry))
                     .cloned()
                     .collect();
                 if !allowed_entries.is_empty() {
@@ -208,7 +253,7 @@ impl CppDomain {
             for (name, entries) in data.objects.iter() {
                 if name.ends_with(&suffix) {
                     for entry in entries {
-                        if allowed.is_empty() || allowed.contains(&entry.objtype.as_str()) {
+                        if matches_allowed(entry) {
                             matches.push((name.clone(), entry.clone()));
                         }
                     }
@@ -312,7 +357,39 @@ impl Domain for CppDomain {
                 .flatten()
                 .map(str::to_owned)
                 .unwrap_or_else(|| fullname.clone());
-            self.note_object(ctx, &fullname, &objtype, &anchor, &declaration, false, node.span);
+            let line = node.source.as_ref().and_then(|source| source.line);
+            let directive_type = node.get_str("desctype").ok().flatten().unwrap_or(&objtype).to_owned();
+            self.note_object(
+                ctx, &fullname, &objtype, &anchor, &declaration, false,
+                node.span, line, &directive_type,
+            );
+            // Upstream registers template parameters and named function
+            // parameters as first-class symbols so roles inside the
+            // declaration can refer to them by their bare names.
+            if let Some(raw) = node.get_str("cpp:overloads").ok().flatten() {
+                if let Ok(overloads) = serde_json::from_str::<Vec<(String, String, String)>>(raw) {
+                    for (overload_name, overload_id, overload_decl) in overloads.into_iter().skip(1) {
+                        self.note_object(
+                            ctx, &overload_name, &objtype, &overload_id, &overload_decl, false,
+                            node.span, line, &directive_type,
+                        );
+                    }
+                }
+            }
+            for (key, kind) in [("cpp:template_params", "templateParam"), ("cpp:function_params", "functionParam")] {
+                let Some(raw) = node.get_str(key).ok().flatten() else { continue };
+                let Ok(names) = serde_json::from_str::<Vec<String>>(raw) else { continue };
+                for name in names {
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let qualified = format!("{fullname}::{name}");
+                    self.note_object(
+                        ctx, &qualified, kind, &anchor, &name, false,
+                        node.span, line, kind,
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -326,6 +403,12 @@ impl Domain for CppDomain {
         document: &Document,
     ) -> DomainResult<Option<ResolvedReference>> {
         if typ == "expr" || typ == "texpr" {
+            return Ok(Some(ResolvedReference::default().passthrough()));
+        }
+        // Upstream raises `NoUri` for names in the `std::` namespace: they are
+        // library types, not project symbols, and never warn.
+        if target.starts_with("std::") || target == "std" || target == "type"
+            || (target.contains("::") && matches!(typ, "identifier")) {
             return Ok(Some(ResolvedReference::default().passthrough()));
         }
         let scope = document
@@ -346,32 +429,30 @@ impl Domain for CppDomain {
             .and_then(|xref| xref.refexplicit())
             .unwrap_or(false);
         let role = if typ == "any" { "identifier" } else { typ };
-        let mut matches = self.find_obj(target, role, scope, specific);
-        if matches.is_empty() && role == "class" {
-            for fallback in ["struct", "union", "enum", "type"] {
-                matches = self.find_obj(target, fallback, scope, specific);
-                if !matches.is_empty() {
-                    break;
-                }
-            }
-        }
+        // Upstream's C++ symbol lookup is by name, not by role. A mismatched
+        // role still resolves and produces a separate "targets a …" warning.
+        let matches = self.find_obj(target, role, scope, specific, false);
         if matches.is_empty() {
             return Ok(None);
         }
-        if matches.len() > 1 {
-            let canonical: Vec<_> = matches.iter().filter(|(_, entry)| !entry.aliased).collect();
-            if canonical.len() == 1 {
-                matches = vec![canonical[0].clone()];
-            } else {
-                let rendered = matches.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-                let message = format!("more than one target found for cross-reference '{target}': {rendered}");
-                ctx.push_diagnostic(DomainDiagnostic::malformed(
-                    message, Some("ref".to_owned()), Some(target.to_owned()),
-                    Some(ctx.docname.to_owned()), ctx.span_of(document, node_id),
-                ));
+        let (name, entry) = matches
+            .iter()
+            .find(|(_, entry)| !entry.aliased)
+            .unwrap_or(&matches[0]);
+        // Mirror upstream `CPPDomain._check_type`: a role that cannot address
+        // the target's object type still resolves, but logs a diagnostic.
+        if role != "any" && role != "identifier" && role != "expr" && role != "texpr" {
+            let allowed = objtypes_for_role(role);
+            if !allowed.is_empty() && !allowed.contains(&entry.objtype.as_str()) {
+                let message = format!("cpp:{role} targets a {} ({name}).", entry.objtype);
+                let source = document.get(node_id).ok().and_then(|node| node.source.as_ref());
+                ctx.push_diagnostic(DomainDiagnostic::bare_warning(
+                    message,
+                    Some(ctx.docname.to_owned()),
+                    ctx.span_of(document, node_id),
+                ).with_source(source));
             }
         }
-        let (name, entry) = &matches[0];
         let title = if explicit { name.clone() } else { name.rsplit("::").next().unwrap_or(name).to_owned() };
         let signature = document.get(node_id).ok().and_then(|node| node.get_str("cpp:scope").ok().flatten()).is_some();
         Ok(Some(self.make_refnode(ctx, entry, title, typ, signature)))
@@ -389,7 +470,7 @@ impl Domain for CppDomain {
             .unwrap_or("");
         let mut results = Vec::new();
         for role in ["class", "function", "member", "type", "enum", "concept", "enumerator"] {
-            if let Some((name, entry)) = self.find_obj(target, role, scope, true).into_iter().next() {
+            if let Some((name, entry)) = self.find_obj(target, role, scope, true, true).into_iter().next() {
                 let title = name.rsplit("::").next().unwrap_or(&name).to_owned();
                 let mut reference = self.make_refnode(ctx, &entry, title, role, false);
                 reference.classes = vec!["xref".to_owned(), "any".to_owned(), "cpp".to_owned(), format!("cpp-{role}")];

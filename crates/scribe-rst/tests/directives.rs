@@ -170,6 +170,7 @@ fn include_with_line_ranges_and_literal_mode() {
             prolog: None,
             epilog: None,
             default_role: None,
+            default_domain: None,
             extlinks: scribe_rst::extlinks::empty_roles(),
         },
     );
@@ -462,6 +463,7 @@ fn prolog_directives_and_roles_resolve() {
             prolog: Some(".. |x| replace:: .. note::\n\n   In prolog.".to_owned()),
             epilog: None,
             default_role: None,
+            default_domain: None,
             extlinks: scribe_rst::extlinks::empty_roles(),
         },
     );

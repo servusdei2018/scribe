@@ -433,11 +433,17 @@ pub fn prepare(
             .into_iter()
             .filter(|diagnostic| {
                 diagnostic.code == scribe_domains::diagnostics::codes::DUPLICATE_OBJECT
-                    && is_bare_duplicate_message(&diagnostic.message)
+                    && (is_bare_duplicate_message(&diagnostic.message)
+                        || diagnostic.message.starts_with("Duplicate C++ declaration")
+                        || diagnostic.message.starts_with("Duplicate C declaration"))
             })
             .map(|diagnostic| {
                 let docname = diagnostic.docname.as_deref().unwrap_or("");
-                bare_domain_warning_line(&diagnostic, docname, env)
+                if is_bare_duplicate_message(&diagnostic.message) {
+                    bare_domain_warning_line(&diagnostic, docname, env)
+                } else {
+                    domain_warning_line(&diagnostic, docname, env)
+                }
             })
             .collect()
     };

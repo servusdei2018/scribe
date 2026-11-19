@@ -452,6 +452,7 @@ impl<'a> BlockParser<'a> {
                 source_name: self.options.source_name.clone(),
                 extlinks: Arc::clone(&self.options.extlinks),
                 default_role: self.options.default_role.clone(),
+                default_domain: self.options.default_domain.clone(),
                 custom_roles: self.custom_roles.clone(),
             },
         );

@@ -91,6 +91,10 @@ pub struct ParseOptions {
     /// Default role selected by a `.. default-role:: name` declaration inside
     /// `rst_prolog`. Applied to interpreted text without an explicit role.
     pub default_role: Option<String>,
+    /// Domain selected by a `.. default-domain:: name` declaration. Pre-scanned
+    /// from the source so inline roles resolved during the block parse use the
+    /// same domain as the directive resolver.
+    pub default_domain: Option<String>,
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
     /// Empty by default; the builder fills it from the `extlinks` config.
     pub extlinks: extlinks::ExtLinkRoles,
@@ -105,6 +109,7 @@ impl ParseOptions {
             prolog: None,
             epilog: None,
             default_role: None,
+            default_domain: None,
             extlinks: extlinks::empty_roles(),
         }
     }
@@ -132,6 +137,15 @@ pub fn parse_with_options(source: &str, options: ParseOptions) -> ParseOutput {
     let mut effective = options;
     if effective.tab_width == 0 {
         effective.tab_width = 8;
+    }
+    // `.. default-domain::` is processed by the read-phase parser upstream, so
+    // roles parsed in the main block pass must see it. Pre-scan the source
+    // (and the injected prolog, which is parsed before the body) and thread the
+    // selection into InlineOptions via ParseOptions.
+    if effective.default_domain.is_none() {
+        effective.default_domain = detect_default_domain(source).or_else(|| {
+            effective.prolog.as_deref().and_then(detect_default_domain)
+        });
     }
     if effective.prolog.is_none()
         && effective.epilog.is_none()
@@ -275,6 +289,28 @@ fn augment_source(source: &str, options: &ParseOptions) -> (String, u32, u32) {
     (out, docinfo_lines, inserted_lines)
 }
 
+/// Finds the domain selected by a `.. default-domain:: name` directive in an
+/// RST source. The last declaration wins, matching upstream's mutable
+/// `env.current_document.default_domain`.
+pub fn detect_default_domain(source: &str) -> Option<String> {
+    let mut selected = None;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("..") else { continue };
+        let rest = rest.trim_start();
+        let Some(after) = rest.strip_prefix("default-domain") else { continue };
+        if !after.starts_with(char::is_whitespace) && !after.starts_with("::") {
+            continue;
+        }
+        let Some(arg) = after.strip_prefix("::") else { continue };
+        let name = arg.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        if !name.is_empty() {
+            selected = Some(name);
+        }
+    }
+    selected
+}
+
 /// The phase that implemented this crate's block and inline functionality.
 pub const IMPLEMENTATION_PHASE: &str = "Phase 06";
 
@@ -290,6 +326,7 @@ mod tests {
             prolog: Some(".. |x| replace:: X".into()),
             epilog: Some(".. _e: https://example.com".into()),
             default_role: None,
+            default_domain: None,
             extlinks: crate::extlinks::empty_roles(),
         };
         let (augmented, docinfo_lines, inserted_lines) = augment_source(":author: me\n\nBody.\n", &options);

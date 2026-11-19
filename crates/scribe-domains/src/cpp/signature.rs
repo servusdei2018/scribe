@@ -77,18 +77,33 @@ fn prepare_children(document: &mut Document, parent: NodeId, scope: &CppScope) -
         if document.get(child).is_err() {
             continue;
         }
+        // Upstream's `env.ref_context['cpp:parent_key']` is installed while
+        // reading object directives, so xrefs in a description's content are
+        // resolved relative to the enclosing namespace/class scope. Annotate
+        // every pending xref under this child with the current scope before
+        // expanding it (the C domain does the same for `c:parent_key`).
+        annotate_scope(document, child, &scope.qualified(""));
         let marker = document.get(child).ok().and_then(|node| {
-            if node.kind != NodeKind::Target || node.get_str("cpp:namespace").ok().flatten().is_none() {
+            if node.kind != NodeKind::Target {
                 return None;
             }
-            node.get_str("objtype").ok().flatten().map(str::to_owned)
+            let kind = node.get_str("objtype").ok().flatten().map(str::to_owned)?;
+            if !matches!(kind.as_str(), "namespace" | "namespace-push" | "namespace-pop") {
+                return None;
+            }
+            let attr = match kind.as_str() {
+                "namespace" => "cpp:namespace",
+                "namespace-push" => "cpp:namespace-push",
+                "namespace-pop" => "cpp:namespace-pop",
+                _ => return None,
+            };
+            if kind != "namespace-pop" && node.get_str(attr).ok().flatten().is_none() {
+                return None;
+            }
+            let name = node.get_str(attr).ok().flatten().unwrap_or("").to_owned();
+            Some((kind, name))
         });
-        if let Some(kind) = marker {
-            let name = document.get(child)
-                .ok()
-                .and_then(|node| node.get_str("cpp:namespace").ok().flatten())
-                .unwrap_or("")
-                .to_owned();
+        if let Some((kind, name)) = marker {
             let mut next = scope.clone();
             match kind.as_str() {
                 "namespace" => next.namespace = name,
@@ -118,7 +133,10 @@ fn prepare_children(document: &mut Document, parent: NodeId, scope: &CppScope) -
         let span = document.get(child).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
         let info = build_signature(document, child, &signature, &objtype, &options, scope, span)?;
         let mut inner = scope.clone();
-        if matches!(objtype.as_str(), "class" | "struct" | "union" | "enum" | "enum-class" | "enum-struct") {
+        // Upstream's `cpp:parent_key` for a description's content is the object
+        // symbol itself, so nested xrefs resolve relative to the declared name
+        // for every object type (functions included).
+        if !info.shortname.is_empty() {
             inner.nested.push(info.shortname.clone());
         }
         prepare_children(document, child, &inner)?;
@@ -156,7 +174,7 @@ pub fn build_signature(
         node.attrs.set_str("cpp:anchor", &anchor);
         node.attrs.set_str("cpp:ids", ids.join(" "));
         node.attrs.set_str("cpp:namespace", &scope.namespace);
-        node.attrs.set_str("cpp:declaration", signature.trim().trim_end_matches(';').trim());
+        node.attrs.set_str("cpp:declaration", signature.trim());
         node.attrs.set_str("domain", "cpp");
         node.attrs.set_bool("no-index", options.no_index);
         node.attrs.set_list("ids", if options.no_index { Vec::new() } else { ids.clone() });
@@ -175,15 +193,53 @@ pub fn build_signature(
         }
     }
 
-    let signature_id = document
+    let signature_ids: Vec<NodeId> = document
         .get(desc)
         .ok()
-        .and_then(|node| node.children.iter().copied().find(|&id| {
-            document.get(id).is_ok_and(|child| child.kind == NodeKind::DescSignature)
-        }))
-        .unwrap_or(NodeId::NULL);
-    if signature_id != NodeId::NULL {
-        build_signature_into(document, signature_id, &decl, objtype, scope, span)?;
+        .map(|node| {
+            node.children.iter().copied().filter(|&id| {
+                document.get(id).is_ok_and(|child| child.kind == NodeKind::DescSignature)
+            }).collect()
+        })
+        .unwrap_or_default();
+    let signatures: Vec<String> = document
+        .get(desc)
+        .ok()
+        .and_then(|node| node.get_str("cpp:signatures").ok().flatten())
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_else(|| vec![signature.to_owned()]);
+    let mut overloads: Vec<(String, String, String)> = Vec::new();
+    let mut all_template_params = Vec::new();
+    let mut all_function_params = Vec::new();
+    for (index, &signature_id) in signature_ids.iter().enumerate() {
+        let text = signatures.get(index).map_or(signature, String::as_str);
+        let one = parse_cpp_declaration(text, objtype, "cpp");
+        for name in &one.template_params {
+            if !all_template_params.contains(name) {
+                all_template_params.push(name.clone());
+            }
+        }
+        for name in &one.function_params {
+            if !all_function_params.contains(name) {
+                all_function_params.push(name.clone());
+            }
+        }
+        build_signature_into(document, signature_id, &one, objtype, scope, span)?;
+        let mut mangle = mangle_input(&one);
+        if mangle.names.is_empty() {
+            mangle.names.push(one.name.clone());
+        }
+        let overload_ids = cpp_ids(&mangle);
+        overloads.push((
+            scope.qualified(&one.name),
+            overload_ids.first().cloned().unwrap_or_else(|| one.name.clone()),
+            text.trim().to_owned(),
+        ));
+    }
+    if let Ok(node) = document.get_mut(desc) {
+        node.attrs.set_str("cpp:overloads", serde_json::to_string(&overloads).unwrap_or_default());
+        node.attrs.set_str("cpp:template_params", serde_json::to_string(&all_template_params).unwrap_or_default());
+        node.attrs.set_str("cpp:function_params", serde_json::to_string(&all_function_params).unwrap_or_default());
     }
 
     Ok(CppSignatureInfo {
@@ -223,6 +279,41 @@ fn build_signature_into(
         node.children.clear();
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "cpp".to_owned()]);
     }
+    // Upstream renders a leading `template<...>` header as its own signature
+    // line, with each introduced parameter as a `desc_name` node.
+    if !decl.template_params.is_empty() {
+        let tline = builder.add(NodeKind::DescSignatureLine, signature_id)?;
+        if let Ok(node) = builder.doc.get_mut(tline) {
+            node.attrs.set_str("xml:space", "preserve");
+        }
+        builder.sig(NodeKind::DescSigKeyword, "template", "k", tline)?;
+        builder.sig(NodeKind::DescSigPunctuation, "<", "p", tline)?;
+        for (index, name) in decl.template_params.iter().enumerate() {
+            if index > 0 {
+                builder.sig(NodeKind::DescSigPunctuation, ",", "p", tline)?;
+                builder.sig(NodeKind::DescSigSpace, " ", "w", tline)?;
+            }
+            if let Some(tokens) = decl.template_param_tokens.get(index) {
+                let keep = tokens.iter().rposition(|token| match token {
+                    SigToken::Name(text) => text == name,
+                    SigToken::Ref { text, .. } => text == name,
+                    _ => false,
+                }).unwrap_or(tokens.len());
+                builder.emit_all(&tokens[..keep], tline)?;
+                if keep > 0 {
+                    builder.sig(NodeKind::DescSigSpace, " ", "w", tline)?;
+                }
+            }
+            let name_node = builder.add(NodeKind::DescName, tline)?;
+            builder.classes(name_node, &["sig-name", "descname"])?;
+            if let Ok(node) = builder.doc.get_mut(name_node) {
+                node.attrs.set_str("xml:space", "preserve");
+            }
+            builder.sig(NodeKind::DescSigName, name, "n", name_node)?;
+        }
+        builder.sig(NodeKind::DescSigPunctuation, ">", "p", tline)?;
+    }
+
     let line = builder.add(NodeKind::DescSignatureLine, signature_id)?;
     if let Ok(node) = builder.doc.get_mut(line) {
         node.attrs.set_bool("add_permalink", true);
@@ -273,7 +364,7 @@ fn build_signature_into(
             if let Ok(node) = builder.doc.get_mut(addname) {
                 node.attrs.set_str("xml:space", "preserve");
             }
-            let token = SigToken::reference("cpp", segment.text.clone(), "class", "cpp-class");
+            let token = SigToken::reference("cpp", segment.text.clone(), "identifier", "cpp-identifier");
             builder.emit(&token, addname)?;
             if !segment.sep_after.is_empty() {
                 builder.sig(NodeKind::DescSigPunctuation, &segment.sep_after, "p", addname)?;
