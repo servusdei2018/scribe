@@ -741,33 +741,45 @@ impl<'a> BlockParser<'a> {
 }
 
 /// Splits a definition-list term line at Docutils' ` +: +` classifier delimiter.
-fn split_classifiers(text: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
+///
+/// Delimiters are ASCII, but the surrounding text may be multi-byte UTF-8, so
+/// slicing stays on character boundaries (pushing raw bytes as `char` would
+/// double-encode non-ASCII terms such as `über` into `Ã¼ber`).
+pub(crate) fn split_classifiers(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let mut last = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b' ' {
-            let mut j = i;
-            while j < bytes.len() && bytes[j] == b' ' {
-                j += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
             }
-            if j < bytes.len() && bytes[j] == b':' && bytes.get(j + 1) == Some(&b' ') {
-                parts.push(std::mem::take(&mut current));
-                i = j + 2;
-                while i < bytes.len() && bytes[i] == b' ' {
-                    i += 1;
+            if i < bytes.len() && bytes[i] == b':' {
+                let colon = i;
+                i += 1;
+                if i < bytes.len() && bytes[i] == b' ' {
+                    while i < bytes.len() && bytes[i] == b' ' {
+                        i += 1;
+                    }
+                    parts.push(text[last..start].to_owned());
+                    last = i;
+                    continue;
                 }
-                continue;
+                // A colon not followed by a space is ordinary text.
+                i = colon + 1;
             }
-            current.push(' ');
-            i = j;
-            continue;
+            // A run of spaces that is not a classifier delimiter is kept in the
+            // slice implicitly (we only cut at real delimiters).
+        } else {
+            // Advance over a whole UTF-8 scalar so `text[last..start]` and
+            // `text[last..]` always land on valid character boundaries.
+            let ch = text[i..].chars().next().unwrap_or('\0');
+            i += ch.len_utf8();
         }
-        current.push(bytes[i] as char);
-        i += 1;
     }
-    parts.push(current);
+    parts.push(text[last..].to_owned());
     parts
 }
 
@@ -812,5 +824,11 @@ mod tests {
     fn classifiers_split() {
         assert_eq!(split_classifiers("term : one : two"), vec!["term", "one", "two"]);
         assert_eq!(split_classifiers("just a term"), vec!["just a term"]);
+    }
+
+    #[test]
+    fn classifiers_split_preserves_utf8_terms() {
+        assert_eq!(split_classifiers("über"), vec!["über"]);
+        assert_eq!(split_classifiers("ähnlich : Dinge"), vec!["ähnlich", "Dinge"]);
     }
 }

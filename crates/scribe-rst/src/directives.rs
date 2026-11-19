@@ -505,12 +505,106 @@ fn std_label(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     Ok(vec![id])
 }
 
+/// `.. glossary::` — Sphinx `sphinx.domains.std.Glossary`.
+///
+/// Emits the exact doctree hierarchy of the oracle: a `glossary` node holding a
+/// single `definition_list` with the `glossary` class; each definition-list item
+/// carries one or more `term` nodes followed by a single `definition`. Every
+/// `term` owns the `term-<slug>` id and a child `index` node whose `entries`
+/// attribute is the oracle's one-element list containing the entry's Python
+/// list representation (the pseudoxml writer `serial_escape`s the embedded
+/// spaces, matching `sphinx.builders.xml.XMLBuilder.write_doc`).
 fn glossary(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    /// One raw term line and its offset within the directive content.
+    type RawTerm = (String, u32);
+    /// A term group and the definition lines shared by all of its terms.
+    type RawEntry = (Vec<RawTerm>, Vec<String>);
+
     let sorted = ctx.flag("sorted");
-    let id = ctx.add(NodeKind::Glossary, ctx.parent)?;
-    ctx.doc.get_mut(id)?.attrs.set_bool("sorted", sorted);
-    ctx.parse_nested_into(id)?;
-    Ok(vec![id])
+    let glossary_id = ctx.add(NodeKind::Glossary, ctx.parent)?;
+    ctx.doc.get_mut(glossary_id)?.attrs.set_bool("sorted", sorted);
+
+    // Collect entries from the dedented content. Unindented lines are terms,
+    // indented lines form the shared definition of the current entry, and blank
+    // lines separate entries. This mirrors `Glossary.run`'s state machine.
+    let mut entries: Vec<RawEntry> = Vec::new();
+    let mut in_definition = true;
+    let mut in_comment = false;
+    let mut indent_len = 0usize;
+    for (index, line) in ctx.content.lines().enumerate() {
+        let line_no = index as u32;
+        if line.is_empty() {
+            if in_definition {
+                if let Some((_, definition)) = entries.last_mut() {
+                    definition.push(String::new());
+                }
+            }
+            continue;
+        }
+        let unindented = !line.chars().next().is_some_and(char::is_whitespace);
+        if unindented {
+            if line.starts_with(".. ") {
+                in_comment = true;
+                continue;
+            }
+            in_comment = false;
+            if in_definition {
+                entries.push((vec![(line.to_owned(), line_no)], Vec::new()));
+                in_definition = false;
+            } else if let Some((terms, _)) = entries.last_mut() {
+                terms.push((line.to_owned(), line_no));
+            }
+        } else if in_comment {
+            // Continuation line of a comment: ignored.
+        } else {
+            if !in_definition {
+                in_definition = true;
+                indent_len = line.len() - line.trim_start().len();
+            }
+            if let Some((_, definition)) = entries.last_mut() {
+                definition.push(line.get(indent_len..).unwrap_or("").to_owned());
+            }
+        }
+    }
+
+    let base_line = ctx.line + 1 + ctx.raw_options.len() as u32;
+    let dlist = ctx.add(NodeKind::DefinitionList, glossary_id)?;
+    ctx.doc.get_mut(dlist)?.attrs.set_list("classes", vec!["glossary".to_owned()]);
+
+    for (terms, definition) in entries {
+        let item = ctx.add(NodeKind::DefinitionListItem, dlist)?;
+        for (raw_term, line_offset) in terms {
+            // Upstream splits on ` +: +` and uses only the first classifier as
+            // the index key; the remaining ones are not rendered on the doctree.
+            let parts = crate::lists::split_classifiers(&raw_term);
+            let inline_term = parts.first().cloned().unwrap_or_default();
+            let index_key = parts.get(1).cloned();
+
+            let term_id = ctx.add(NodeKind::Term, item)?;
+            let _ = ctx.parse_inline_into(&inline_term, term_id, base_line + line_offset)?;
+            let term_text = {
+                let doc: &scribe_ast::Document = ctx.doc;
+                doc.get(term_id).map(|node| node.astext(doc)).unwrap_or_default()
+            };
+            let id = format!("term-{}", crate::names::make_id(&term_text));
+            ctx.doc.get_mut(term_id)?.attrs.set_list("ids", vec![id.clone()]);
+
+            let index_id = ctx.add(NodeKind::Index, term_id)?;
+            let entries_repr = match index_key {
+                Some(key) => format!("['single', '{term_text}', '{id}', 'main', '{key}']"),
+                None => format!("['single', '{term_text}', '{id}', 'main', None]"),
+            };
+            ctx.doc.get_mut(index_id)?.attrs.set_list("entries", vec![entries_repr]);
+        }
+
+        let definition_id = ctx.add(NodeKind::Definition, item)?;
+        let definition_text = definition.join("\n");
+        if !definition_text.trim().is_empty() {
+            ctx.parse_block_text(&definition_text, definition_id, base_line)?;
+        }
+    }
+
+    Ok(vec![glossary_id])
 }
 
 fn productionlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
