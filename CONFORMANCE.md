@@ -67,9 +67,9 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-prolog | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-reST-code-block | html | parser | pass | 1.000 | 1.000 | 1.000 | 20/20 | 0/0 | — |
 | test-reST-code-role | html | parser | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
-| test-root | html | builder | partial | 0.540 | 0.602 | 0.187 | 48/45 | 0/0 | directive, html classes, parser, warning codes |
+| test-root | html | builder | partial | 0.542 | 0.605 | 0.187 | 48/46 | 0/0 | directive, html classes, parser, warning codes |
 | test-smartquotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
-| test-theming | html | builder | pass | 0.985 | 0.982 | 1.000 | 20/20 | 0/0 | html classes |
+| test-theming | html | builder | pass | 1.000 | 1.000 | 1.000 | 20/20 | 0/0 | — |
 | test-toctree | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-toctree-glob | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-toctree-maxdepth | html | builder | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
@@ -86,7 +86,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 - **directive**: test-root (html)
 - **domain**: test-domain-cpp (pseudoxml)
-- **html classes**: test-domain-cpp (pseudoxml), test-root (html), test-theming (html)
+- **html classes**: test-domain-cpp (pseudoxml), test-root (html)
 - **parser**: test-domain-cpp (pseudoxml), test-root (html)
 - **warning codes**: test-domain-cpp (pseudoxml), test-root (html)
 

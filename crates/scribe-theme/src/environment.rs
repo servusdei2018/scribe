@@ -41,9 +41,13 @@ impl TemplateEnvironment {
     /// Build an environment with an explicit template search chain.
     pub fn with_search_paths(theme: &Theme, search_paths: Vec<PathBuf>) -> ThemeResult<Self> {
         let mut env = Environment::new();
-        env.set_auto_escape_callback(auto_escape_callback);
+        // Sphinx builds its Jinja `SandboxedEnvironment` without `autoescape`,
+        // so templates escape explicitly with `|e`. Enabling it here would
+        // double-escape MarkupSafe entities embedded in the templates (e.g.
+        // the `&#8212;` / `&#187;` separators in `basic/layout.html`). minijinja
+        // otherwise auto-enables escaping for `.html` templates by suffix.
+        env.set_auto_escape_callback(|_| AutoEscape::None);
         env.set_undefined_behavior(UndefinedBehavior::Chainable);
-        env.set_formatter(markupsafe_formatter);
         let mut built = Self {
             theme: theme.clone(),
             search_paths,
@@ -96,8 +100,17 @@ impl TemplateEnvironment {
 
     fn install_loader(&mut self) {
         let search_paths = self.search_paths.clone();
+        let templatepathlen = self.theme.user_template_dirs;
         self.env.set_loader(move |name| {
-            let loaded = load_template(&search_paths, name)
+            // `SphinxFileSystemLoader` (sphinx/jinja2glue.py) strips a leading
+            // `!` and starts the search *after* the user's `templates_path`
+            // directories, so `{% extends "!layout.html" %}` resolves to the
+            // selected theme's own template rather than a user override.
+            let (name, skip) = match name.strip_prefix('!') {
+                Some(rest) => (rest, templatepathlen),
+                None => (name, 0),
+            };
+            let loaded = load_template(&search_paths, name, skip)
                 .map_err(|error| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, error.to_string()))?;
             if let Some(source) = loaded {
                 return Ok(Some(preprocess_template(&source)));
@@ -317,9 +330,11 @@ impl TemplateEnvironment {
         put(&mut values, "page_source_suffix", ctx.file_suffix.clone());
 
         // User `html_context` values come before explicit per-page vars.
+        // Sphinx injects the Python values verbatim; `ConfigValue::display_string`
+        // quotes strings, so unwrap those to avoid stray `"` in template output.
         if let Some(dict) = config.get_dict("html_context") {
             for (key, value) in dict {
-                put(&mut values, key.clone(), value.to_string());
+                put(&mut values, key.clone(), html_context_value(value));
             }
         }
         for (key, value) in &ctx.vars {
@@ -338,6 +353,16 @@ fn put(map: &mut BTreeMap<String, Value>, key: impl Into<String>, value: impl In
     map.insert(key.into(), value.into());
 }
 
+/// Convert an `html_context` config value to the value a Jinja template sees.
+/// Python strings render without the quoting that `ConfigValue::Display` adds.
+fn html_context_value(value: &scribe_config::ConfigValue) -> Value {
+    match value {
+        scribe_config::ConfigValue::Str(text) => Value::from(text.clone()),
+        scribe_config::ConfigValue::Path(path) => Value::from(path.to_string_lossy().into_owned()),
+        other => Value::from(other.to_string()),
+    }
+}
+
 fn relation(value: Option<&(String, String)>) -> Value {
     match value {
         Some((link, title)) => Value::from(BTreeMap::from([
@@ -350,42 +375,13 @@ fn relation(value: Option<&(String, String)>) -> Value {
     }
 }
 
-/// Autoescape formatter matching Jinja2/MarkupSafe: unlike minijinja's default
-/// HTML escaper it does **not** escape `/` (Sphinx templates embed URLs in
-/// attributes), but it keeps `&`, `<`, `>`, `"` and `'` escaping.
-fn markupsafe_formatter(
-    out: &mut minijinja::Output<'_>,
-    state: &minijinja::State<'_, '_>,
-    value: &Value,
-) -> Result<(), minijinja::Error> {
-    if matches!(state.auto_escape(), AutoEscape::Html) && !value.is_safe() {
-        if let Some(text) = value.as_str() {
-            return out
-                .write_str(&globals::html_escape_markupsafe(text))
-                .map_err(minijinja::Error::from);
-        }
-    }
-    minijinja::escape_formatter(out, state, value)
-}
-
-fn auto_escape_callback(name: &str) -> AutoEscape {
-    let mut name = name;
-    for extension in [".jinja", ".jinja2", ".j2"] {
-        if let Some(stripped) = name.strip_suffix(extension) {
-            name = stripped;
-            break;
-        }
-    }
-    match name.rsplit('.').next() {
-        Some("html" | "htm" | "xml") => AutoEscape::Html,
-        _ => AutoEscape::None,
-    }
-}
-
 /// Load a template from the search chain, including Sphinx's legacy `_t`
 /// suffix mapping for `.jinja` templates (`alabaster.css_t`).
-fn load_template(search_paths: &[PathBuf], name: &str) -> ThemeResult<Option<String>> {
-    for dir in search_paths {
+///
+/// `skip` is the number of leading (user `templates_path`) directories to
+/// ignore; it is non-zero only for the `!` parent-theme bypass.
+fn load_template(search_paths: &[PathBuf], name: &str, skip: usize) -> ThemeResult<Option<String>> {
+    for dir in search_paths.iter().skip(skip) {
         if let Some(path) = join_template(dir, name) {
             if path.is_file() {
                 let source = fs::read_to_string(&path).map_err(|source| ThemeError::Io {
@@ -530,11 +526,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn autoescape_matches_jinja_for_sphinx_suffixes() {
-        assert!(matches!(auto_escape_callback("page.html"), AutoEscape::Html));
-        assert!(matches!(auto_escape_callback("basic.css.jinja"), AutoEscape::None));
-        assert!(matches!(auto_escape_callback("doctools.js.jinja"), AutoEscape::None));
-        assert!(matches!(auto_escape_callback("alabaster.css_t"), AutoEscape::None));
+    fn markupsafe_entities_are_not_double_escaped() {
+        // Sphinx's Jinja environment has autoescape disabled; templates escape
+        // explicitly with `|e`, so literal MarkupSafe entities survive intact.
+        let theme = crate::ThemeManager::new().get_theme("basic").unwrap();
+        let env = TemplateEnvironment::with_search_paths(&theme, Vec::new()).unwrap();
+        let ctx = RenderContext::new("index").with_theme("basic");
+        let out = env
+            .render_string("x.html", "{{ '&#8212;' }}|{{ '&#187;' }}|{{ 'a & b'|e }}", &ctx)
+            .unwrap();
+        assert_eq!(out, "&#8212;|&#187;|a &amp; b");
     }
 
     #[test]

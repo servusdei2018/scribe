@@ -40,7 +40,7 @@ use scribe_rst::{
 };
 use crate::build_common::{domain_warning_line, toctree_warning_lines};
 use crate::register_code_directives;
-use scribe_theme::{RenderContext, ThemeError, ThemeManager};
+use scribe_theme::{RenderContext, Theme, ThemeError, ThemeManager};
 
 use crate::error::HtmlError;
 use crate::error::Result;
@@ -737,7 +737,10 @@ pub fn build_with_flavor(
                 // generated index/search pages use a different context).  The
                 // conformance rubric counts tag names, so reproduce it here.
                 if ctx.metatags.is_empty() {
-                    ctx.metatags = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />".to_owned();
+                    // Upstream's `clean_meta` retains the translator's trailing
+                    // newline, which the layout template renders as a blank line
+                    // before `<title>`.
+                    ctx.metatags = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n".to_owned();
                 }
                 let suffix = source_paths.get(docname).map(|(_, s)| s.as_str()).unwrap_or(".rst");
                 ctx.set_var("sourcename", format!("{docname}{suffix}.txt"));
@@ -779,6 +782,7 @@ pub fn build_with_flavor(
         fs::create_dir_all(pygments_path.parent().unwrap_or(outdir)).map_err(|e| HtmlError::io(&pygments_path, e))?;
         fs::write(&pygments_path, pygments).map_err(|e| HtmlError::io(&pygments_path, e))?;
         written.push(PathBuf::from("_static/pygments.css"));
+        write_dark_pygments_css(&theme, outdir, &mut written)?;
 
         if flavor.copy_source && config.get_bool("html_copy_source").unwrap_or(true) {
             written.extend(write_source_dumps(&source_paths, outdir)?);
@@ -1487,6 +1491,13 @@ fn page_context(
     let mut css = vec![
         stylesheet(format!("_static/pygments.css?v={}", asset_hash(outdir, "_static/pygments.css", config_hash))),
     ];
+    // Sphinx adds a second stylesheet from the theme's `pygments_dark_style`
+    // setting, guarded by `prefers-color-scheme: dark` (see
+    // `StandaloneHTMLBuilder.init_css_files`).
+    if theme.pygments_dark_style.as_deref().is_some_and(|style| !style.is_empty()) {
+        let dark_hash = asset_hash(outdir, "_static/pygments_dark.css", config_hash);
+        css.push(dark_stylesheet(format!("_static/pygments_dark.css?v={dark_hash}")));
+    }
     for name in &theme.stylesheets {
         css.push(stylesheet(format!("_static/{name}?v={}", asset_hash(outdir, &format!("_static/{name}"), config_hash))));
     }
@@ -1506,6 +1517,33 @@ fn stylesheet(filename: String) -> minijinja::Value {
     map.insert("type".to_owned(), minijinja::Value::from("text/css"));
     map.insert("priority".to_owned(), minijinja::Value::from(500_i64));
     minijinja::Value::from(map)
+}
+
+/// The `pygments_dark.css` link emitted for themes declaring a dark Pygments
+/// style. Attribute names match Sphinx's `_CascadingStyleSheet` so `css_tag`
+/// renders `<link id="pygments_dark_css" media="..." rel="stylesheet" ...>`.
+fn dark_stylesheet(filename: String) -> minijinja::Value {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("filename".to_owned(), minijinja::Value::from(filename));
+    map.insert("id".to_owned(), minijinja::Value::from("pygments_dark_css"));
+    map.insert("media".to_owned(), minijinja::Value::from("(prefers-color-scheme: dark)"));
+    map.insert("rel".to_owned(), minijinja::Value::from("stylesheet"));
+    map.insert("type".to_owned(), minijinja::Value::from("text/css"));
+    map.insert("priority".to_owned(), minijinja::Value::from(500_i64));
+    minijinja::Value::from(map)
+}
+
+/// Emit the dark Pygments stylesheet asset when the theme requests one.
+fn write_dark_pygments_css(theme: &Theme, outdir: &Path, written: &mut Vec<PathBuf>) -> Result<()> {
+    if let Some(dark_style) = theme.pygments_dark_style.as_deref().filter(|style| !style.is_empty()) {
+        let path = outdir.join("_static/pygments_dark.css");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| HtmlError::io(parent, error))?;
+        }
+        fs::write(&path, pygments_css(dark_style)).map_err(|error| HtmlError::io(&path, error))?;
+        written.push(PathBuf::from("_static/pygments_dark.css"));
+    }
+    Ok(())
 }
 
 fn script(filename: String) -> minijinja::Value {
@@ -1730,6 +1768,7 @@ fn build_single_file(
     }
     fs::write(&pygments_path, pygments).map_err(|e| HtmlError::io(&pygments_path, e))?;
     written.push(PathBuf::from("_static/pygments.css"));
+    write_dark_pygments_css(theme, outdir, &mut written)?;
 
     // Single-file builds still ship an inventory but no search page/index.
     let mut target_uris: BTreeMap<String, String> = order.iter()

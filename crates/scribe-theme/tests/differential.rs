@@ -28,6 +28,9 @@ const EXPRESSIONS: &[&str] = &[
     "{{ accesskey('a') }}|{{ accesskey('a') }}|{{ accesskey('B') }}",
     "{{ 1 + 2 }} / {{ 'a' ~ 'b' }}",
     "{{ 'a b c d'|replace(' ', '-') }}",
+    // Sphinx's Jinja environment has autoescape off: literal MarkupSafe
+    // entities pass through verbatim while `|e` still escapes explicitly.
+    "{{ '&#8212;' }}|{{ 'a & b'|e }}",
 ];
 
 const ORACLE_SCRIPT: &str = r#"

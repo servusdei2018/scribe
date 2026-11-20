@@ -175,7 +175,7 @@ pub fn css_tag(state: &State<'_, '_>, css: Value) -> Result<Value, Error> {
             }
         }
     }
-    for key in ["type", "media", "rel"] {
+    for key in ["type", "media", "rel", "id", "class"] {
         if let Some(value) = map_get(&css, key) {
             let rendered = state.format(value).unwrap_or_default();
             attrs.push((key.to_owned(), rendered));

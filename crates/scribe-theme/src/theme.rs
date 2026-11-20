@@ -129,6 +129,11 @@ pub struct Theme {
     pub options: BTreeMap<String, String>,
     /// Template search directories, most specific first.
     pub template_dirs: Vec<PathBuf>,
+    /// Number of leading [`Self::template_dirs`] entries that come from the
+    /// user's `templates_path` configuration. Sphinx's Jinja loader honours a
+    /// leading `!` on a template name by skipping these directories, so
+    /// `{% extends "!layout.html" %}` resolves to the theme's own template.
+    pub user_template_dirs: usize,
     /// Static asset directories, most specific first.
     pub static_dirs: Vec<PathBuf>,
     /// Pygments style hint from the theme metadata.
@@ -460,6 +465,7 @@ impl ThemeManager {
             sidebars: Vec::new(),
             options: BTreeMap::new(),
             template_dirs,
+            user_template_dirs: self.template_dirs.len(),
             static_dirs: theme_dirs
                 .iter()
                 .map(|dir| dir.join("static"))

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use scribe_theme::{ThemeError, ThemeManager, theme_static_files};
+use scribe_theme::{RenderContext, TemplateEnvironment, ThemeError, ThemeManager, theme_static_files};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -319,4 +319,44 @@ fn site_packages_discovery_finds_nested_theme_layouts() {
     let theme = manager.get_theme("furo").expect("furo from site-packages");
     assert_eq!(theme.stylesheets, vec!["furo.css"]);
     assert!(theme.static_dirs.iter().any(|p| p.ends_with("furo/static")));
+}
+
+#[test]
+fn bang_prefix_bypasses_user_template_dirs() {
+    // Sphinx's `SphinxFileSystemLoader` strips a leading `!` and starts the
+    // search after the user's `templates_path` directories, so a user template
+    // can extend the theme's own `layout.html` instead of recursing into itself.
+    let temp = TempThemes::new();
+    let user = temp.root.join("user_templates");
+    let theme_dir = temp.root.join("theme_templates");
+    fs::create_dir_all(&user).expect("user template dir");
+    fs::create_dir_all(&theme_dir).expect("theme template dir");
+    fs::write(user.join("layout.html"), "USER|{% block body %}{% endblock %}")
+        .expect("user layout");
+    fs::write(theme_dir.join("layout.html"), "THEME|{% block body %}{% endblock %}")
+        .expect("theme layout");
+
+    let mut theme = ThemeManager::new().get_theme("basic").expect("basic");
+    theme.template_dirs = vec![user.clone(), theme_dir.clone()];
+    theme.user_template_dirs = 1;
+    let env = TemplateEnvironment::with_search_paths(&theme, vec![user, theme_dir]).expect("env");
+    let ctx = RenderContext::new("index").with_theme("basic");
+
+    let plain = env
+        .render_string(
+            "x.html",
+            "{% extends 'layout.html' %}{% block body %}B{% endblock %}",
+            &ctx,
+        )
+        .expect("plain extends");
+    assert_eq!(plain, "USER|B");
+
+    let bypass = env
+        .render_string(
+            "x.html",
+            "{% extends '!layout.html' %}{% block body %}B{% endblock %}",
+            &ctx,
+        )
+        .expect("bang extends");
+    assert_eq!(bypass, "THEME|B");
 }

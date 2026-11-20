@@ -149,9 +149,12 @@ fn get_theme_option_and_translation() {
 }
 
 #[test]
-fn autoescape_and_common_filters() {
+fn no_autoescape_and_common_filters() {
     let ctx = context();
-    assert_eq!(render("{{ '<b>x</b>' }}", &ctx), "&lt;b&gt;x&lt;/b&gt;");
+    // Sphinx builds its Jinja environment without autoescape: plain values and
+    // literal MarkupSafe entities pass through verbatim; `|e` escapes explicitly.
+    assert_eq!(render("{{ '<b>x</b>' }}", &ctx), "<b>x</b>");
+    assert_eq!(render("{{ '&#8212;' }}", &ctx), "&#8212;");
     assert_eq!(render("{{ '<b>'|safe }}", &ctx), "<b>");
     assert_eq!(render("{{ '<b>x</b>'|striptags }}", &ctx), "x");
     assert_eq!(render("{{ '<b>x</b>'|e }}", &ctx), "&lt;b&gt;x&lt;/b&gt;");
