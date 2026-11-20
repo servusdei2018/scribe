@@ -304,7 +304,7 @@ impl TemplateEnvironment {
                     .map(|(link, title)| {
                         Value::from(BTreeMap::from([
                             ("link".to_owned(), Value::from(link.clone())),
-                            ("title".to_owned(), Value::from(title.clone())),
+                            ("title".to_owned(), Value::from_safe_string(title.clone())),
                         ]))
                     })
                     .collect::<Vec<_>>(),
@@ -342,7 +342,9 @@ fn relation(value: Option<&(String, String)>) -> Value {
     match value {
         Some((link, title)) => Value::from(BTreeMap::from([
             ("link".to_owned(), Value::from(link.clone())),
-            ("title".to_owned(), Value::from(title.clone())),
+            // Sphinx exposes relation titles as Markup so the section-number
+            // `<span>` emitted by `get_relation()` survives template escaping.
+            ("title".to_owned(), Value::from_safe_string(title.clone())),
         ])),
         None => Value::from(()),
     }

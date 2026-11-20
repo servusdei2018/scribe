@@ -38,7 +38,7 @@ use scribe_rst::{
     parse_with_options, resolve_output, Context as RstContext,
     DirectiveRegistry, ParseOptions,
 };
-use crate::build_common::domain_warning_line;
+use crate::build_common::{domain_warning_line, toctree_warning_lines};
 use crate::register_code_directives;
 use scribe_theme::{RenderContext, ThemeError, ThemeManager};
 
@@ -483,29 +483,39 @@ pub fn build_with_flavor(
             }
             // Populate the environment's resolved toctree/figure-number state.
             let toctrees = collect_toctrees_with_sources(env, config, &BTreeMap::new());
-            // Materialise the resolved (glob-expanded) toctree in the HTML
-            // doctrees too, so the body's `toctree-wrapper` lists every page
-            // and its sections. The raw directive keeps `*` in `entry_refs`.
-            for tree in &toctrees.toctrees {
-                if let Some(outcome) = parsed.get_mut(&tree.docname) {
-                    if let Ok(node) = outcome.document.get_mut(tree.node_id) {
-                        let refs = tree.includefiles.clone();
-                        let titles: Vec<String> = tree
-                            .entries
-                            .iter()
-                            .map(|entry| entry.title.clone().unwrap_or_default())
-                            .collect();
-                        let kinds = vec!["doc".to_owned(); refs.len()];
-                        node.set_list("entry_refs", refs.clone());
-                        node.set_list("entry_titles", titles);
-                        node.set_list("entry_kinds", kinds);
-                        node.set_list("entries", refs.clone());
-                        node.set_list("includefiles", refs);
-                    }
-                }
+            // Surface the collector's diagnostics (`toc.secnum`,
+            // `toc.not_included`, …) in upstream's logger shape. Without this
+            // the HTML builder silently dropped every toctree warning.
+            warnings.extend(toctree_warning_lines(&toctrees, &options.source_dir));
+            // Materialise the resolved (glob-expanded, reversed) toctree on
+            // the working doctrees so the body's `toctree-wrapper` lists every
+            // page and its sections. The collector owns glob resolution; the
+            // expander otherwise sees the raw `*` in `entry_refs`.
+            for (docname, outcome) in &mut parsed {
+                let _ = scribe_core::materialize_resolved_entries(
+                    &mut outcome.document,
+                    docname,
+                    &toctrees,
+                );
             }
             for (docname, outcome) in &mut parsed {
-                let _ = expand_toctrees(&mut outcome.document, docname, env, &toctrees);
+                match expand_toctrees(&mut outcome.document, docname, env, &toctrees) {
+                    Ok(expansion) => {
+                        for (target, line) in expansion.no_title {
+                            warnings.push(crate::build_common::no_title_warning_line(
+                                docname, &target, line, &options.source_dir,
+                            ));
+                        }
+                    }
+                    Err(error) => warnings.push(format!("{docname}: toctree expansion failed: {error}")),
+                }
+                // Mirror the collector's `secnumber` onto the working copy so
+                // the writer can render `<span class="section-number">…</span>`.
+                let _ = scribe_core::propagate_section_numbers(
+                    &mut outcome.document,
+                    docname,
+                    &toctrees.section_numbers,
+                );
                 // Mirror numfig's `fignumber` onto the working copies so the
                 // writer can render the `caption-number` span.
                 let containers: Vec<NodeId> = outcome
@@ -646,17 +656,10 @@ pub fn build_with_flavor(
                 render_ctx.toctree_html = sidebar_toc;
                 render_ctx.prev = prev;
                 render_ctx.next = next;
-                // The relations template renders `parents` as breadcrumb links.
-                // Sphinx only lists *intermediate* toctree ancestors there; a
-                // document whose parent is the master doc has none (the master
-                // is already the "Documentation overview" link).
-                if toctrees
-                    .relation(docname)
-                    .and_then(|relation| relation.parent.as_deref())
-                    .is_none_or(|parent| parent == config.master_doc())
-                {
-                    render_ctx.parents.clear();
-                }
+                // The relations template renders `parents` as breadcrumb links
+                // for *intermediate* toctree ancestors only (the master doc is
+                // already the "Documentation overview" link).
+                render_ctx.parents = build_parents(&toctrees, env, docname, config);
             }
             // Upstream's `html-page-context(pagename, templatename, context,
             // doctree)` lets extensions tweak the Jinja context. Mutations to
@@ -1243,6 +1246,57 @@ fn theme_options_checksum(config: &Config) -> String {
 
 /// Build the Phase 16 render context for one page (before the body is set).
 #[allow(clippy::too_many_arguments)]
+/// Intermediate toctree ancestors of `docname`, excluding the master doc.
+///
+/// Upstream `html-page-context` builds `parents` by walking
+/// `env.toctree_ancestors(pagename)` from the immediate parent up to (but not
+/// including) the root document. Relation titles carry a section-number span
+/// and are safe markup in the theme templates.
+fn build_parents(
+    toctrees: &ToctreeCollection,
+    env: &BuildEnvironment,
+    docname: &str,
+    config: &Config,
+) -> Vec<(String, String)> {
+    let mut parents = Vec::new();
+    let mut current = toctrees
+        .relation(docname)
+        .and_then(|relation| relation.parent.clone());
+    let master = config.master_doc();
+    while let Some(name) = current {
+        if name == master || name == docname || parents.iter().any(|(n, _)| *n == name) {
+            break;
+        }
+        let title = env
+            .documents
+            .get(&name)
+            .and_then(|snapshot| snapshot.doctree.as_ref())
+            .and_then(|doc| {
+                doc.preorder_ids().into_iter().find_map(|id| {
+                    let node = doc.get(id).ok()?;
+                    if node.kind == NodeKind::Title { Some(node.astext(doc)) } else { None }
+                })
+            })
+            .unwrap_or_else(|| name.clone());
+        let number = toctrees
+            .section_numbers
+            .get(&name, "")
+            .filter(|number| !number.is_empty())
+            .map(|number| {
+                format!(
+                    "<span class=\"section-number\">{}. </span>",
+                    number.iter().map(i64::to_string).collect::<Vec<_>>().join(".")
+                )
+            })
+            .unwrap_or_default();
+        parents.push((format!("{name}.html"), format!("{number}{}", escape_html(&title))));
+        current = toctrees
+            .relation(&name)
+            .and_then(|relation| relation.parent.clone());
+    }
+    parents
+}
+
 /// Renders the sidebar global toctree plus prev/next relations for one page.
 ///
 /// Mirrors Sphinx's `global_toctree_for_doc(master_doc)` as rendered by
@@ -1270,11 +1324,29 @@ fn build_sidebar_nav(
             .unwrap_or_else(|| name.to_owned())
     };
 
-    // The current document's sub-sections (children of its root section).
+    // Plain section-number prefix (no span) for global-ToC links, matching
+    // Sphinx's `visit_reference()` for toctree entries.
+    let plain_number = |name: &str| -> String {
+        toctrees
+            .section_numbers
+            .get(name, "")
+            .filter(|number| !number.is_empty())
+            .map(|number| {
+                format!("{}. ", number.iter().map(i64::to_string).collect::<Vec<_>>().join("."))
+            })
+            .unwrap_or_default()
+    };
+
+    // Sub-sections of the current document. Upstream's `_toctree_copy` drops
+    // these when the current document carries `:tocdepth:` metadata (the
+    // local TOC depth is consumed before the global ToC is assembled).
     let sections_of = |name: &str| -> String {
         let Some(doc) = env.documents.get(name).and_then(|snapshot| snapshot.doctree.as_ref()) else {
             return String::new();
         };
+        if scribe_core::document_tocdepth(doc).is_some() {
+            return String::new();
+        }
         let Ok(root_node) = doc.get(doc.root) else { return String::new() };
         let Some(root_section) = root_node.children.iter().copied().find(|&id| {
             doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section)
@@ -1299,9 +1371,18 @@ fn build_sidebar_nav(
                 if child.kind == NodeKind::Title { Some(child.astext(doc)) } else { None }
             }).unwrap_or_default();
             let anchor = node.ids().ok().and_then(|ids| ids.first().cloned()).unwrap_or_default();
+            let number = toctrees
+                .section_numbers
+                .get(name, &format!("#{anchor}"))
+                .filter(|number| !number.is_empty())
+                .map(|number| {
+                    format!("{}. ", number.iter().map(i64::to_string).collect::<Vec<_>>().join("."))
+                })
+                .unwrap_or_default();
             out.push_str(&format!(
-                "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"#{}\">{}</a></li>\n",
+                "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"#{}\">{}{}</a></li>\n",
                 escape_attr(&anchor),
+                number,
                 escape_html(&text)
             ));
         }
@@ -1321,10 +1402,11 @@ fn build_sidebar_nav(
             let text = child.title.clone().unwrap_or_else(|| title_of(&child.docname));
             let href = if current { "#".to_owned() } else { uri(&child.docname) };
             out.push_str(&format!(
-                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}</a>",
+                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}{}</a>",
                 if current { "toctree-l1 current" } else { "toctree-l1" },
                 if current { "current reference internal" } else { "reference internal" },
                 escape_attr(&href),
+                plain_number(&child.docname),
                 escape_html(&text)
             ));
             if current {
@@ -1335,10 +1417,25 @@ fn build_sidebar_nav(
         out.push_str("</ul>\n");
     }
 
+    // Sphinx prefixes relation titles with the target section's number in a
+    // `<span class="section-number">`. The theme treats relation titles as
+    // safe markup, so escape the plain title ourselves.
+    let numbered_title = |name: &str| -> String {
+        let number = toctrees
+            .section_numbers
+            .get(name, "")
+            .filter(|number| !number.is_empty())
+            .map(|number| {
+                let dotted = number.iter().map(i64::to_string).collect::<Vec<_>>().join(".");
+                format!("<span class=\"section-number\">{dotted}. </span>")
+            })
+            .unwrap_or_default();
+        format!("{number}{}", escape_html(&title_of(name)))
+    };
     let (prev, next) = toctrees.relation(docname).map_or((None, None), |relation| {
         (
-            relation.prev.as_ref().map(|name| (uri(name), title_of(name))),
-            relation.next.as_ref().map(|name| (uri(name), title_of(name))),
+            relation.prev.as_ref().map(|name| (uri(name), numbered_title(name))),
+            relation.next.as_ref().map(|name| (uri(name), numbered_title(name))),
         )
     });
     (out, prev, next)

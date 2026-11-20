@@ -169,6 +169,10 @@ struct ChildEntry {
     /// be resolved (a nested toctree entry); `false` for a section, whose
     /// children were built directly from its doctree subtree.
     needs_expand: bool,
+    /// Set for a hidden sub-toctree that upstream leaves unresolved in the
+    /// exported doctree: it is emitted as a bare `toctree` node rather than a
+    /// list item.
+    raw_toctree: Option<Node>,
     children: Vec<ChildEntry>,
 }
 
@@ -253,8 +257,24 @@ fn build_list_item(
     literal_title: bool,
     rich_children: Option<Vec<NodeId>>,
 ) -> Result<NodeId, AstError> {
-    let item = document.add_node(Node::new(NodeKind::ListItem), None)?;
-    let para = document.add_node(Node::new(NodeKind::CompactParagraph), None)?;
+    // Upstream `_toctree_add_classes()` tags each list item and compact
+    // paragraph with its depth level; the HTML5 writer surfaces the former on
+    // the emitted `<li class="toctree-lN">`.
+    let level_class = format!("toctree-l{depth}");
+    let item = document.add_node(
+        Node::new(NodeKind::ListItem).with_attr(
+            "classes",
+            scribe_ast::AttributeValue::List(vec![level_class.clone()]),
+        ),
+        None,
+    )?;
+    let para = document.add_node(
+        Node::new(NodeKind::CompactParagraph).with_attr(
+            "classes",
+            scribe_ast::AttributeValue::List(vec![level_class]),
+        ),
+        None,
+    )?;
     let mut reference = Node::new(NodeKind::Reference)
         .with_attr("internal", AttributeValue::Bool(internal))
         .with_attr("refuri", AttributeValue::Str(refuri.to_owned()))
@@ -282,7 +302,16 @@ fn build_list_item(
     let pruned = titlesonly || (maxdepth > 0 && depth >= maxdepth);
     if !pruned && !children.is_empty() {
         let mut nested_items = Vec::with_capacity(children.len());
+        let mut raw_toctrees: Vec<Node> = Vec::new();
         for child in children {
+            if let Some(original) = &child.raw_toctree {
+                let mut unresolved = Node::new(NodeKind::Toctree);
+                for (key, value) in original.attrs.iter() {
+                    unresolved.attrs.insert(key.clone(), value.clone());
+                }
+                raw_toctrees.push(unresolved);
+                continue;
+            }
             let child_refuri = format!("{}{}", child.href, child.anchor);
             let child_secnumber = (!child.number.is_empty()).then(|| number_display(&child.number));
             nested_items.push(build_list_item(
@@ -300,8 +329,12 @@ fn build_list_item(
                 None,
             )?);
         }
+        let mut nested_ids = nested_items;
+        for unresolved in raw_toctrees {
+            nested_ids.push(document.add_node(unresolved, None)?);
+        }
         let nested = document.add_node(Node::new(NodeKind::BulletList), None)?;
-        document.replace_children(nested, nested_items)?;
+        document.replace_children(nested, nested_ids)?;
         document.append_child(item, nested)?;
     }
     Ok(item)
@@ -325,10 +358,18 @@ fn collect_children(
     }
     let mut counter = 0usize;
     let mut out = Vec::new();
+    // Upstream `_toctree_standard_entry()` derives each referenced document's
+    // local ToC depth from `:tocdepth:` metadata (`0` = unlimited).
+    let tocdepth = env
+        .get_doctree(docname)
+        .and_then(crate::document_tocdepth)
+        .unwrap_or(0)
+        .max(0) as usize;
     if let Some(document) = env.get_doctree(docname) {
         for id in document.children(document.root).unwrap_or_default().to_vec() {
             collect_node_entries(
                 document, id, docname, &mut counter, collection, includehidden, &mut out,
+                0, tocdepth,
             );
         }
         // Expand links to *other* documents (nested toctree entries) one level
@@ -358,12 +399,17 @@ fn collect_node_entries(
     collection: &ToctreeCollection,
     includehidden: bool,
     out: &mut Vec<ChildEntry>,
+    depth: usize,
+    tocdepth: usize,
 ) {
     let Ok(node) = document.get(id) else {
         return;
     };
     match node.kind {
         NodeKind::Section => {
+            if tocdepth > 0 && depth >= tocdepth {
+                return;
+            }
             let title = node
                 .children
                 .iter()
@@ -382,7 +428,7 @@ fn collect_node_entries(
                 if document.get(child).is_ok_and(|c| c.kind == NodeKind::Title) {
                     continue;
                 }
-                collect_node_entries(document, child, docname, counter, collection, includehidden, &mut children);
+                collect_node_entries(document, child, docname, counter, collection, includehidden, &mut children, depth + 1, tocdepth);
             }
             if anchor.is_empty() {
                 // The first section supplies the document title, already used
@@ -402,6 +448,7 @@ fn collect_node_entries(
                     external: false,
                     literal_title: false,
                     needs_expand: false,
+                    raw_toctree: None,
                     children,
                 });
             }
@@ -413,8 +460,29 @@ fn collect_node_entries(
             collect_desc_entries(document, id, docname, collection, out);
         }
         NodeKind::Toctree => {
+            if tocdepth > 0 && depth >= tocdepth {
+                return;
+            }
             let hidden = bool_attr(node, "hidden", false);
             if hidden && !includehidden {
+                // Upstream keeps a hidden sub-toctree as an unresolved
+                // `addnodes.toctree` inside the parent's nested bullet list
+                // when `includehidden` is false. Its attributes are copied
+                // verbatim; no link is generated for its targets.
+                if read_entries(node).is_empty() {
+                    return;
+                }
+                out.push(ChildEntry {
+                    title: String::new(),
+                    href: String::new(),
+                    anchor: String::new(),
+                    number: Vec::new(),
+                    external: false,
+                    literal_title: false,
+                    needs_expand: false,
+                    raw_toctree: Some(node.clone()),
+                    children: Vec::new(),
+                });
                 return;
             }
             for entry in read_entries(node) {
@@ -438,13 +506,14 @@ fn collect_node_entries(
                     external,
                     literal_title: false,
                     needs_expand: !external,
+                    raw_toctree: None,
                     children: Vec::new(),
                 });
             }
         }
         _ => {
             for child in node.children.clone() {
-                collect_node_entries(document, child, docname, counter, collection, includehidden, out);
+                collect_node_entries(document, child, docname, counter, collection, includehidden, out, depth + 1, tocdepth);
             }
         }
     }
@@ -539,6 +608,7 @@ fn collect_desc_entries(
             external: false,
             literal_title: true,
             needs_expand: false,
+            raw_toctree: None,
             children,
         });
     }

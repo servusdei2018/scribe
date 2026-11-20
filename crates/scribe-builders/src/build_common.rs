@@ -55,7 +55,7 @@ pub struct PreparedBuild {
 /// Scribe's internal representation carries only a docname, so we reconstruct
 /// the path from the build's source directory. This makes the normalized
 /// warning lines used by the conformance harness comparable with the oracle.
-fn toctree_warning_lines(toctrees: &ToctreeCollection, source_dir: &std::path::Path) -> Vec<String> {
+pub fn toctree_warning_lines(toctrees: &ToctreeCollection, source_dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     // Upstream canonicalizes the source directory before logging, resolving
     // any `..` components. Mirror that so the emitted path is byte-identical

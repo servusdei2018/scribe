@@ -60,7 +60,9 @@ pub use python_shim::{
     PythonExtensionShim, PyScript, ShimConfig, ShimError, EXAMPLE_EXTENSION_SCRIPT,
 };
 pub use toctree::{
-    collect_toctrees, collect_toctrees_with_sources, EntryTarget, FigureNumbers, NavRelation, ParsedToctree, SectionNumbers,
+    collect_toctrees, collect_toctrees_with_sources, document_tocdepth,
+    materialize_resolved_entries, propagate_section_numbers, EntryTarget, FigureNumbers,
+    NavRelation, ParsedToctree, SectionNumbers,
     SectionTocEntry, TocTreeNode, ToctreeCollection, ToctreeCollector, ToctreeEntry,
     ToctreeHierarchy, ToctreeOptions, ToctreeWarning,
 };

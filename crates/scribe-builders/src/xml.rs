@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use scribe_ast::{AttributeValue, Document, Node, NodeId, NodeKind};
 use scribe_config::Config;
 use scribe_core::{
-    expand_toctrees, normalize_citation_references, normalize_xref_literals, BuildEnvironment,
+    expand_toctrees, materialize_resolved_entries, normalize_citation_references,
+    normalize_xref_literals, BuildEnvironment,
 };
 
 use crate::build_common::{no_title_warning_line, prepare, PreparedBuild};
@@ -112,6 +113,10 @@ fn build_docs(
     // doctree here — this keeps both writers free of double-wrapping.
     for docname in &docnames {
         if let Some(document) = parsed.get_mut(docname) {
+            // Mirror upstream's pre-write toctree resolution: expand globs and
+            // apply `:reversed:` on the working copy before materialising the
+            // exported nested structure.
+            let _ = materialize_resolved_entries(document, docname, &toctrees);
             match expand_toctrees(document, docname, env, &toctrees) {
                 Ok(expansion) => {
                     for (target, line) in expansion.no_title {
@@ -120,6 +125,7 @@ fn build_docs(
                 }
                 Err(error) => warnings.push(format!("{docname}: toctree expansion failed: {error}")),
             }
+            let _ = scribe_core::propagate_section_numbers(document, docname, &toctrees.section_numbers);
             if let Err(error) = normalize_citation_references(document) {
                 warnings.push(format!("{docname}: citation reference normalization failed: {error}"));
             }

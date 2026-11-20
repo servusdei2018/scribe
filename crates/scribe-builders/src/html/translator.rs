@@ -558,6 +558,12 @@ impl<'a> HTML5Translator<'a> {
                 let tag = format!("h{level}");
                 let open = self.open_tag(node, &tag, &[], &[]);
                 self.emit(&open);
+                // Upstream `HTML5Translator.visit_title()` calls
+                // `add_secnumber()` for numbered sections, wrapping the dotted
+                // number (plus `html_secnumber_suffix`) in a span.
+                if let Some(display) = section_number_display(node) {
+                    self.emit(&format!("<span class=\"section-number\">{display}</span>"));
+                }
                 let mut frame = Frame::new(format!("</{tag}>\n"), NodeKind::Title);
                 if self.ctx.add_permalinks {
                     if let Some(parent) = self.parent_node(id) {
@@ -616,6 +622,11 @@ impl<'a> HTML5Translator<'a> {
         }
         out.push('>');
         self.emit(&out);
+        // Upstream `visit_reference()` emits the section number as plain text
+        // inside the anchor (no span) before the title text.
+        if let Some(display) = section_number_display(node) {
+            self.emit(&display);
+        }
         Some(Frame::new("</a>", NodeKind::Reference))
     }
 
@@ -793,6 +804,17 @@ pub fn render_local_toc(doc: &Document, maxdepth: usize) -> String {
 
 /// Escape text for use in HTML content.
 #[must_use]
+/// Render a `secnumber` attribute ("1 2 3") as upstream's dotted number with
+/// its trailing suffix ("1.2.3. ").
+fn section_number_display(node: &Node) -> Option<String> {
+    let raw = node.attrs.get_str("secnumber").ok().flatten()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let dotted = raw.split_whitespace().collect::<Vec<_>>().join(".");
+    Some(format!("{dotted}. "))
+}
+
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1097,7 +1119,8 @@ impl HTML5Translator<'_> {
             }
 
             NodeKind::ListItem => {
-                self.emit("<li>");
+                let open = self.open_tag(node, "li", &[], &[]);
+                self.emit(&open);
                 Some(Frame::new("</li>\n", NodeKind::ListItem))
             }
 
@@ -1223,7 +1246,8 @@ impl HTML5Translator<'_> {
                     self.skip_children = true;
                     return None;
                 }
-                let open = self.open_tag(node, "div", &[], &[]);
+                let extra: &[&str] = if node.kind == NodeKind::Compound { &["compound"] } else { &[] };
+                let open = self.open_tag(node, "div", extra, &[]);
                 self.emitln(&open);
                 Some(Frame::new("</div>\n", node.kind))
             }

@@ -232,6 +232,11 @@ fn build_capture(binary: &Path, builder: &str, source: &Path, out: &Path) -> Bui
         };
     }
     let mut command = Command::new(binary);
+    // Python hash randomization changes Sphinx's iteration order for sets such
+    // as `env.numbered_toctrees`, which in turn moves the source location of
+    // `toc.secnum` diagnostics between runs. Pin the seed so the oracle's
+    // output (and therefore the tracked metric) is reproducible.
+    command.env("PYTHONHASHSEED", "0");
     command
         .arg("build")
         .arg("-b")

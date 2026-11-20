@@ -278,7 +278,43 @@ fn process_only_nodes(document: &mut Document, tags: Option<&scribe_config::Tags
                 }
             }
         }
+        // Preserve toctree directives that lived inside the removed branch so
+        // the environment collector can still note their targets. Upstream
+        // notes every toctree while building the environment TOCs, independent
+        // of the tags used to strip `only` nodes for the current builder.
+        let mut only_refs: Vec<String> = Vec::new();
+        let mut only_kinds: Vec<String> = Vec::new();
+        for child in document.subtree_ids(id) {
+            let Ok(node) = document.get(child) else { continue };
+            if node.kind != NodeKind::Toctree {
+                continue;
+            }
+            let refs = list_attr(node, crate::toctree::ATTR_ENTRY_REFS);
+            let kinds = list_attr(node, crate::toctree::ATTR_ENTRY_KINDS);
+            for (index, reference) in refs.into_iter().enumerate() {
+                only_refs.push(reference);
+                only_kinds.push(
+                    kinds
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| crate::toctree::KIND_DOC.to_owned()),
+                );
+            }
+        }
+        if !only_refs.is_empty() {
+            comment.attrs.set_list(crate::toctree::ATTR_ONLY_TOC_REFS, only_refs);
+            comment.attrs.set_list(crate::toctree::ATTR_ONLY_TOC_KINDS, only_kinds);
+        }
         let _ = document.replace_node(id, comment);
+    }
+}
+
+fn list_attr(node: &scribe_ast::Node, key: &str) -> Vec<String> {
+    use scribe_ast::AttributeValue;
+    match node.attrs.get(key) {
+        Some(AttributeValue::List(values)) => values.clone(),
+        Some(AttributeValue::Str(raw)) => serde_json::from_str::<Vec<String>>(raw).unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 

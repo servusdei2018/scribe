@@ -41,6 +41,17 @@ pub const ATTR_ENTRY_KINDS: &str = "entry_kinds";
 pub const ATTR_ENTRIES: &str = "entries";
 /// Attribute holding resolved child docnames (upstream name).
 pub const ATTR_INCLUDEFIES: &str = "includefiles";
+/// Attribute placed on the `comment` that replaces a non-matching `only`
+/// node: the raw refs of any `toctree` directives that lived inside it.
+///
+/// Upstream's `TocTreeCollector` notes those directives while building the
+/// environment TOCs, before `OnlyNodeTransform` strips the branch at write
+/// time. Scribe applies the `only` transform earlier, so without this side
+/// channel the collector would never see the directive and would emit a
+/// spurious `toc.not_included` warning for its targets.
+pub const ATTR_ONLY_TOC_REFS: &str = "only_toctree_refs";
+/// Parallel classifier list for [`ATTR_ONLY_TOC_REFS`].
+pub const ATTR_ONLY_TOC_KINDS: &str = "only_toctree_kinds";
 /// Classifier value for an ordinary document reference.
 pub const KIND_DOC: &str = "doc";
 /// Classifier value for an external URL.

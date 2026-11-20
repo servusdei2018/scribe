@@ -28,7 +28,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 97.1% over 34 applicable fixtures (31 pass, 3 partial, 0 fail, 5 skip)
+## Aggregate semantic parity: 98.5% over 34 applicable fixtures (33 pass, 1 partial, 0 fail, 5 skip)
 
 ## Per-fixture results
 
@@ -67,12 +67,12 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-prolog | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-reST-code-block | html | parser | pass | 1.000 | 1.000 | 1.000 | 20/20 | 0/0 | — |
 | test-reST-code-role | html | parser | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
-| test-root | html | builder | partial | 0.534 | 0.595 | 0.189 | 48/45 | 0/0 | directive, html classes, parser, warning codes |
+| test-root | html | builder | partial | 0.540 | 0.602 | 0.187 | 48/45 | 0/0 | directive, html classes, parser, warning codes |
 | test-smartquotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-theming | html | builder | pass | 0.985 | 0.982 | 1.000 | 20/20 | 0/0 | html classes |
-| test-toctree | pseudoxml | builder | pass | 0.950 | 1.000 | 0.667 | 11/11 | 0/0 | warning codes |
-| test-toctree-glob | pseudoxml | builder | partial | 0.802 | 0.767 | 1.000 | 10/9 | 0/0 | directive, domain, html classes, parser |
-| test-toctree-maxdepth | html | builder | partial | 0.802 | 0.943 | 0.000 | 21/21 | 0/0 | html classes, warning codes |
+| test-toctree | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
+| test-toctree-glob | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
+| test-toctree-maxdepth | html | builder | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
 
 ## Skipped fixtures
 
@@ -84,9 +84,9 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 ## Divergences by category
 
-- **directive**: test-root (html), test-toctree-glob (pseudoxml)
-- **domain**: test-domain-cpp (pseudoxml), test-toctree-glob (pseudoxml)
-- **html classes**: test-domain-cpp (pseudoxml), test-root (html), test-theming (html), test-toctree-glob (pseudoxml), test-toctree-maxdepth (html)
-- **parser**: test-domain-cpp (pseudoxml), test-root (html), test-toctree-glob (pseudoxml)
-- **warning codes**: test-domain-cpp (pseudoxml), test-root (html), test-toctree (pseudoxml), test-toctree-maxdepth (html)
+- **directive**: test-root (html)
+- **domain**: test-domain-cpp (pseudoxml)
+- **html classes**: test-domain-cpp (pseudoxml), test-root (html), test-theming (html)
+- **parser**: test-domain-cpp (pseudoxml), test-root (html)
+- **warning codes**: test-domain-cpp (pseudoxml), test-root (html)
 

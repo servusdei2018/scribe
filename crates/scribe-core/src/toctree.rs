@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use miette::{Diagnostic, LabeledSpan, SourceCode, SourceSpan};
-use scribe_ast::{AttributeValue, Document, Node, NodeId, NodeKind, Span};
+use scribe_ast::{AstError, AttributeValue, Document, Node, NodeId, NodeKind, Span};
 use thiserror::Error;
 
 use crate::glob::{translate_pattern, GlobSpec};
@@ -147,6 +147,17 @@ impl Default for ToctreeOptions {
             name: None,
         }
     }
+}
+
+/// Resolved state written back onto a `NodeKind::Toctree` in an environment
+/// doctree after glob expansion and `:reversed:` processing.
+struct ToctreeWriteback {
+    docname: String,
+    id: NodeId,
+    includefiles: Vec<String>,
+    refs: Vec<String>,
+    titles: Vec<String>,
+    kinds: Vec<String>,
 }
 
 /// A parsed and resolved toctree node.
@@ -637,20 +648,64 @@ pub fn collect_toctrees_with_sources(
         ));
     }
     let mut toctrees = Vec::new();
-    let mut writebacks: Vec<(String, NodeId, Vec<String>)> = Vec::new();
+    let mut writebacks: Vec<ToctreeWriteback> = Vec::new();
 
     for (docname, document) in &docs {
         for id in document.preorder_ids() {
             let Ok(node) = document.get(id) else {
                 continue;
             };
-            if node.kind != NodeKind::Toctree {
+            if node.kind == NodeKind::Toctree {
+                let parsed = decode_toctree(id, node, docname);
+                let resolved = resolve_entries(parsed, &found, &spec, &suffixes, &mut warnings);
+                let (refs, titles, kinds) = resolved_entry_arrays(&resolved);
+                writebacks.push(ToctreeWriteback {
+                    docname: docname.clone(),
+                    id,
+                    includefiles: resolved.includefiles.clone(),
+                    refs,
+                    titles,
+                    kinds,
+                });
+                toctrees.push(resolved);
                 continue;
             }
-            let parsed = decode_toctree(id, node, docname);
-            let resolved = resolve_entries(parsed, &found, &spec, &suffixes, &mut warnings);
-            writebacks.push((docname.clone(), id, resolved.includefiles.clone()));
-            toctrees.push(resolved);
+            // Upstream notes toctrees inside `only` branches while collecting
+            // environment TOCs, before `OnlyNodeTransform` strips the branch
+            // for builders whose tags do not match. Scribe's `only` transform
+            // runs earlier and leaves the directive's refs on the replacement
+            // comment; note them here so their targets are not falsely
+            // reported as `toc.not_included`.
+            if node.kind == NodeKind::Comment
+                && node.attrs.contains_key(scribe_rst::toctree::ATTR_ONLY_TOC_REFS)
+            {
+                let refs = list_attr(node, scribe_rst::toctree::ATTR_ONLY_TOC_REFS);
+                let kinds = list_attr(node, scribe_rst::toctree::ATTR_ONLY_TOC_KINDS);
+                let entries = refs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, raw_ref)| ToctreeEntry {
+                        title: None,
+                        target: match kinds.get(index).map(String::as_str) {
+                            Some(KIND_EXTERNAL) => EntryTarget::External(raw_ref.clone()),
+                            Some(KIND_SELF) => EntryTarget::SelfRef,
+                            _ => EntryTarget::Doc(raw_ref.clone()),
+                        },
+                        raw_ref,
+                    })
+                    .collect();
+                let parsed = ParsedToctree {
+                    docname: docname.clone(),
+                    options: ToctreeOptions { glob: true, ..ToctreeOptions::default() },
+                    entries,
+                    includefiles: Vec::new(),
+                    span: node.span,
+                    line: node.source.as_ref().and_then(|source| source.line),
+                    node_id: id,
+                };
+                let resolved = resolve_entries(parsed, &found, &spec, &suffixes, &mut warnings);
+                toctrees.push(resolved);
+            }
         }
     }
 
@@ -717,19 +772,23 @@ pub fn collect_toctrees_with_sources(
     let number_updates = collect_number_updates(&docs, &section_numbers, &figure_numbers);
 
     // ----- write resolved state back into the stored doctrees -------------
-    for (docname, id, includefiles) in &writebacks {
-        if let Some(snapshot) = env.documents.get_mut(docname) {
+    for writeback in &writebacks {
+        if let Some(snapshot) = env.documents.get_mut(&writeback.docname) {
             if let Some(document) = snapshot.doctree.as_mut() {
-                if let Ok(node) = document.get_mut(*id) {
-                    node.set_list(ATTR_ENTRIES, includefiles.clone());
-                    node.set_list(ATTR_INCLUDEFIES, includefiles.clone());
+                if let Ok(node) = document.get_mut(writeback.id) {
+                    node.set_list(ATTR_ENTRIES, writeback.includefiles.clone());
+                    node.set_list(ATTR_INCLUDEFIES, writeback.includefiles.clone());
+                    node.set_list(ATTR_ENTRY_REFS, writeback.refs.clone());
+                    node.set_list(ATTR_ENTRY_TITLES, writeback.titles.clone());
+                    node.set_list(ATTR_ENTRY_KINDS, writeback.kinds.clone());
                 }
             }
-            if let Some(targets) = toctree_targets.get(docname) {
+            if let Some(targets) = toctree_targets.get(&writeback.docname) {
                 snapshot.toctree_targets = targets.iter().cloned().collect();
             }
         }
     }
+
     for (docname, id, key, value) in number_updates {
         if let Some(document) = env
             .documents
@@ -958,6 +1017,147 @@ fn resolve_entries(
         tree.includefiles.reverse();
     }
     tree
+}
+
+/// Materialise a collector's resolved toctree entries onto the matching
+/// `NodeKind::Toctree` nodes of a working doctree.
+///
+/// The directive parser stores the raw refs (`entry_refs`) so the collector
+/// can expand globs. The exported-doctree expander, however, reads those same
+/// raw refs, so a `:glob:` pattern would otherwise be emitted verbatim and a
+/// `:reversed:` toctree would not be reversed in the written output. Upstream
+/// resolves toctrees before handing the doctree to a writer; this helper
+/// performs the equivalent write-back on a builder's working copy. It is
+/// additive and idempotent: trees with no matching collector entry are left
+/// untouched.
+fn resolved_entry_arrays(tree: &ParsedToctree) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut refs = Vec::with_capacity(tree.entries.len());
+    let mut titles = Vec::with_capacity(tree.entries.len());
+    let mut kinds = Vec::with_capacity(tree.entries.len());
+    for entry in &tree.entries {
+        let (reference, kind) = match &entry.target {
+            EntryTarget::Doc(name) => (name.clone(), KIND_DOC),
+            EntryTarget::External(uri) => (uri.clone(), KIND_EXTERNAL),
+            EntryTarget::SelfRef => (String::new(), KIND_SELF),
+        };
+        refs.push(reference);
+        titles.push(entry.title.clone().unwrap_or_default());
+        kinds.push(kind.to_owned());
+    }
+    (refs, titles, kinds)
+}
+
+pub fn materialize_resolved_entries(
+    document: &mut Document,
+    docname: &str,
+    collection: &ToctreeCollection,
+) -> Result<usize, AstError> {
+    let ids: Vec<NodeId> = document
+        .preorder_ids()
+        .into_iter()
+        .filter(|&id| document.get(id).is_ok_and(|node| node.kind == NodeKind::Toctree))
+        .collect();
+    let mut updated = 0usize;
+    for id in ids {
+        let Some(tree) = collection
+            .toctrees
+            .iter()
+            .find(|tree| tree.node_id == id && tree.docname == docname)
+        else {
+            continue;
+        };
+        let (refs, titles, kinds) = resolved_entry_arrays(tree);
+        let Ok(node) = document.get_mut(id) else { continue };
+        node.set_list(ATTR_ENTRY_REFS, refs.clone());
+        node.set_list(ATTR_ENTRY_TITLES, titles);
+        node.set_list(ATTR_ENTRY_KINDS, kinds);
+        node.set_list(ATTR_ENTRIES, tree.includefiles.clone());
+        node.set_list(ATTR_INCLUDEFIES, tree.includefiles.clone());
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// Effective `:tocdepth:` of a document, from collected metadata or from the
+/// raw docinfo field list when the metadata transform has not run yet.
+#[must_use]
+pub fn document_tocdepth(document: &Document) -> Option<i32> {
+    if let Some(value) = document.metadata.tocdepth() {
+        return Some(value);
+    }
+    let first = document.children(document.root).ok()?.first().copied()?;
+    if document.get(first).ok()?.kind != NodeKind::FieldList {
+        return None;
+    }
+    for field in document.children(first).ok()? {
+        let Ok(node) = document.get(*field) else { continue };
+        if node.kind != NodeKind::Field {
+            continue;
+        }
+        for child in node.children.clone() {
+            let Ok(child_node) = document.get(child) else { continue };
+            if child_node.kind == NodeKind::FieldName
+                && child_node.astext(document).trim() == "tocdepth"
+            {
+                let body = node
+                    .children
+                    .iter()
+                    .find_map(|&id| {
+                        document.get(id).ok().filter(|n| n.kind == NodeKind::FieldBody).map(|n| n.astext(document))
+                    })
+                    .unwrap_or_default();
+                return Some(body.trim().parse::<i32>().unwrap_or(0));
+            }
+        }
+    }
+    None
+}
+
+/// Copy resolved section numbers onto a builder's working doctree.
+///
+/// The collector writes `secnumber` onto its environment snapshot, but
+/// builders render a separate working copy. Without this pass the HTML writer
+/// cannot emit upstream's `<span class="section-number">…</span>` headings.
+pub fn propagate_section_numbers(
+    document: &mut Document,
+    docname: &str,
+    numbers: &SectionNumbers,
+) -> Result<usize, AstError> {
+    let ids: Vec<NodeId> = document
+        .preorder_ids()
+        .into_iter()
+        .filter(|&id| document.get(id).is_ok_and(|node| node.kind == NodeKind::Section))
+        .collect();
+    let mut updated = 0usize;
+    for id in ids {
+        let anchors: Vec<String> = document
+            .get(id)
+            .ok()
+            .and_then(|node| node.ids().ok())
+            .unwrap_or_default();
+        let value = anchors.iter().find_map(|anchor| {
+            numbers
+                .get(docname, anchor)
+                .or_else(|| numbers.get(docname, &format!("#{anchor}")))
+        }).or_else(|| numbers.get(docname, ""));
+        if let Some(value) = value {
+            if !value.is_empty() {
+                let display = value.iter().map(i64::to_string).collect::<Vec<_>>().join(" ");
+                if let Ok(node) = document.get_mut(id) {
+                    node.attrs.set_str("secnumber", &display);
+                }
+                for child in document.get(id).map(|n| n.children.clone()).unwrap_or_default() {
+                    if document.get(child).is_ok_and(|node| node.kind == NodeKind::Title) {
+                        if let Ok(node) = document.get_mut(child) {
+                            node.attrs.set_str("secnumber", &display);
+                        }
+                    }
+                }
+                updated += 1;
+            }
+        }
+    }
+    Ok(updated)
 }
 
 fn is_glob(value: &str) -> bool {
