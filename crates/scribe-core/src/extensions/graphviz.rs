@@ -100,7 +100,9 @@ impl GraphvizRender {
                 continue;
             }
             let code = if let Some(filename) = filename {
-                let path = self.source_dir.join(&filename);
+                // Sphinx treats a leading '/' as source-root-relative.
+                let relative = filename.trim_start_matches('/');
+                let path = self.source_dir.join(relative);
                 match fs::read_to_string(&path) {
                     Ok(text) => text,
                     Err(_) => {
@@ -319,7 +321,10 @@ impl Directive for GraphvizDirective {
                     span: SourceSpan::new((ctx.span.start as usize).into(), (ctx.span.end.saturating_sub(ctx.span.start)) as usize),
                 });
             }
-            let path = ctx.global.source_dir.as_ref().map_or_else(PathBuf::new, |dir| dir.join(argument));
+            // A leading '/' is source-root-relative in Sphinx, not filesystem
+            // absolute (e.g. `.. graphviz:: /_static/diagrams/flow.dot`).
+            let relative = argument.trim_start_matches('/');
+            let path = ctx.global.source_dir.as_ref().map_or_else(|| PathBuf::from(relative), |dir| dir.join(relative));
             match fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(_) => {

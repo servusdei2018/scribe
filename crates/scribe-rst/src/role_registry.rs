@@ -380,6 +380,7 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         ("numref", "numref", Literal, true),
         ("envvar", "envvar", Literal, false),
         ("confval", "confval", Literal, true),
+        ("event", "event", Literal, true),
         ("label", "label", Literal, false),
         ("option", "option", Literal, true),
         ("token", "token", Literal, false),
@@ -420,6 +421,7 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         ("std:ref", "ref"), ("std:doc", "doc"), ("std:option", "option"), ("std:term", "term"),
         ("std:numref", "numref"), ("std:envvar", "envvar"), ("std:token", "token"),
         ("std:confval", "confval"), ("std:label", "label"),
+        ("std:event", "event"),
         ("std:keyword", "keyword"), ("std:download", "download"),
     ] {
         let inner = if matches!(reftype, "ref" | "doc" | "term") { Inline } else { Literal };
@@ -451,6 +453,15 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         let (domain, reftype) = name.split_once(':').unwrap_or((name, name));
         roles.push(BuiltinRole::new(name, RoleClass::Xref {
             domain: domain.to_owned(),
+            reftype: reftype.to_owned(),
+            inner: Literal,
+            warn: false,
+        }));
+    }
+    // Legacy Sphinx aliases for the reST-domain roles.
+    for (name, reftype) in [("dudir", "dir"), ("durole", "role")] {
+        roles.push(BuiltinRole::new(name, RoleClass::Xref {
+            domain: "rst".to_owned(),
             reftype: reftype.to_owned(),
             inner: Literal,
             warn: false,

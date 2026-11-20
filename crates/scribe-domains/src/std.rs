@@ -125,6 +125,7 @@ fn object_types() -> &'static [ObjectTypeAlias] {
             ObjectType::new("token", "grammar token", &["token"]).with_priority(-1),
             ObjectType::new("label", "reference label", &["ref", "keyword"]).with_priority(-1),
             ObjectType::new("confval", "configuration value", &["confval"]),
+            ObjectType::new("event", "event", &["event"]),
             ObjectType::new("envvar", "environment variable", &["envvar"]),
             ObjectType::new("cmdoption", "program option", &["option"]),
             ObjectType::new("doc", "document", &["doc"]).with_priority(-1),
@@ -134,7 +135,7 @@ fn object_types() -> &'static [ObjectTypeAlias] {
 
 fn directive_names() -> &'static [&'static str] {
     DIRECTIVES.get_or_init(|| {
-        vec!["program", "cmdoption", "option", "confval", "envvar", "glossary", "productionlist"]
+        vec!["program", "cmdoption", "option", "confval", "envvar", "glossary", "productionlist", "event"]
     })
 }
 
@@ -142,7 +143,7 @@ fn role_names() -> &'static [&'static str] {
     ROLES.get_or_init(|| {
         vec![
             "option", "confval", "envvar", "token", "term", "ref", "numref", "keyword", "doc",
-            "download", "label", "any",
+            "download", "label", "event", "any",
         ]
     })
 }
@@ -442,6 +443,8 @@ impl StandardDomain {
         // first path component and yield "unknown document".
         let docname = match path.strip_prefix('/') {
             Some(absolute) => docname_join("", absolute),
+            // `./name` is project-root relative in Sphinx's `:doc:` role.
+            None if path.starts_with("./") => docname_join("", &path[2..]),
             None => docname_join(refdoc, path),
         };
         if !ctx.env.is_some_and(|env| env.has_doc(&docname)) {
@@ -581,7 +584,13 @@ impl StandardDomain {
                         self.note_program_option(docname, current_program.as_deref(), &alias, &alias_anchor);
                     }
                 } else {
-                    self.note_object(ctx, &objtype, &name, &labelid, span);
+                    // A single directive may declare several aliases (e.g.
+                    // `.. confval:: master_doc\n   root_doc`). Register every
+                    // name with its matching anchor, not just the first.
+                    for (index, alias) in names.iter().enumerate() {
+                        let alias_id = ids.get(index).unwrap_or(&labelid);
+                        self.note_object(ctx, &objtype, alias, alias_id, span);
+                    }
                 }
             }
 

@@ -688,7 +688,46 @@ use crate::role_registry::{classify_builtin, RoleClass};
 
 /// Classifies a role through the Phase 06 registry, with a fallback for
 /// fully-qualified `domain:role` spellings (`:std:ref:`, `:py:func:`, ...).
+/// Parses an `:external:` / `:external+<inv>:` role name.
+///
+/// Mirrors upstream `IntersphinxRole.get_inventory_and_name_suffix`: the
+/// optional inventory precedes the domain/role suffix, which may be either
+/// `domain:role` or just `role`. Returns `(inventory, domain, role)`.
+fn parse_external_role(role: &str, default_domain: Option<&str>) -> Option<(Option<String>, String, String)> {
+    let suffix = if let Some(rest) = role.strip_prefix("external+") {
+        let (inv, rest) = rest.split_once(':')?;
+        if inv.is_empty() {
+            return None;
+        }
+        (Some(inv.to_owned()), rest)
+    } else {
+        (None, role.strip_prefix("external:")?)
+    };
+    if suffix.1.is_empty() {
+        return None;
+    }
+    let (domain, reftype) = match suffix.1.split_once(':') {
+        Some((domain, reftype)) if !domain.is_empty() && !reftype.is_empty() && !reftype.contains(':') => {
+            (domain.to_owned(), reftype.to_owned())
+        }
+        Some(_) => return None,
+        None => (default_domain.unwrap_or("std").to_owned(), suffix.1.to_owned()),
+    };
+    Some((suffix.0, domain, reftype))
+}
+
 fn classify_role(role: &str, default_domain: Option<&str>) -> Option<RoleClass> {
+    // `:external:` / `:external+<inv>:` roles are intersphinx cross references.
+    // The suffix names the real role; the inventory, when given, is recorded
+    // on the emitted pending_xref by `emit_xref_role`.
+    if let Some((_inventory, domain, reftype)) = parse_external_role(role, default_domain) {
+        return Some(RoleClass::Xref {
+            domain,
+            reftype,
+            inner: crate::role_registry::InnerKind::Literal,
+            warn: true,
+        });
+    }
     // An unprefixed role is first looked up in the active default domain
     // (Sphinx's `SphinxRole` lookup in `util/docutils.py`). Only when the
     // default domain does not register the name do we fall back to the
@@ -1761,6 +1800,16 @@ fn emit_xref_role(
         node = node.with_attr("refdoc", doc.to_owned());
     }
     node = node.with_attr("classes", classes);
+    // An `:external[+inv]:` role claims its reference for intersphinx. The
+    // resolver reads these two attributes to restrict the lookup and to build
+    // the upstream "external <domain>:<type> reference target not found"
+    // diagnostic when no inventory matches.
+    if let Some((inventory, _, _)) = parse_external_role(role, None) {
+        node = node.with_attr("intersphinx", true);
+        if let Some(name) = inventory {
+            node = node.with_attr("inventory", name);
+        }
+    }
     let inner_node = InlineNode::element(inner.node_kind(), title_span, 0)
         .with_child(InlineNode::text_node(title.clone(), title_span, 0));
     node = node.with_child(inner_node);
@@ -1958,6 +2007,30 @@ mod tests {
     /// closing `` starts at `body` yields empty text. The synthesised text
     /// child must carry a zero-width span clamped inside the literal, never
     /// the global `Span { 0, 0 }`.
+    #[test]
+    fn external_roles_are_parsed_as_intersphinx_xrefs() {
+        for (source, domain, role, inventory) in [
+            (":external+python:py:func:`f`", "py", "func", Some("python")),
+            (":external:py:class:`C`", "py", "class", None),
+            (":external:ref:`target`", "std", "ref", None),
+        ] {
+            let result = parse(source);
+            let xref = result.nodes.iter().find(|n| n.kind == NodeKind::PendingXref)
+                .unwrap_or_else(|| panic!("no pending_xref for {source}: {:?}", tags(&result)));
+            let attr = |key: &str| xref.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+            assert_eq!(attr("refdomain"), Some(AttributeValue::Str(domain.into())), "{source}");
+            assert_eq!(attr("reftype"), Some(AttributeValue::Str(role.into())), "{source}");
+            assert_eq!(attr("intersphinx"), Some(AttributeValue::Bool(true)), "{source}");
+            assert_eq!(
+                attr("inventory"),
+                inventory.map(|name| AttributeValue::Str(name.into())),
+                "{source}"
+            );
+        }
+        // Malformed external role names stay problematic, never panic.
+        assert!(!parse(":external+py:`x`").nodes.iter().any(|n| n.kind == NodeKind::PendingXref));
+    }
+
     #[test]
     fn empty_literal_child_span_is_clamped_to_parent() {
         let r = parse("||[````]");

@@ -247,7 +247,10 @@ impl CppDomain {
                 }
             }
         }
-        if specific {
+        // Bare identifiers from expression tokens refer to template/function
+        // parameters registered as `Owner::param`; resolve them by suffix even
+        // without the `specific` flag (upstream keeps them addressable).
+        if specific || !target.contains("::") {
             let suffix = format!("::{target}");
             let mut matches = Vec::new();
             for (name, entries) in data.objects.iter() {
@@ -407,8 +410,15 @@ impl Domain for CppDomain {
         }
         // Upstream raises `NoUri` for names in the `std::` namespace: they are
         // library types, not project symbols, and never warn.
+        let bare = target.trim_end_matches(['*', '&']).trim();
         if target.starts_with("std::") || target == "std" || target == "type"
-            || (target.contains("::") && matches!(typ, "identifier")) {
+            || (target.contains("::") && matches!(typ, "identifier"))
+            // Builtin types and single-letter template parameters carry no
+            // documentation target; upstream renders them as plain signature
+            // tokens rather than cross references.
+            || crate::cpp::parser::BUILTIN_TYPES.contains(&bare)
+            || (typ == "type" && bare.len() == 1 && bare.chars().all(|c| c.is_ascii_uppercase()))
+        {
             return Ok(Some(ResolvedReference::default().passthrough()));
         }
         let scope = document
@@ -442,7 +452,12 @@ impl Domain for CppDomain {
         // Mirror upstream `CPPDomain._check_type`: a role that cannot address
         // the target's object type still resolves, but logs a diagnostic.
         if role != "any" && role != "identifier" && role != "expr" && role != "texpr" {
-            let allowed = objtypes_for_role(role);
+            let mut allowed = objtypes_for_role(role);
+            // A C++ alias is addressable by the same roles as a type/identifier;
+            // upstream's declaration objectType for `using X = Y` is `type`.
+            if entry.objtype == "alias" {
+                allowed.push("alias");
+            }
             if !allowed.is_empty() && !allowed.contains(&entry.objtype.as_str()) {
                 let message = format!("cpp:{role} targets a {} ({name}).", entry.objtype);
                 let source = document.get(node_id).ok().and_then(|node| node.source.as_ref());

@@ -365,6 +365,13 @@ impl Domain for CDomain {
         if matches.is_empty() && typ == "identifier" {
             matches = self.find_obj(target, "type", &scope);
         }
+        if matches.is_empty() && target.contains('.') {
+            // Anonymous declarations (`.. c:var:: ... Data.@data.a`) are
+            // addressable by their short name (`Data.a`) in `:c:var:` roles.
+            if let Some((head, last)) = target.rsplit_once('.') {
+                matches = self.find_obj(&format!("{head}.@data.{last}"), typ, &scope);
+            }
+        }
         if matches.is_empty() {
             return Ok(None);
         }

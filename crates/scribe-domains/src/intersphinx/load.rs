@@ -256,7 +256,7 @@ pub fn fetch_one(
     } else {
         entry.locations.clone()
     };
-    let cache_key = format!("{} {}", entry.name, entry.target_uri);
+    let cache_key = format!("{}\u{0}{}", entry.name, entry.target_uri);
 
     for location in locations {
         let inv_location = match location {
@@ -283,8 +283,8 @@ pub fn fetch_one(
             }
         }
 
-        let raw = match fetch_bytes(&inv_location, options) {
-            Ok(bytes) => bytes,
+        let (raw, final_location) = match fetch_bytes(&inv_location, options) {
+            Ok(pair) => pair,
             Err(error) => {
                 warnings.push(error.to_string());
                 // Offline fallback: a stale inventory beats no inventory.
@@ -324,7 +324,13 @@ pub fn fetch_one(
                 }
             }
         }
-        match Inventory::loads(&raw, &entry.target_uri) {
+        // Upstream `_fetch_inventory_url` rewrites the *base* URI of the
+        // generated links when the inventory download was redirected and the
+        // configured target still points at the original location.  Mirror
+        // that so links from moved inventories (notably readthedocs) keep
+        // working.
+        let effective_uri = rewrite_target_uri(&entry.target_uri, &inv_location, &final_location);
+        match Inventory::loads(&raw, &effective_uri) {
             Ok(inventory) => return success(entry, inventory, warnings, false),
             Err(error) => warnings.push(format!(
                 "inventory {} not readable due to {error}",
@@ -362,7 +368,10 @@ fn is_http(location: &str) -> bool {
 }
 
 /// Fetches the raw bytes for one location (HTTP, `file://` or plain path).
-fn fetch_bytes(location: &str, options: &FetchOptions) -> IntersphinxResult<Vec<u8>> {
+///
+/// The returned string is the *final* location: for HTTP it is the URL after
+/// redirects, which upstream uses to rewrite the base URI of generated links.
+fn fetch_bytes(location: &str, options: &FetchOptions) -> IntersphinxResult<(Vec<u8>, String)> {
     if is_http(location) {
         return fetch_http(location, options);
     }
@@ -372,7 +381,25 @@ fn fetch_bytes(location: &str, options: &FetchOptions) -> IntersphinxResult<Vec<
         PathBuf::from(location)
     };
     let path = resolve_local_path(&path, options.source_dir.as_deref());
-    fs_read(&path)
+    fs_read(&path).map(|bytes| (bytes, location.to_owned()))
+}
+
+/// Mirrors upstream `_fetch_inventory_url`'s target-URI rewrite.  When the
+/// download was redirected and the configured base URI still points at the
+/// original inventory (or its directory), use the redirected directory as the
+/// new base URI so relative links in the inventory remain correct.
+fn rewrite_target_uri(target_uri: &str, inv_location: &str, final_location: &str) -> String {
+    if inv_location == final_location {
+        return target_uri.to_owned();
+    }
+    let dirname = |uri: &str| -> String {
+        uri.rfind('/').map_or_else(String::new, |index| uri[..index].to_owned())
+    };
+    let inv_dir = dirname(inv_location);
+    if target_uri == inv_location || target_uri == inv_dir || target_uri == format!("{inv_dir}/") {
+        return dirname(final_location);
+    }
+    target_uri.to_owned()
 }
 
 fn decode_file_url(rest: &str) -> PathBuf {
@@ -408,7 +435,7 @@ fn fs_read(path: &Path) -> IntersphinxResult<Vec<u8>> {
     })
 }
 
-fn fetch_http(location: &str, options: &FetchOptions) -> IntersphinxResult<Vec<u8>> {
+fn fetch_http(location: &str, options: &FetchOptions) -> IntersphinxResult<(Vec<u8>, String)> {
     let url = strip_basic_auth(location);
     let mut client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(options.max_redirects));
@@ -440,7 +467,10 @@ fn fetch_http(location: &str, options: &FetchOptions) -> IntersphinxResult<Vec<u
         };
         match outcome.and_then(|response| response.error_for_status()) {
             Ok(response) => {
-                return response.bytes().map(|bytes| bytes.to_vec()).map_err(|error| {
+                // `Response::url` is the URL after all redirects; feed it back
+                // so `rewrite_target_uri` can update the base URI when needed.
+                let final_url = response.url().to_string();
+                return response.bytes().map(|bytes| (bytes.to_vec(), final_url)).map_err(|error| {
                     IntersphinxError::Fetch { url: url.clone(), detail: error.to_string() }
                 });
             }
@@ -504,6 +534,37 @@ mod tests {
         assert_eq!(
             parse_mapping_value(&single),
             Some(("https://example.com/docs".into(), vec![Some("inv.objects.inv".into())]))
+        );
+    }
+
+    #[test]
+    fn redirect_rewrites_target_uri_only_for_matching_base() {
+        // Target equal to the original inventory's directory is rewritten to
+        // the redirected directory, mirroring upstream `_fetch_inventory_url`.
+        assert_eq!(
+            rewrite_target_uri(
+                "https://docs.readthedocs.io/en/stable",
+                "https://docs.readthedocs.io/en/stable/objects.inv",
+                "https://docs.readthedocs.io/en/stable/objects.inv",
+            ),
+            "https://docs.readthedocs.io/en/stable"
+        );
+        assert_eq!(
+            rewrite_target_uri(
+                "https://example.com/docs/",
+                "https://example.com/docs/objects.inv",
+                "https://cdn.example.com/mirror/objects.inv",
+            ),
+            "https://cdn.example.com/mirror"
+        );
+        // Unrelated base URIs are left untouched.
+        assert_eq!(
+            rewrite_target_uri(
+                "https://example.com/base",
+                "https://example.com/other/objects.inv",
+                "https://cdn.example.com/mirror/objects.inv",
+            ),
+            "https://example.com/base"
         );
     }
 

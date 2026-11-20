@@ -210,7 +210,7 @@ impl IntersphinxResolver {
     ) -> Option<IntersphinxReference> {
         let node = document.get(node_id).ok()?;
         let external = node.attrs.get_bool("intersphinx").ok().flatten().unwrap_or(false);
-        let explicit_inventory = node
+        let mut explicit_inventory = node
             .get_str("inventory")
             .ok()
             .flatten()
@@ -221,6 +221,29 @@ impl IntersphinxResolver {
                 let _ = ctx;
                 None
             });
+        // Self-referential targets (`intersphinx_resolve_self`) carry the
+        // project name as a prefix; strip it before looking anything up.
+        let resolve_self = ctx.get_str("intersphinx_resolve_self").unwrap_or("");
+        let mut effective_target = target;
+        if !resolve_self.is_empty() {
+            if let Some(rest) = target.strip_prefix(&format!("{resolve_self}:")) {
+                effective_target = rest;
+            }
+        }
+
+        // Upstream `resolve_reference_detect_inventory` splits a target at its
+        // first ':' and, when the prefix names a loaded inventory, retries the
+        // remainder *in that inventory only*. This resolves `:ref:` links like
+        // `python:comments` or `readthedocs:tutorial/index`.
+        if explicit_inventory.is_none() {
+            if let Some((inv_name, rest)) = effective_target.split_once(':') {
+                if !rest.is_empty() && self.contains_inventory(inv_name) {
+                    explicit_inventory = Some(inv_name.to_owned());
+                    effective_target = rest;
+                }
+            }
+        }
+
         let honor_disabled = !external && explicit_inventory.is_none();
         if honor_disabled && self.disabled_reftypes.contains("*") {
             return None;
@@ -230,16 +253,6 @@ impl IntersphinxResolver {
         if let Some(name) = explicit_view {
             if !self.contains_inventory(name) {
                 return None;
-            }
-        }
-
-        // Self-referential targets (`intersphinx_resolve_self`) carry the
-        // project name as a prefix; strip it before looking anything up.
-        let resolve_self = ctx.get_str("intersphinx_resolve_self").unwrap_or("");
-        let mut effective_target = target;
-        if !resolve_self.is_empty() {
-            if let Some(rest) = target.strip_prefix(&format!("{resolve_self}:")) {
-                effective_target = rest;
             }
         }
 
@@ -356,7 +369,14 @@ impl IntersphinxResolver {
         explicit_inventory: Option<&str>,
         ctx: &DomainContext<'_>,
     ) -> Option<(InventoryItem, String, Option<String>)> {
-        for objtype in objtypes {
+        // `typing.Annotated` and friends are stored as `py:data` in the Python
+        // inventory although referenced with `:py:class:`; upstream's domain
+        // object-type table makes both spellings addressable.
+        let mut objtypes = objtypes.to_vec();
+        if domain_name == "py" && objtypes.iter().any(|kind| kind == "class") {
+            objtypes.push("data".to_owned());
+        }
+        for objtype in &objtypes {
             let full_type = format!("{domain_name}:{objtype}");
             if explicit_inventory.is_none()
                 && (self.disabled_reftypes.contains(&full_type)
@@ -382,6 +402,18 @@ impl IntersphinxResolver {
                     .iter()
                     .find(|(name, _)| name.to_lowercase() == lowered)
                 {
+                    return Some((item.clone(), name.clone(), Some(inv.clone())));
+                }
+            }
+            // Static autodoc sees bare annotation names (`Sequence`) where
+            // upstream's dynamic importer sees the fully-qualified object
+            // (`collections.abc.Sequence`). Resolve a bare target by a unique
+            // short-name suffix match, which is how Python's type names are
+            // conventionally rendered. BTreeMap iteration is deterministic.
+            if !target.contains('.') && domain_name == "py" {
+                if let Some((name, (item, inv))) = objects.iter().find(|(name, _)| {
+                    name.rsplit_once('.').is_some_and(|(_, short)| short == target)
+                }) {
                     return Some((item.clone(), name.clone(), Some(inv.clone())));
                 }
             }

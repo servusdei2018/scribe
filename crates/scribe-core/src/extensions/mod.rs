@@ -64,6 +64,14 @@ pub const BUILTIN_EXTENSIONS: &[&str] = &[
     "sphinx.ext.napoleon",
     "sphinx.ext.autosummary",
     "sphinx.ext.doctest",
+    // Intersphinx is wired into the build pipeline by `scribe-builders`; the
+    // remaining names are recognized built-ins whose directives/effects are
+    // handled natively or degrade to inert placeholders rather than an
+    // "extension not found" warning.
+    "sphinx.ext.intersphinx",
+    "sphinx.ext.inheritance_diagram",
+    "sphinx.ext.coverage",
+    "sphinx.ext.mathjax",
     // Sphinx's own test-suite extension for `test-prolog`. Its `setup()` only
     // registers a custom source parser (`.md` → `markdown`); scribe models that
     // registration natively (see `apply_parser_extension_suffixes`) and emits

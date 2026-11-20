@@ -23,7 +23,10 @@ use scribe_core::{
     ActivatedExtensions, BuildEnvironment, Event, InteropBridge, Phase, ToctreeCollection,
     TransformContext, UpdateOptions, WarningCode, WarningLocation,
 };
-use scribe_domains::{prepare_document, diagnostics::DomainDiagnostic, DomainRegistry};
+use scribe_domains::{
+    fetch_all, prepare_document, diagnostics::DomainDiagnostic, DomainRegistry, FetchOptions,
+    IntersphinxMapping, IntersphinxResolver,
+};
 use scribe_rst::{
     parse_with_options, resolve_output, Context as RstContext, Directive, DirectiveContext,
     DirectiveError, DirectiveRegistry, ParseOptions,
@@ -319,6 +322,13 @@ pub fn prepare(
     let tags = Tags::with_tags(std::iter::empty::<String>());
     let registry = DomainRegistry::builtin();
     registry.load_from_env(env);
+    let inv_cache_dir = options.doctree_dir.clone().unwrap_or_else(|| outdir.join(".doctrees"));
+    warnings.extend(attach_intersphinx(
+        &registry,
+        config,
+        source_dir,
+        Some(&inv_cache_dir),
+    ));
 
     // Parsing is CPU-bound per document; `rayon` keeps the read phase parallel.
     // Results are collected into a BTreeMap so downstream output is
@@ -563,6 +573,44 @@ impl Directive for AliasDirective {
     fn run(&self, ctx: &mut DirectiveContext<'_>) -> Result<Vec<scribe_ast::NodeId>, DirectiveError> {
         self.inner.run(ctx)
     }
+}
+
+/// Loads every configured `intersphinx_mapping` inventory and attaches the
+/// merged resolver to `registry`, so domain resolution can fall back to
+/// external inventories (the upstream `sphinx.ext.intersphinx` seam).
+///
+/// Cached inventories live under `cache_dir/__intersphinx_cache__`, matching
+/// upstream's doctree-local cache location. Supplying local `objects.inv`
+/// paths in `intersphinx_mapping` (or pre-seeding that cache) makes the build
+/// fully offline. Fetch failures are non-fatal warnings, never errors.
+pub fn attach_intersphinx(
+    registry: &DomainRegistry,
+    config: &Config,
+    source_dir: &std::path::Path,
+    cache_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let (mapping, mut warnings) = IntersphinxMapping::from_config(config);
+    if mapping.is_empty() {
+        return warnings;
+    }
+    let disabled = config.get_strings("intersphinx_disabled_reftypes").unwrap_or_default();
+    let timeout = config.get_float("intersphinx_timeout").map(std::time::Duration::from_secs_f64);
+    let cache_limit_days = config.get_int("intersphinx_cache_limit").unwrap_or(5);
+    let inv_cache_dir = cache_dir.map(|dir| dir.join("__intersphinx_cache__"));
+    let options = FetchOptions {
+        timeout,
+        cache_limit_days,
+        cache_dir: inv_cache_dir,
+        source_dir: Some(source_dir.to_path_buf()),
+        ..FetchOptions::default()
+    };
+    let outcomes = fetch_all(&mapping, &options);
+    for outcome in &outcomes {
+        warnings.extend(outcome.warnings.iter().cloned());
+    }
+    let resolver = IntersphinxResolver::new(outcomes, &disabled);
+    registry.set_intersphinx(resolver);
+    warnings
 }
 
 /// Extract the first section title of a document, if any.

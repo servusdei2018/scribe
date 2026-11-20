@@ -44,13 +44,15 @@ fn metadata_matches_upstream_standard_domain() {
     assert_eq!(domain.label(), "Default");
     assert_eq!(domain.data_version(), 1);
     let names: Vec<&str> = domain.object_types().iter().map(|object| object.name.as_str()).collect();
-    assert_eq!(names, ["term", "token", "label", "confval", "envvar", "cmdoption", "doc"]);
+    // `event` is registered natively to mirror `sphinx/doc/conf.py`'s
+    // `app.add_object_type('event', ...)` in its `setup()` hook.
+    assert_eq!(names, ["term", "token", "label", "confval", "event", "envvar", "cmdoption", "doc"]);
     assert_eq!(domain.object_types()[2].roles, ["ref", "keyword"]);
     assert_eq!(
         domain.directive_names(),
-        &["program", "cmdoption", "option", "confval", "envvar", "glossary", "productionlist"]
+        &["program", "cmdoption", "option", "confval", "envvar", "glossary", "productionlist", "event"]
     );
-    for role in ["option", "confval", "envvar", "token", "term", "ref", "numref", "keyword", "doc", "download", "label", "any"] {
+    for role in ["option", "confval", "envvar", "token", "term", "ref", "numref", "keyword", "doc", "download", "label", "event", "any"] {
         assert!(domain.role_names().contains(&role), "missing role {role}");
     }
     assert_eq!(domain.get_type_name("label", false), "reference label");

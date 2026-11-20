@@ -181,17 +181,34 @@ pub(crate) fn resolve_pending_xrefs_inner(
             .unwrap_or(false);
         let domain = if plan.domain.is_empty() { None } else { Some(plan.domain.as_str()) };
 
-        let result = if external {
-            None
-        } else if plan.domain.is_empty() && plan.typ == "any" {
-            registry
-                .resolve_any_xref(&scoped, &plan.target, plan.id, plan.contnode, document)?
-                .into_iter()
-                .next()
-                .map(|(_, reference)| reference)
-        } else {
-            registry.resolve_xref(&scoped, &plan.typ, &plan.target, plan.id, plan.contnode, document)?
+        let resolve_local = |target: &str| -> crate::error::DomainResult<Option<crate::types::ResolvedReference>> {
+            if plan.domain.is_empty() && plan.typ == "any" {
+                Ok(registry
+                    .resolve_any_xref(&scoped, target, plan.id, plan.contnode, document)?
+                    .into_iter()
+                    .next()
+                    .map(|(_, reference)| reference))
+            } else {
+                registry.resolve_xref(&scoped, &plan.typ, target, plan.id, plan.contnode, document)
+            }
         };
+        let mut result = if external { None } else { resolve_local(&plan.target)? };
+
+        // Upstream `resolve_reference_detect_inventory` rewrites a
+        // `self_name:target` reference to `target` and returns `None` so the
+        // ordinary resolver retries it against *local* objects.  Mirror that
+        // retry here (the intersphinx resolver separately strips the prefix
+        // for its own inventory lookup).
+        if result.is_none() && !external {
+            if let Some(self_name) = scoped
+                .get_str("intersphinx_resolve_self")
+                .filter(|name| !name.is_empty())
+            {
+                if let Some(stripped) = plan.target.strip_prefix(&format!("{self_name}:")) {
+                    result = resolve_local(stripped)?;
+                }
+            }
+        }
 
         match result {
             Some(reference) if !reference.passthrough && !reference.is_empty() => {

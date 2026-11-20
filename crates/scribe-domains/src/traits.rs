@@ -155,14 +155,23 @@ impl<'a> DomainContext<'a> {
             .iter()
             .map(|value| match value {
                 ConfigValue::Str(text) => text.clone(),
-                ConfigValue::List(items) => items
-                    .iter()
-                    .map(|item| match item {
-                        ConfigValue::Str(text) => text.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(":"),
+                ConfigValue::List(items) => {
+                    // Preserve the two-element tuple shape so
+                    // `parse_ignore_entry` can split type from target even
+                    // when both contain ':' (e.g. `('rst:role', 'c:any')`).
+                    let values = items
+                        .iter()
+                        .map(|item| match item {
+                            ConfigValue::Str(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect::<Vec<_>>();
+                    if values.len() == 2 {
+                        format!("[\"{}\", \"{}\"]", values[0], values[1])
+                    } else {
+                        values.join(":")
+                    }
+                }
                 other => other.to_string(),
             })
             .collect()

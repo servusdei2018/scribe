@@ -308,6 +308,16 @@ pub fn build_with_flavor(
         };
         let registry = DomainRegistry::builtin();
         registry.load_from_env(env);
+        // Load intersphinx inventories before any xref is resolved.  The
+        // resolver is attached to the registry, so the frozen resolve seams
+        // need no signature changes.
+        let inv_cache_dir = options.doctree_dir.clone().unwrap_or_else(|| outdir.join(".doctrees"));
+        warnings.extend(crate::build_common::attach_intersphinx(
+            &registry,
+            config,
+            source_dir,
+            Some(&inv_cache_dir),
+        ));
 
         let tag_names = options_filenames_tags(&options.filenames, flavor);
         let tags = Tags::with_tags(tag_names.iter().cloned());

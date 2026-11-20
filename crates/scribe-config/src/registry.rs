@@ -449,6 +449,13 @@ impl ConfigRegistry {
             entry("html_copy_source", ConfigValue::Bool(true), ConfigType::Bool, "html", "Copy source files."),
             entry("html_show_sourcelink", ConfigValue::Bool(true), ConfigType::Bool, "html", "Show source links."),
             entry("html_use_index", ConfigValue::Bool(true), ConfigType::Bool, "html", "Add an index page."),
+            // Upstream Sphinx settings used by `sphinx/doc/conf.py`. They are
+            // registered even where scribe does not act on them so that a
+            // self-host build does not report spurious `unknown-key` warnings.
+            entry("html_additional_pages", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "html", "Additional HTML pages."),
+            entry("html_use_opensearch", ConfigValue::from(""), ConfigType::Str, "html", "OpenSearch description URL."),
+            entry("REDIRECT_TEMPLATE", ConfigValue::Bool(false), ConfigType::Bool, "html", "Write a redirect template."),
+            entry("TYPE_CHECKING", ConfigValue::Bool(false), ConfigType::Bool, "", "Set when evaluating type-only imports."),
             entry("html_permalinks", ConfigValue::Bool(true), ConfigType::Bool, "html", "Add permalinks."),
             entry("html_show_copyright", ConfigValue::Bool(true), ConfigType::Bool, "html", "Show copyright."),
             entry("html_show_sphinx", ConfigValue::Bool(true), ConfigType::Bool, "html", "Show Sphinx credit."),
@@ -526,6 +533,16 @@ impl ConfigRegistry {
             entry("epub_tocdepth", ConfigValue::Int(6), ConfigType::Int, "epub", "Maximum EPUB navigation depth."),
             entry("epub_writing_mode", ConfigValue::from("horizontal"), ConfigType::Str, "epub", "EPUB page progression direction."),
             entry("epub_exclude_files", string_list(&[]), ConfigType::List, "epub", "Files to exclude from the EPUB archive."),
+            entry("epub_fix_images", ConfigValue::Bool(false), ConfigType::Bool, "epub", "Fix images for EPUB."),
+            entry("epub_max_image_width", ConfigValue::Int(0), ConfigType::Int, "epub", "Maximum EPUB image width."),
+            entry("epub_post_files", string_list(&[]), ConfigType::List, "epub", "Additional EPUB files appended to the archive."),
+            entry("epub_pre_files", string_list(&[]), ConfigType::List, "epub", "Additional EPUB files prepended to the archive."),
+            entry("epub_show_urls", ConfigValue::from("inline"), ConfigType::Str, "epub", "How to show URLs in EPUB."),
+            entry("epub_theme", ConfigValue::from("epub"), ConfigType::Str, "epub", "EPUB theme."),
+            entry("epub_use_index", ConfigValue::Bool(true), ConfigType::Bool, "epub", "Add an EPUB index."),
+            entry("latex_use_xindy", ConfigValue::Bool(true), ConfigType::Bool, "", "Use xindy for LaTeX indexes."),
+            entry("coverage_statistics_to_report", ConfigValue::Bool(false), ConfigType::Bool, "", "Write coverage statistics to a report."),
+            entry("coverage_statistics_to_stdout", ConfigValue::Bool(false), ConfigType::Bool, "", "Write coverage statistics to stdout."),
 
             // ---- autodoc / todo ----
             entry("autoclass_content", ConfigValue::from("class"),

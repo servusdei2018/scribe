@@ -47,6 +47,11 @@ pub struct PyOptions {
     pub single_line_type_parameter_list: bool,
     pub use_unqualified_type_names: bool,
     pub add_module_names: bool,
+    /// `local name -> fully qualified name` for `from x import y` bindings.
+    /// Used to qualify bare annotation names the same way upstream's dynamic
+    /// introspection does (e.g. `Sequence` -> `collections.abc.Sequence`).
+    #[serde(default)]
+    pub imports: std::collections::BTreeMap<String, String>,
 }
 
 impl PyOptions {
@@ -65,6 +70,9 @@ impl PyOptions {
 pub struct SigContext {
     pub module: Option<String>,
     pub class: Option<String>,
+    /// Import bindings of the module owning the signature, used to qualify
+    /// bare annotation names.
+    pub imports: std::collections::BTreeMap<String, String>,
 }
 
 /// Result of signature/name resolution, stored on the `desc` node for
@@ -1544,6 +1552,7 @@ fn prepare_children(
         }
         let inner = SigContext {
             module: options.module.clone().or_else(|| context.module.clone()),
+            imports: if options.imports.is_empty() { outer.imports.clone() } else { options.imports.clone() },
             class: if matches!(objtype.as_str(), "class" | "exception") && !signature_info.fullname.is_empty() {
                 Some(signature_info.fullname.clone())
             } else if !signature_info.classname.is_empty() && !outer.class.is_some() {
@@ -1593,7 +1602,7 @@ fn prepare_children(
         for grandchild in nested {
             if document.get(grandchild).is_ok_and(|node| node.kind == NodeKind::DescSignature) {
                 let saved = context.clone();
-                *context = SigContext { module: inner.module.clone(), class: outer.class.clone() };
+                *context = SigContext { module: inner.module.clone(), class: outer.class.clone(), imports: inner.imports.clone() };
                 let _ = prepare_children(document, grandchild, context);
                 *context = saved;
             } else {
@@ -1606,7 +1615,7 @@ fn prepare_children(
         *context = if matches!(objtype.as_str(), "class" | "exception") {
             outer
         } else {
-            SigContext { module: context.module.clone(), class: outer.class }
+            SigContext { module: context.module.clone(), class: outer.class, imports: outer.imports }
         };
     }
     Ok(())

@@ -64,14 +64,15 @@ fn auto_option_spec() -> OptionSpec {
         .with("class", OptionKind::ClassOption)
         .with("name", OptionKind::Unchanged);
     for flag in [
-        "no-index", "noindex", "no-index-entry", "noindexentry", "inherited-members",
+        "no-index", "noindex", "no-index-entry", "noindexentry",
         "show-inheritance", "undoc-members", "ignore-module-all", "no-value",
-        "private-members", "special-members",
     ] {
         spec = spec.with(flag, OptionKind::Flag);
     }
+    // These accept an optional member list (e.g. `:private-members: _foo, _bar`).
     for value in [
         "members", "exclude-members", "member-order", "annotation", "class-doc-from",
+        "private-members", "special-members", "inherited-members",
     ] {
         spec = spec.with(value, OptionKind::Unchanged);
     }
@@ -99,6 +100,34 @@ pub(crate) fn resolve_target(
         if object_path.is_empty() || module.find(&object_path).is_some() {
             return Some((module, object_path));
         }
+        // Follow re-exports: `sphinx.domains.__init__` does
+        // `from sphinx.domains._index import Index`, so `.. autoclass:: Index`
+        // under `.. module:: sphinx.domains` must resolve in `_index`.
+        let (first, rest) = match object_path.split_once('.') {
+            Some((first, rest)) => (first, Some(rest)),
+            None if !object_path.is_empty() => (object_path.as_str(), None),
+            None => continue,
+        };
+        for import in &module.imports {
+            if import.level != 0 || import.module.is_empty() {
+                continue;
+            }
+            let reexport = import
+                .names
+                .iter()
+                .any(|(name, alias)| alias.as_deref().unwrap_or(name) == first);
+            if !reexport {
+                continue;
+            }
+            if let Some(target_path) = resolve_module(&import.module, roots) {
+                if let Some(target_module) = load_cached(&import.module, &target_path) {
+                    let remaining = rest.map_or_else(|| first.to_owned(), |rest| format!("{first}.{rest}"));
+                    if target_module.find(&remaining).is_some() {
+                        return Some((target_module, remaining));
+                    }
+                }
+            }
+        }
     }
     None
 }
@@ -109,8 +138,28 @@ fn roots_and_config(ctx: &DirectiveContext<'_>) -> (Vec<PathBuf>, Option<Config>
     (roots, config)
 }
 
+/// Builds a `local name -> fully qualified name` map from a module's imports.
+fn import_map(module: &crate::model::ModuleInfo) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for import in &module.imports {
+        if import.level != 0 || import.module.is_empty() {
+            continue;
+        }
+        for (name, alias) in &import.names {
+            let local = alias.as_deref().unwrap_or(name);
+            map.insert(local.to_owned(), format!("{}.{}", import.module, name));
+        }
+    }
+    map
+}
+
 /// Serializes the options for the `py:*` skeleton seam.
-fn options_json(module: Option<&str>, options: &AutoOptions, extra: &ExtraOptions) -> String {
+fn options_json(
+    module: Option<&str>,
+    options: &AutoOptions,
+    extra: &ExtraOptions,
+    imports: &std::collections::BTreeMap<String, String>,
+) -> String {
     let value = serde_json::json!({
         "module": module,
         "canonical": null,
@@ -134,6 +183,7 @@ fn options_json(module: Option<&str>, options: &AutoOptions, extra: &ExtraOption
         "single_line_type_parameter_list": false,
         "use_unqualified_type_names": false,
         "add_module_names": true,
+        "imports": imports,
     });
     serde_json::to_string(&value).unwrap_or_default()
 }
@@ -159,6 +209,7 @@ fn emit_object(
     module: &str,
     options: &AutoOptions,
     extra: &ExtraOptions,
+    imports: &std::collections::BTreeMap<String, String>,
     docstring_rst: Option<&str>,
     content: impl FnOnce(&mut DirectiveContext<'_>, NodeId) -> HandlerResult,
 ) -> HandlerResult {
@@ -174,7 +225,7 @@ fn emit_object(
         node.attrs.set_str("objtype", objtype);
         node.attrs.set_str("py:directive", format!("py:{objtype}"));
         node.attrs.set_str("py:signature", signature);
-        node.attrs.set_str("py:options", options_json(Some(module), options, extra));
+        node.attrs.set_str("py:options", options_json(Some(module), options, extra, imports));
         node.attrs.set_str("py:sig_base", (ctx.span.start as u64).to_string());
         node.span = Some(ctx.span);
     }
@@ -280,15 +331,16 @@ fn emit_member(
     options: &AutoOptions,
     config: Option<&Config>,
     class_name: Option<&str>,
+    imports: &std::collections::BTreeMap<String, String>,
 ) -> HandlerResult {
     let signature = member_signature(member, class_name);
     let extra = member_extra(member);
     let docstring = member_docstring(member, options);
     let rst = convert(docstring, config);
     let objtype = member.objtype();
-    emit_object(ctx, objtype, &signature, module, options, &extra, rst.as_deref(), |ctx, content| {
+    emit_object(ctx, objtype, &signature, module, options, &extra, imports, rst.as_deref(), |ctx, content| {
         if let Member::Class(class) = member {
-            emit_class_children(ctx, class, module, options, config)?;
+            emit_class_children(ctx, class, module, options, config, imports)?;
         }
         if options.show_inheritance {
             if let Member::Class(class) = member {
@@ -376,11 +428,12 @@ fn emit_class_children(
     module: &str,
     options: &AutoOptions,
     config: Option<&Config>,
+    imports: &std::collections::BTreeMap<String, String>,
 ) -> HandlerResult {
     let all = None;
     let members = select_members(&class.members, options, all);
     for member in members {
-        emit_member(ctx, member, module, options, config, Some(&class.name))?;
+        emit_member(ctx, member, module, options, config, Some(&class.name), imports)?;
     }
     Ok(Vec::new())
 }
@@ -443,7 +496,9 @@ impl Directive for AutoDirective {
     }
 
     fn has_content(&self) -> bool {
-        false
+        // Upstream's object descriptions (autoclass, autoattribute, ...) accept
+        // content such as nested `.. method::` directives.
+        true
     }
 
     fn run(&self, ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -465,13 +520,25 @@ impl Directive for AutoDirective {
             let mut ids = emit_module_target(ctx, &module.name)?;
             ids.extend(emit_module_docstring(ctx, module.docstring.as_deref(), config.as_ref())?);
             let all = if options.ignore_module_all { None } else { module.all.as_deref() };
+            let imports = import_map(&module);
             for member in select_members(&module.members, &options, all) {
-                ids.extend(emit_member(ctx, member, &module.name, &options, config.as_ref(), None)?);
+                ids.extend(emit_member(ctx, member, &module.name, &options, config.as_ref(), None, &imports)?);
             }
             return Ok(ids);
         }
 
-        let (module, object_path) = match resolve_target(argument, &roots) {
+        // Upstream qualifies bare autodoc names with the active `currentmodule`
+        // (e.g. `.. currentmodule:: sphinx.application` followed by
+        // `.. automethod:: Sphinx.add_js_file`). Try the argument as written
+        // first, then the module-qualified spelling.
+        let current_module = ctx.global.current_module.read().ok().and_then(|guard| guard.clone());
+        let direct = resolve_target(argument, &roots);
+        let resolved = direct.or_else(|| {
+            current_module
+                .as_deref()
+                .and_then(|module| resolve_target(&format!("{module}.{argument}"), &roots))
+        });
+        let (module, object_path) = match resolved {
             Some(target) => target,
             None => {
                 return ctx.parse_block_text(
@@ -521,9 +588,14 @@ impl Directive for AutoDirective {
             member.objtype()
         };
         let signature = member_signature(member, class_name.as_deref());
-        ids.extend(emit_object(ctx, objtype, &signature, &module.name, &options, &extra, rst.as_deref(), |ctx, _content| {
+        let imports = import_map(&module);
+        let directive_content = ctx.content.to_owned();
+        ids.extend(emit_object(ctx, objtype, &signature, &module.name, &options, &extra, &imports, rst.as_deref(), |ctx, content_node| {
+            if !directive_content.trim().is_empty() {
+                ctx.parse_block_text(&directive_content, content_node, ctx.line)?;
+            }
             if let Member::Class(class) = member {
-                emit_class_children(ctx, class, &module.name, &options, config.as_ref())?;
+                emit_class_children(ctx, class, &module.name, &options, config.as_ref(), &imports)?;
             }
             Ok(Vec::new())
         })?);
@@ -556,3 +628,4 @@ pub fn register_directives(registry: &DirectiveRegistry) {
     // emits a domain object); re-registering them here as `AutoDirective`
     // would reject the documented content and drop the object entirely.
 }
+

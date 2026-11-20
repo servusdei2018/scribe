@@ -394,12 +394,12 @@ fn dedup_overloads(members: &mut Vec<Member>) {
     let overloaded: Vec<String> = members
         .iter()
         .filter_map(|member| match member {
-            Member::Function(info) if info.is_overload => Some(info.name.clone()),
+            Member::Function(info) if info.is_overload => Some(info.qualname.clone()),
             _ => None,
         })
         .collect();
     members.retain(|member| match member {
-        Member::Function(info) => !overloaded.contains(&info.name) || info.is_overload,
+        Member::Function(info) => !overloaded.contains(&info.qualname) || info.is_overload,
         _ => true,
     });
 }
@@ -570,6 +570,12 @@ fn extract_imports(body: &Suite, source: &str) -> Vec<ImportInfo> {
                     .map(|alias: &Alias| (alias.name.to_string(), alias.asname.as_ref().map(Identifier::to_string)))
                     .collect();
                 out.push(ImportInfo { module, names, level });
+            }
+            // Type-only imports inside `if TYPE_CHECKING:` are exactly the
+            // bindings annotation names refer to in static sources.
+            Stmt::If(branch) => {
+                out.extend(extract_imports(&branch.body, source));
+                out.extend(extract_imports(&branch.orelse, source));
             }
             _ => {}
         }

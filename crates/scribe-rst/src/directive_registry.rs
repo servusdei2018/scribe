@@ -58,6 +58,10 @@ pub struct Context {
     /// roles are resolved against this domain first (mirroring
     /// `SphinxDirective`'s `env.current_document.default_domain` lookup).
     pub default_domain: Arc<RwLock<Option<String>>>,
+    /// Module selected by `.. currentmodule::` / `.. py:currentmodule::`.
+    /// Autodoc directives qualify bare object names with it, mirroring
+    /// Sphinx's `env.current_document.current_module`.
+    pub current_module: Arc<RwLock<Option<String>>>,
     /// Dynamic external-link roles installed by `sphinx.ext.extlinks`.
     pub extlinks: crate::extlinks::ExtLinkRoles,
 }
@@ -76,6 +80,7 @@ impl Default for Context {
             custom_roles: Arc::new(RwLock::new(HashMap::new())),
             default_role: Arc::new(RwLock::new(None)),
             default_domain: Arc::new(RwLock::new(None)),
+            current_module: Arc::new(RwLock::new(None)),
             extlinks: crate::extlinks::empty_roles(),
         }
     }
@@ -131,7 +136,8 @@ pub trait IncludeResolver: Send + Sync + std::fmt::Debug {
     ) -> Result<String, DirectiveError>;
 }
 
-/// Default [`IncludeResolver`]: reads UTF-8 files relative to the source dir.
+/// Default [`IncludeResolver`]: reads UTF-8 files relative to the *including
+/// document* (Sphinx/docutils semantics), falling back to the source dir.
 #[derive(Debug, Clone, Copy)]
 pub struct FsIncludeResolver;
 
@@ -146,14 +152,37 @@ impl IncludeResolver for FsIncludeResolver {
         let full = if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
-            source_dir
-                .map(|dir| dir.join(path))
+            // Docutils anchors relative includes at the document containing
+            // the directive, not the project root. When a docname is known,
+            // try `<source_dir>/<doc-parent>/<path>` first, then fall back to
+            // `<source_dir>/<path>` for callers that pass root-relative paths.
+            let doc_relative = source_dir.zip(source_name).and_then(|(dir, name)| {
+                Path::new(name)
+                    .parent()
+                    .map(|parent| dir.join(parent).join(path))
+            });
+            doc_relative
+                .or_else(|| source_dir.map(|dir| dir.join(path)))
                 .or_else(|| {
                     source_name
                         .and_then(|name| Path::new(name).parent())
                         .map(|parent| parent.join(path))
                 })
                 .unwrap_or_else(|| candidate.to_path_buf())
+        };
+        // Prefer the document-relative file when both candidates exist; the
+        // docutils behaviour wins over the legacy source-dir fallback.
+        let full = if full.is_file() {
+            full
+        } else if let Some(dir) = source_dir {
+            let root_relative = dir.join(path);
+            if root_relative.is_file() {
+                root_relative
+            } else {
+                full
+            }
+        } else {
+            full
         };
         std::fs::read_to_string(&full).map_err(|source| DirectiveError::IncludeIo {
             path: full.display().to_string(),

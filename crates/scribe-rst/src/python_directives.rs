@@ -142,6 +142,10 @@ fn py_module(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     if name.is_empty() {
         return Ok(Vec::new());
     }
+    // Sphinx's `PyModule.run` also updates `env.current_document.current_module`.
+    if let Ok(mut guard) = ctx.global.current_module.write() {
+        *guard = Some(name.clone());
+    }
     let options = options_json(ctx);
     let no_index = ctx.flag("no-index") || ctx.flag("noindex");
     let mut ids = Vec::new();
@@ -180,6 +184,9 @@ fn py_currentmodule(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let name = ctx.argument(0).unwrap_or("").trim().to_owned();
     if name.is_empty() {
         return Ok(Vec::new());
+    }
+    if let Ok(mut guard) = ctx.global.current_module.write() {
+        *guard = Some(name.clone());
     }
     // Upstream returns no nodes; the marker carries the context change until
     // `prepare_document` removes it.

@@ -67,11 +67,15 @@ fn object(
         let mut taken = 0usize;
         let mut joined = String::new();
         for line in &lines {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                // A blank line ends the continuation; a leading ':' starts a
+                // directive option (e.g. `:no-index-entry:`) that belongs in
+                // `raw_options`, never in the signature text.
                 break;
             }
             joined.push(' ');
-            joined.push_str(line.trim());
+            joined.push_str(trimmed);
             taken += line.len() + 1;
             continuation_lines += 1;
         }
@@ -83,12 +87,13 @@ fn object(
     // line. Upstream packs them into one `desc` with several signatures.
     let mut extra_signatures = Vec::new();
     let mut extra_lines = 0usize;
-    if content.starts_with([' ', '\t']) {
+    if content.starts_with([' ', '\t']) && !content.trim_start().starts_with(':') {
         for line in content.lines() {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(':') {
                 break;
             }
-            extra_signatures.push(line.trim().to_owned());
+            extra_signatures.push(trimmed.to_owned());
             extra_lines += line.len() + 1;
         }
         content = content.get(extra_lines.min(content.len())..).unwrap_or("").trim_start_matches('\n');
@@ -98,6 +103,48 @@ fn object(
     }
     let mut all_signatures = vec![signature.clone()];
     all_signatures.extend(extra_signatures.clone());
+
+    // The reST domain uses indented continuation lines for *multiple aliases*
+    // of one object (e.g. `.. rst:directive:: autofunction\n automethod`), not
+    // for overloads. Each alias needs its own registered desc node.
+    if domain == "rst" && all_signatures.len() > 1 {
+        let options = options_json(ctx);
+        let mut result = Vec::new();
+        for (index, name) in all_signatures.iter().enumerate() {
+            let names_json = serde_json::to_string(&vec![name.clone()]).unwrap_or_default();
+            let mut ids = emit_index(ctx)?;
+            let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
+            if let Some(&index_id) = ids.first() {
+                if let Ok(node) = ctx.doc.get_mut(desc) {
+                    node.attrs.set_node_id(format!("{domain}:index_id"), index_id);
+                }
+            }
+            if let Ok(node) = ctx.doc.get_mut(desc) {
+                node.attrs.set_str("domain", domain);
+                node.attrs.set_str("objtype", objtype);
+                node.attrs.set_str("desctype", objtype);
+                node.attrs.set_str(format!("{domain}:signature"), name);
+                node.attrs.set_str(format!("{domain}:signatures"), &names_json);
+                node.attrs.set_str(format!("{domain}:options"), &options);
+                node.attrs.set_str(format!("{domain}:sig_base"), (ctx.span.start as u64).to_string());
+                node.attrs.set_list("classes", vec![domain.to_owned(), objtype.to_owned()]);
+            }
+            let sig = ctx.add(NodeKind::DescSignature, desc)?;
+            if let Ok(node) = ctx.doc.get_mut(sig) {
+                node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), domain.to_owned()]);
+                node.span = Some(ctx.span);
+            }
+            let content_node = ctx.add(NodeKind::DescContent, desc)?;
+            if index == 0 {
+                let base_line = ctx.line + 1 + ctx.raw_options.len() as u32 + continuation_lines as u32 + extra_lines as u32;
+                let _ = ctx.parse_block_text(content, content_node, base_line);
+            }
+            ids.push(desc);
+            result.extend(ids);
+        }
+        return Ok(result);
+    }
+
     let signatures_json = serde_json::to_string(&all_signatures).unwrap_or_default();
     let options = options_json(ctx);
     let mut ids = emit_index(ctx)?;

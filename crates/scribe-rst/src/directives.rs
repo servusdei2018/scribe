@@ -145,6 +145,32 @@ impl Directive for AdmonitionDirective {
     }
 }
 
+/// Registers a new directive name that reuses an existing directive's full
+/// behaviour but reports the canonical name in its `type` attribute.
+#[derive(Clone, Copy, Debug)]
+pub struct AliasDirective {
+    name: &'static str,
+    canonical: &'static str,
+}
+
+impl AliasDirective {
+    pub const fn new(name: &'static str, canonical: &'static str) -> Self {
+        Self { name, canonical }
+    }
+}
+
+impl Directive for AliasDirective {
+    fn name(&self) -> &'static str { self.name }
+    fn required_arguments(&self) -> usize { 1 }
+    fn optional_arguments(&self) -> usize { 1 }
+    fn final_argument_whitespace(&self) -> bool { true }
+    fn has_content(&self) -> bool { true }
+    fn run(&self, ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+        let inner = VersionDirective::from_canonical(self.canonical);
+        inner.run(ctx)
+    }
+}
+
 /// A `versionadded` / `versionchanged` / `deprecated` / `versionremoved`
 /// directive, matching Sphinx's `changeset` domain.
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +179,38 @@ pub struct VersionDirective {
     kind: NodeKind,
     label: &'static str,
     label_class: &'static str,
+}
+
+impl VersionDirective {
+    /// Builds the descriptor for a canonical Sphinx change directive name.
+    pub fn from_canonical(canonical: &'static str) -> Self {
+        match canonical {
+            "versionadded" => Self {
+                name: "versionadded",
+                kind: NodeKind::VersionAdded,
+                label: "Added in version",
+                label_class: "added",
+            },
+            "versionchanged" => Self {
+                name: "versionchanged",
+                kind: NodeKind::VersionChanged,
+                label: "Changed in version",
+                label_class: "changed",
+            },
+            "versionremoved" => Self {
+                name: "versionremoved",
+                kind: NodeKind::VersionModified,
+                label: "Removed in version",
+                label_class: "removed",
+            },
+            _ => Self {
+                name: "deprecated",
+                kind: NodeKind::Deprecated,
+                label: "Deprecated since version",
+                label_class: "deprecated",
+            },
+        }
+    }
 }
 
 impl Directive for VersionDirective {
@@ -405,15 +463,29 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
     }
     // Object names are case-sensitive in Sphinx inventories (`envvar:: HOME`),
     // so keep the signature verbatim; only the generated anchor is lowercased.
-    let name = signature.clone();
-    let id = crate::names::make_id(&format!("{objtype}-{name}"));
+    // A comma-separated signature (e.g. `-T, --show-traceback`) declares
+    // several aliases, each of which must be registered separately.
+    let names: Vec<String> = signature
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        // An option's declared name is its flag; any trailing metavariable
+        // (`-D setting=value`) is documentation, not part of the lookup key.
+        .map(|name| if objtype == "option" { name.split_whitespace().next().unwrap_or(name) } else { name })
+        .map(str::to_owned)
+        .collect();
+    let names = if names.is_empty() { vec![signature.clone()] } else { names };
+    let ids: Vec<String> = names
+        .iter()
+        .map(|name| crate::names::make_id(&format!("{objtype}-{name}")))
+        .collect();
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
     {
         let node = ctx.doc.get_mut(desc)?;
         node.attrs.set_list("classes", vec![objtype.to_owned()]);
         node.attrs.set_str("objtype", objtype);
-        node.attrs.set_list("ids", vec![id]);
-        node.attrs.set_list("names", vec![name]);
+        node.attrs.set_list("ids", ids);
+        node.attrs.set_list("names", names);
     }
     let signature_id = ctx.add(NodeKind::DescSignature, desc)?;
     {
@@ -448,13 +520,27 @@ fn std_envvar(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn std_confval(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     // `.. confval::` accepts several aliases on continuation lines, e.g.
-    // `.. confval:: master_doc\n   root_doc`.  Register every alias so
-    // `:confval:`root_doc`` resolves just like upstream.
-    let raw = ctx.arguments().join(" ");
-    let names: Vec<String> = raw.split_whitespace().map(str::to_owned).collect();
+    // `.. confval:: master_doc\n   root_doc`. Docutils keeps those lines in
+    // the directive *content*, so consume them here up to the first option
+    // (`:type:`) or blank line and register every alias.
+    let mut names: Vec<String> = ctx.arguments().join(" ").split_whitespace().map(str::to_owned).collect();
+    let mut rest = ctx.content;
+    let mut consumed = 0usize;
+    for line in ctx.content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(':') {
+            break;
+        }
+        names.push(trimmed.to_owned());
+        consumed += line.len() + 1;
+    }
+    if consumed > 0 {
+        rest = ctx.content.get(consumed.min(ctx.content.len())..).unwrap_or("").trim_start_matches('\n');
+    }
     if names.is_empty() {
         return Ok(Vec::new());
     }
+    let signature = names.join(" ");
     let ids: Vec<String> = names.iter().map(|name| crate::names::make_id(&format!("confval-{name}"))).collect();
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
     if let Ok(node) = ctx.doc.get_mut(desc) {
@@ -467,9 +553,9 @@ fn std_confval(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     if let Ok(node) = ctx.doc.get_mut(signature_id) {
         node.attrs.set_list("classes", vec!["confval".to_owned()]);
     }
-    ctx.parse_inline_into(&raw, signature_id, ctx.line)?;
+    ctx.parse_inline_into(&signature, signature_id, ctx.line)?;
     let content = ctx.add(NodeKind::DescContent, desc)?;
-    ctx.parse_nested_into(content)?;
+    ctx.parse_block_text(rest, content, ctx.line)?;
     Ok(vec![desc])
 }
 
@@ -508,6 +594,65 @@ fn std_label(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         node.attrs.set_list("names", vec![name]);
     }
     Ok(vec![id])
+}
+
+/// `.. index::` — registers index entries but emits no visible document body.
+fn std_index(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let entries = ctx.arguments().join(" ");
+    if entries.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let id = ctx.add(NodeKind::Index, ctx.parent)?;
+    if let Ok(node) = ctx.doc.get_mut(id) {
+        node.attrs.set_str("entries", format!("['single', '{}', '', '', None]", entries.replace('\'', "\\'")));
+        node.span = Some(ctx.span);
+    }
+    Ok(vec![id])
+}
+
+/// `.. describe::` — the old spelling of `.. rst:directive::`-style object
+/// descriptions. Emit a generic description node so the content still renders.
+fn describe(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let signature = ctx.arguments().join(" ");
+    let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
+    if let Ok(node) = ctx.doc.get_mut(desc) {
+        node.attrs.set_str("objtype", "describe");
+        node.span = Some(ctx.span);
+    }
+    let sig = ctx.add(NodeKind::DescSignature, desc)?;
+    if !signature.trim().is_empty() {
+        ctx.parse_inline_into(signature.trim(), sig, ctx.line)?;
+    }
+    let content = ctx.add(NodeKind::DescContent, desc)?;
+    ctx.parse_nested_into(content)?;
+    Ok(vec![desc])
+}
+
+/// `.. moduleauthor::` — records module authorship in the index; no body.
+fn moduleauthor(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let author = ctx.arguments().join(" ");
+    if author.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let id = ctx.add(NodeKind::Index, ctx.parent)?;
+    if let Ok(node) = ctx.doc.get_mut(id) {
+        node.attrs.set_str("entries", format!("['single', '{}', '', '', None]", author.replace('\'', "\\'")));
+        node.span = Some(ctx.span);
+    }
+    Ok(vec![id])
+}
+
+/// Placeholder directives contributed by Sphinx extensions that scribe does
+/// not render specially (inheritance diagrams, doctest setup/code/output and
+/// the `doctest` directive itself). They preserve their parsed content so no
+/// documentation is silently lost and, crucially, do not warn as unknown.
+fn inert_content(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    if ctx.content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let paragraph = ctx.add(NodeKind::Paragraph, ctx.parent)?;
+    ctx.parse_nested_into(paragraph)?;
+    Ok(vec![paragraph])
 }
 
 /// `.. glossary::` — Sphinx `sphinx.domains.std.Glossary`.
@@ -1068,6 +1213,11 @@ fn event_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         node.attrs.set_str("objtype", "event");
         node.attrs.set_str("desctype", "event");
         node.attrs.set_str("domain", "std");
+        if !signature.is_empty() {
+            let event_name = signature.split_whitespace().next().unwrap_or(&signature).to_owned();
+            node.attrs.set_list("names", vec![event_name.clone()]);
+            node.attrs.set_list("ids", vec![crate::names::make_id(&format!("event-{event_name}"))]);
+        }
     }
     let sig = ctx.add(NodeKind::DescSignature, desc)?;
     if !signature.is_empty() {
@@ -1707,6 +1857,16 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
         label: "Removed in version",
         label_class: "removed",
     });
+    // Sphinx 9 aliases (`:rst:dir:`version-added`` etc.). Keep the historical
+    // `type` attribute on the emitted node so the writer picks the same CSS.
+    for (alias, canonical) in [
+        ("version-added", "versionadded"),
+        ("version-changed", "versionchanged"),
+        ("version-deprecated", "deprecated"),
+        ("version-removed", "versionremoved"),
+    ] {
+        registry.register(AliasDirective::new(alias, canonical));
+    }
 
     // `add_body_container` cannot be used as a fn pointer with a captured kind;
     // register the individual wrappers instead.
@@ -1726,8 +1886,19 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
         .with("no-contents-entry", OptionKind::Flag)
         .with("no-typesetting", OptionKind::Flag), true, std_confval));
     registry.register(FnDirective::new("label", 1, 0, true, OptionSpec::empty(), false, std_label));
+    // Standard/Sphinx directives encountered in the self-hosted docs.
+    registry.register(FnDirective::new("index", 1, 0, true, common.clone(), false, std_index));
+    registry.register(FnDirective::new("describe", 1, 0, true, common.clone(), true, describe));
+    registry.register(FnDirective::new("moduleauthor", 1, 0, true, OptionSpec::empty(), false, moduleauthor));
+    registry.register(FnDirective::new("inheritance-diagram", 1, 0, true, common.clone()
+        .with("parts", OptionKind::Unchanged)
+        .with("top-classes", OptionKind::Unchanged)
+        .with("show-inheritance", OptionKind::Flag), true, inert_content));
+    for name in ["testsetup", "testcode", "testoutput", "doctest"] {
+        registry.register(FnDirective::new(name, 0, 0, false, OptionSpec::empty(), true, inert_content));
+    }
 
-    registry.register(FnDirective::new("epigraph", 0, 0, false, OptionSpec::empty(), true, epigraph_body));
+    registry.register(FnDirective::new("epigraph", 0, 1, true, OptionSpec::empty(), true, epigraph_body));
     registry.register(FnDirective::new("highlights", 0, 0, false, OptionSpec::empty(), true, highlights_body));
     registry.register(FnDirective::new("pull-quote", 0, 0, false, OptionSpec::empty(), true, pullquote_body));
 
@@ -1880,6 +2051,11 @@ fn compound_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 fn epigraph_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let id = ctx.add(NodeKind::BlockQuote, ctx.parent)?;
     ctx.doc.get_mut(id)?.attrs.set_list("classes", vec!["epigraph".to_owned()]);
+    let argument = ctx.arguments().join(" ");
+    if !argument.trim().is_empty() {
+        let paragraph = ctx.add(NodeKind::Paragraph, id)?;
+        ctx.parse_inline_into(argument.trim(), paragraph, ctx.line)?;
+    }
     ctx.parse_nested_into(id)?;
     Ok(vec![id])
 }

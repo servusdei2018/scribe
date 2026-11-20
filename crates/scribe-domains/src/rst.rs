@@ -161,7 +161,29 @@ impl Domain for ReSTDomain {
             if node.attrs.get_bool("no-index").ok().flatten().unwrap_or(false) { continue; }
             let Some(name) = node.get_str("rst:name").ok().flatten().map(str::to_owned) else { continue };
             let anchor = node.get_str("rst:anchor").ok().flatten().unwrap_or("").to_owned();
-            self.note_object(ctx, &objtype, &name, &anchor, node.span);
+            // Upstream `ReSTDirectiveOption.add_target_and_index` prefixes an
+            // option's name with its enclosing directive (`automodule:members`).
+            // Walk ancestors to find that directive, matching `current_directive`.
+            let object_name = if objtype == "directive:option" {
+                let mut parent = document.parent(id).ok().flatten();
+                let mut directive = None;
+                while let Some(ancestor) = parent {
+                    if let Ok(parent_node) = document.get(ancestor) {
+                        if parent_node.kind == NodeKind::Desc
+                            && parent_node.get_str("domain").ok().flatten() == Some("rst")
+                            && parent_node.get_str("objtype").ok().flatten() == Some("directive")
+                        {
+                            directive = parent_node.get_str("rst:name").ok().flatten().map(str::to_owned);
+                            if directive.is_some() { break; }
+                        }
+                    }
+                    parent = document.parent(ancestor).ok().flatten();
+                }
+                directive.map_or_else(|| name.clone(), |directive| format!("{directive}:{name}"))
+            } else {
+                name.clone()
+            };
+            self.note_object(ctx, &objtype, &object_name, &anchor, node.span);
         }
         Ok(())
     }

@@ -141,6 +141,13 @@ fn build_impl(
     let tags = Tags::with_tags(std::iter::empty::<String>());
     let registry = DomainRegistry::builtin();
     registry.load_from_env(env);
+    let inv_cache_dir = options.doctree_dir.clone().unwrap_or_else(|| outdir.join(".doctrees"));
+    warnings.extend(crate::build_common::attach_intersphinx(
+        &registry,
+        config,
+        source_dir,
+        Some(&inv_cache_dir),
+    ));
     let relevant = env.relevant_config();
     let rst_prolog = relevant.rst_prolog.clone();
     let rst_epilog = relevant.rst_epilog.clone();

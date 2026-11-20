@@ -237,15 +237,14 @@ pub fn auto_options(ctx: &DirectiveContext<'_>, config: Option<&Config>) -> Auto
     if let Some(value) = exclude_value {
         options.exclude_members.extend(parse_member_list(Some(&value)));
     }
-    let private_value = raw_value(ctx, "private-members");
-    if private_value.is_some() {
+    // `:private-members: a, b` means "show all members plus these private
+    // ones"; it must not turn into an explicit member list that suppresses
+    // the ordinary `:members:` selection.
+    if raw_value(ctx, "private-members").is_some() {
         options.private_members = true;
-        options.members.get_or_insert_with(Vec::new).extend(parse_member_list(private_value.as_deref()));
     }
-    let special_value = raw_value(ctx, "special-members");
-    if special_value.is_some() {
+    if raw_value(ctx, "special-members").is_some() {
         options.special_members = true;
-        options.members.get_or_insert_with(Vec::new).extend(parse_member_list(special_value.as_deref()));
     }
     options
 }

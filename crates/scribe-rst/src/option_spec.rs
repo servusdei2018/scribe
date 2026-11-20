@@ -333,12 +333,16 @@ const CSS3_UNITS: &[&str] = &[
 
 fn parse_measure(raw: &str, default_unit: &str) -> Option<OptionValue> {
     let text = raw.trim();
+    // Split at the first character that cannot belong to a number. `%` is a
+    // unit here, not an alphabetic character, so `is_alphabetic` alone misses
+    // percentage values such as `80%`.
     let split_index = text
         .char_indices()
-        .find(|(_, ch)| ch.is_alphabetic())
+        .find(|(_, ch)| !(ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+')))
         .map_or(text.len(), |(index, _)| index);
     let (number, unit) = text.split_at(split_index);
     let number = number.trim();
+    let unit = unit.trim();
     if number.parse::<f64>().ok().is_none_or(|value| value < 0.0) {
         return None;
     }
@@ -407,6 +411,8 @@ impl OptionSpec {
         Self::empty()
             .with("class", OptionKind::ClassOption)
             .with("name", OptionKind::Unchanged)
+            .with("no-contents-entry", OptionKind::Flag)
+            .with("no-index-entry", OptionKind::Flag)
     }
 
     /// Validates and converts a raw option map.
