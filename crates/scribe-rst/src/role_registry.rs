@@ -362,7 +362,8 @@ static BUILTIN: Lazy<RoleRegistry> = Lazy::new(RoleRegistry::builtin);
 /// Classifies a built-in role without constructing a registry. Consumed by the
 /// Phase 05 pure inline recogniser so there is one source of truth.
 pub fn classify_builtin(name: &str) -> Option<RoleClass> {
-    BUILTIN.classify(name)
+    // Docutils role names are case-insensitive (`:CLASS:` == `:class:`).
+    BUILTIN.classify(name).or_else(|| BUILTIN.classify(&name.to_ascii_lowercase()))
 }
 
 /// The full list of built-in role descriptors.
@@ -384,12 +385,12 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         BuiltinRole::new("file", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["file".into()], behavior: Plain }),
         BuiltinRole::new("guilabel", RoleClass::Direct { kind: NodeKind::Inline, inner: Inline, classes: vec!["guilabel".into()], behavior: Plain }),
         BuiltinRole::new("kbd", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["kbd".into()], behavior: Keyboard }),
-        BuiltinRole::new("mailheader", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["mailheader".into()], behavior: Plain }),
+        BuiltinRole::new("mailheader", RoleClass::Direct { kind: NodeKind::Emphasis, inner: Literal, classes: vec!["mailheader".into()], behavior: Plain }),
         BuiltinRole::new("makevar", RoleClass::Direct { kind: NodeKind::Strong, inner: Strong, classes: vec!["makevar".into()], behavior: Plain }),
-        BuiltinRole::new("manpage", RoleClass::Direct { kind: NodeKind::Manpage, inner: Literal, classes: vec!["manpage".into()], behavior: Manpage }),
+        BuiltinRole::new("manpage", RoleClass::Direct { kind: NodeKind::Emphasis, inner: Literal, classes: vec!["manpage".into()], behavior: Manpage }),
         BuiltinRole::new("menuselection", RoleClass::Direct { kind: NodeKind::Inline, inner: Inline, classes: vec!["menuselection".into()], behavior: MenuSelection }),
-        BuiltinRole::new("mimetype", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["mimetype".into()], behavior: Plain }),
-        BuiltinRole::new("newsgroup", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["newsgroup".into()], behavior: Plain }),
+        BuiltinRole::new("mimetype", RoleClass::Direct { kind: NodeKind::Emphasis, inner: Literal, classes: vec!["mimetype".into()], behavior: Plain }),
+        BuiltinRole::new("newsgroup", RoleClass::Direct { kind: NodeKind::Emphasis, inner: Literal, classes: vec!["newsgroup".into()], behavior: Plain }),
         BuiltinRole::new("program", RoleClass::Direct { kind: NodeKind::Strong, inner: Strong, classes: vec!["program".into()], behavior: Plain }),
         BuiltinRole::new("regexp", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["regexp".into()], behavior: Plain }),
         BuiltinRole::new("samp", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["samp".into()], behavior: Plain }),

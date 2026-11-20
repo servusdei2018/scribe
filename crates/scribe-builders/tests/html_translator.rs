@@ -155,7 +155,7 @@ fn definition_and_field_lists() {
     assert!(out.contains("<dl>"), "{out}");
     assert!(out.contains("<dt>term</dt>"), "{out}");
     assert!(out.contains("<dd>"), "{out}");
-    assert!(out.contains("<dt>author</dt>"), "{out}");
+    assert!(out.contains("<dt>author<span class=\"colon\">:</span></dt>"), "{out}");
 }
 
 #[test]

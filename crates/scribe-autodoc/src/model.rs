@@ -328,6 +328,32 @@ impl ModuleInfo {
             .collect()
     }
 
+    pub fn find_leaf(&self, qualname: &str) -> Vec<&Member> {
+        let mut segments = qualname.split('.');
+        let Some(first) = segments.next() else { return Vec::new() };
+        let rest: Vec<&str> = segments.collect();
+        let mut results = Vec::new();
+        for member in self.members.iter().filter(|m| m.name() == first) {
+            if rest.is_empty() { results.push(member); continue; }
+            let Member::Class(class) = member else { continue };
+            let mut path = class;
+            let mut leaf = None;
+            for (index, segment) in rest.iter().enumerate() {
+                if index + 1 == rest.len() {
+                    leaf = path.members.iter().find(|m| m.name() == *segment);
+                } else {
+                    let Some(next) = path.members.iter().find_map(|m| match m {
+                        Member::Class(info) if info.name == *segment => Some(info),
+                        _ => None,
+                    }) else { break };
+                    path = next;
+                }
+            }
+            if let Some(leaf) = leaf { results.push(leaf); }
+        }
+        results
+    }
+
     /// Looks up a member by its dotted path relative to this module.
     #[must_use]
     pub fn find(&self, qualname: &str) -> Option<&Member> {

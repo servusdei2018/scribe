@@ -98,7 +98,13 @@ pub fn write_source_dumps(
 ) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for (docname, (source, suffix)) in sources {
-        let relative = format!("{docname}{suffix}.txt");
+        // Sphinx appends `.txt` to the source dump name except when the
+        // source suffix is already `.txt` (e.g. test-root's `bom.txt`).
+        let relative = if suffix == ".txt" {
+            format!("{docname}{suffix}")
+        } else {
+            format!("{docname}{suffix}.txt")
+        };
         let target = outdir.join("_sources").join(&relative);
         fs::create_dir_all(target.parent().unwrap_or(outdir)).map_err(|e| HtmlError::io(&target, e))?;
         let content = fs::read_to_string(source).unwrap_or_default();

@@ -373,6 +373,33 @@ impl Domain for CDomain {
             }
         }
         if matches.is_empty() {
+            // Sphinx's C domain tries to parse every xref target as a C
+            // declaration; malformed ones produce a structured multi-line
+            // diagnostic in addition to the generic missing-reference warning.
+            if target.contains('*') || target.contains(' ') {
+                let at = target.len().saturating_sub(1);
+                let marker = "-".repeat(at.max(1));
+                let message = format!(
+                    "Unparseable C cross-reference: '{target}'\n\
+Invalid C declaration: Expected end of definition. [error at {at}]\n\
+  {target}\n\
+  {marker}^"
+                );
+                let line = document.get(node_id).ok().and_then(|node| node.source.clone())
+                    .and_then(|source| source.line);
+                ctx.push_diagnostic(DomainDiagnostic {
+                    code: crate::diagnostics::codes::NUMFIG.to_owned(),
+                    message,
+                    typ: None,
+                    target: None,
+                    docname: Some(ctx.docname.to_owned()),
+                    span: None,
+                    source_path: None,
+                    line,
+                    help: None,
+                    severity: crate::diagnostics::DomainSeverity::Warning,
+                });
+            }
             return Ok(None);
         }
         if matches.len() > 1 {

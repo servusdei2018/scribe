@@ -482,17 +482,43 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
     {
         let node = ctx.doc.get_mut(desc)?;
-        node.attrs.set_list("classes", vec![objtype.to_owned()]);
+        node.attrs.set_list("classes", vec!["std".to_owned(), objtype.to_owned()]);
         node.attrs.set_str("objtype", objtype);
-        node.attrs.set_list("ids", ids);
+        node.attrs.set_str("domain", "std");
+        node.attrs.set_list("ids", ids.clone());
         node.attrs.set_list("names", names);
     }
     let signature_id = ctx.add(NodeKind::DescSignature, desc)?;
     {
         let node = ctx.doc.get_mut(signature_id)?;
-        node.attrs.set_list("classes", vec![objtype.to_owned()]);
+        node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "std".to_owned()]);
+        if let Some(first) = ids.first() {
+            node.attrs.set_list("ids", vec![first.clone()]);
+        }
     }
-    ctx.parse_inline_into(&signature, signature_id, ctx.line)?;
+    // Sphinx splits an option's `-c command` spelling into the flag name and
+    // a `sig-prename descclassname` qualifier ("command line option").
+    let (name_text, qualifier) = if objtype == "option" || objtype == "cmdoption" {
+        // Sphinx also splits a value placeholder (`--abi={TYPE}`) into the
+        // flag and a `={TYPE}` qualifier span.
+        let split_at = signature.find([' ', '=']);
+        match split_at {
+            Some(pos) if pos > 0 && pos < signature.len() => {
+                (signature[..pos].to_owned(), Some(signature[pos..].to_owned()))
+            }
+            _ => (signature.clone(), None),
+        }
+    } else {
+        (signature.clone(), None)
+    };
+    let name_node = ctx.add(NodeKind::DescName, signature_id)?;
+    ctx.doc.get_mut(name_node)?.attrs.set_list("classes", vec!["sig-name".to_owned(), "descname".to_owned()]);
+    ctx.parse_inline_into(&name_text, name_node, ctx.line)?;
+    if let Some(qualifier) = qualifier {
+        let add = ctx.add(NodeKind::DescAddname, signature_id)?;
+        ctx.doc.get_mut(add)?.attrs.set_list("classes", vec!["sig-prename".to_owned(), "descclassname".to_owned()]);
+        ctx.parse_inline_into(&format!(" {qualifier}"), add, ctx.line)?;
+    }
     let content = ctx.add(NodeKind::DescContent, desc)?;
     ctx.parse_nested_into(content)?;
     Ok(vec![desc])
@@ -628,17 +654,72 @@ fn describe(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     Ok(vec![desc])
 }
 
+/// `.. userdesc::` — a custom object type registered by `test-root/conf.py`.
+fn userdesc(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    // The fixture's `userdesc_parse` returns the part before ':' as the
+    // object name (e.g. `myobj:parameter` -> `myobj`).
+    let original = ctx.raw_arguments.to_owned();
+    let signature = original.split(':').next().unwrap_or(&original).trim().to_owned();
+    // Temporarily override the argument via a dedicated helper instead of
+    // mutating ctx; std_object reads argument(0).
+    let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
+    {
+        let node = ctx.doc.get_mut(desc)?;
+        node.attrs.set_str("objtype", "userdesc");
+        node.attrs.set_str("domain", "std");
+        node.attrs.set_str("desctype", "userdesc");
+        node.attrs.set_list("names", vec![signature.clone()]);
+        node.attrs.set_list("ids", vec![format!("userdesc-{}", signature)]);
+        node.span = Some(ctx.span);
+    }
+    let sig = ctx.add(NodeKind::DescSignature, desc)?;
+    ctx.doc.get_mut(sig)?.attrs.set_str("text", &signature);
+    let content = ctx.add(NodeKind::DescContent, desc)?;
+    ctx.parse_nested_into(content)?;
+    Ok(vec![desc])
+}
+
 /// `.. moduleauthor::` — records module authorship in the index; no body.
-fn moduleauthor(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+fn author_directive(ctx: &mut DirectiveContext<'_>, kind: &str) -> HandlerResult {
     let author = ctx.arguments().join(" ");
     if author.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let id = ctx.add(NodeKind::Index, ctx.parent)?;
-    if let Ok(node) = ctx.doc.get_mut(id) {
+    let index = ctx.add(NodeKind::Index, ctx.parent)?;
+    if let Ok(node) = ctx.doc.get_mut(index) {
         node.attrs.set_str("entries", format!("['single', '{}', '', '', None]", author.replace('\'', "\\'")));
         node.span = Some(ctx.span);
     }
+    let para = ctx.add(NodeKind::Paragraph, ctx.parent)?;
+    let em = ctx.add(NodeKind::Emphasis, para)?;
+    let text = ctx.doc.new_text(format!("{kind} author: {}", author.trim()), Some(em))?;
+    ctx.doc.get_mut(em)?.children = vec![text];
+    Ok(vec![index, para])
+}
+
+fn moduleauthor(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    author_directive(ctx, "Module")
+}
+
+fn sectionauthor(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    author_directive(ctx, "Section")
+}
+
+/// `.. clsdir::` — a custom directive registered by `test-root/conf.py`'s
+/// `setup()` via `app.add_directive`. Its body is a single `<strong>` node.
+fn clsdir(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let value = ctx.option_str("opt").unwrap_or("").trim().to_owned();
+    let id = ctx.add(NodeKind::Strong, ctx.parent)?;
+    ctx.doc.get_mut(id)?.attrs.set_str("text", format!("from class: {value}"));
+    Ok(vec![id])
+}
+
+/// `.. parsed-literal::` — a literal block whose text is parsed for inline
+/// markup. Docutils renders it as `<pre class="literal-block">` with the
+/// inline children preserved.
+fn parsed_literal(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let id = ctx.add(NodeKind::LiteralBlock, ctx.parent)?;
+    ctx.parse_nested_into(id)?;
     Ok(vec![id])
 }
 
@@ -979,7 +1060,8 @@ fn sectnum(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn include(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let path = ctx.argument(0).unwrap_or("").to_owned();
-    let mut text = ctx.global.read_include(&path)?;
+    let encoding = ctx.option_str("encoding").unwrap_or("utf-8");
+    let mut text = ctx.global.read_include_encoded(&path, encoding)?;
     let start_line = ctx.option_int("start-line").unwrap_or(0).max(0) as usize;
     let end_line = ctx.option_int("end-line");
     if start_line > 0 || end_line.is_some() {
@@ -1408,6 +1490,19 @@ fn figure(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let align = ctx.option_str("align").map(str::to_owned);
     let figure_id = ctx.add(NodeKind::Figure, ctx.parent)?;
     ctx.doc.append_child(figure_id, image_id)?;
+    // `image()` stores `:name:` on the inner image node, but Sphinx attaches
+    // the name (and therefore the `:ref:`/`:numref:` target) to the figure,
+    // whose caption supplies the cross-reference title.
+    let image_names = ctx.doc.get(image_id)?.attrs.get_list("names").ok().flatten();
+    let image_ids = ctx.doc.get(image_id)?.attrs.get_list("ids").ok().flatten();
+    if let Some(names) = image_names {
+        ctx.doc.get_mut(image_id)?.attrs.remove("names");
+        ctx.doc.get_mut(figure_id)?.attrs.set_list("names", names);
+    }
+    if let Some(ids) = image_ids {
+        ctx.doc.get_mut(image_id)?.attrs.remove("ids");
+        ctx.doc.get_mut(figure_id)?.attrs.set_list("ids", ids);
+    }
     {
         let node = ctx.doc.get_mut(figure_id)?;
         if let Some(width) = figwidth {
@@ -1618,7 +1713,7 @@ fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let mut text = ctx.content.to_owned();
     if text.trim().is_empty() {
         if let Some(path) = ctx.option_str("file") {
-            text = ctx.global.read_include(path)?;
+            text = ctx.global.read_include_encoded(path, ctx.option_str("encoding").unwrap_or("utf-8"))?;
         }
     }
     let mut rows = parse_csv(&text, delim, quote, escape, keepspace);
@@ -1646,6 +1741,34 @@ fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         .collect::<Vec<_>>();
     let stub = ctx.option_int("stub-columns").unwrap_or(0).max(0) as usize;
     build_table(ctx, title.as_deref(), &header, &body, &widths, stub)
+}
+
+/// Docutils `.. table::` wraps a grid/simple table with a caption and an
+/// optional `:name:` identifier. The nested table is produced by the Phase 04
+/// block parser; this handler only promotes it and attaches the caption.
+fn table_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let children = ctx.parse_nested()?;
+    let table_id = children
+        .iter()
+        .copied()
+        .find(|&id| ctx.doc.get(id).is_ok_and(|node| node.kind == NodeKind::Table));
+    let Some(table_id) = table_id else {
+        return Err(DirectiveError::Failed {
+            name: "table".to_owned(),
+            detail: "a grid or simple table is expected in the directive body".to_owned(),
+            span: miette::SourceSpan::new((ctx.span.start as usize).into(), ctx.span.len() as usize),
+        });
+    };
+    if let Some(name) = ctx.option_str("name").map(crate::names::fully_normalize_name) {
+        ctx.doc.get_mut(table_id)?.attrs.set_list("ids", vec![crate::names::make_id(&name)]);
+        ctx.doc.get_mut(table_id)?.attrs.set_list("names", vec![name]);
+    }
+    if let Some(title) = ctx.argument(0).map(str::to_owned).filter(|title| !title.trim().is_empty()) {
+        let title_id = ctx.add(NodeKind::Title, table_id)?;
+        ctx.parse_inline_into(title.trim(), title_id, ctx.line)?;
+        ctx.doc.insert_child(table_id, 0, title_id)?;
+    }
+    Ok(vec![table_id])
 }
 
 fn list_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -1792,7 +1915,7 @@ fn literal_block_placeholder(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn literalinclude(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let path = ctx.argument(0).unwrap_or("").to_owned();
-    let text = ctx.global.read_include(&path)?;
+    let text = ctx.global.read_include_encoded(&path, ctx.option_str("encoding").unwrap_or("utf-8"))?;
     let language = ctx
         .option_str("language")
         .map(str::to_owned)
@@ -1902,10 +2025,19 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
     for name in ["testsetup", "testcode", "testoutput", "doctest"] {
         registry.register(FnDirective::new(name, 0, 0, false, OptionSpec::empty(), true, inert_content));
     }
+    // Directives registered by `test-root/conf.py::setup()` and docutils
+    // directives used by the fixture. Rendering them (or at least recognising
+    // them) avoids spurious unknown-directive warnings.
+    registry.register(FnDirective::new("clsdir", 0, 0, false, OptionSpec::empty()
+        .with("opt", OptionKind::UnchangedRequired), false, clsdir));
+    registry.register(FnDirective::new("parsed-literal", 0, 0, false, OptionSpec::empty(), true, parsed_literal));
+    registry.register(FnDirective::new("sectionauthor", 1, 0, true, OptionSpec::empty(), false, sectionauthor));
+    registry.register(FnDirective::new("object", 1, 0, true, common.clone(), true, inert_content));
+    registry.register(FnDirective::new("userdesc", 1, 0, true, common.clone(), true, userdesc));
 
     registry.register(FnDirective::new("epigraph", 0, 1, true, OptionSpec::empty(), true, epigraph_body));
-    registry.register(FnDirective::new("highlights", 0, 0, false, OptionSpec::empty(), true, highlights_body));
-    registry.register(FnDirective::new("pull-quote", 0, 0, false, OptionSpec::empty(), true, pullquote_body));
+    registry.register(FnDirective::new("highlights", 0, 1, true, OptionSpec::empty(), true, highlights_body));
+    registry.register(FnDirective::new("pull-quote", 0, 1, true, OptionSpec::empty(), true, pullquote_body));
 
     registry.register(FnDirective::new("rubric", 1, 0, true, common.clone().with("heading-level", OptionKind::Choice(vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into(), "6".into()])), false, rubric));
     registry.register(FnDirective::new("topic", 1, 0, true, common.clone(), true, topic));
@@ -1972,7 +2104,9 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
     registry.register(FnDirective::new("role", 0, 1, true, OptionSpec::common().with("language", OptionKind::Unchanged), true, role_directive));
     registry.register(FnDirective::new("default-role", 0, 1, false, OptionSpec::empty(), false, default_role_directive));
     registry.register(FnDirective::new("title", 1, 0, true, OptionSpec::empty(), false, title_directive));
-    registry.register(FnDirective::new("meta", 0, 0, false, OptionSpec::empty(), true, meta));
+    registry.register(FnDirective::new("meta", 0, 0, false, OptionSpec::empty()
+        .with("author", OptionKind::Unchanged)
+        .with("keywords", OptionKind::Unchanged), true, meta));
     registry.register(FnDirective::new("math", 0, 1, true, OptionSpec::empty()
         .with("label", OptionKind::Unchanged)
         .with("name", OptionKind::Unchanged)
@@ -2004,6 +2138,10 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
         .with("figclass", OptionKind::ClassOption)
         .with("figname", OptionKind::Unchanged), true, figure));
 
+    registry.register(FnDirective::new("table", 1, 0, true, OptionSpec::empty()
+        .with("class", OptionKind::ClassOption)
+        .with("name", OptionKind::Unchanged)
+        .with("align", OptionKind::Choice(vec!["top".into(), "middle".into(), "bottom".into(), "left".into(), "center".into(), "right".into()])), true, table_directive));
     registry.register(FnDirective::new("csv-table", 0, 1, true, OptionSpec::empty()
         .with("header-rows", OptionKind::NonnegativeInt)
         .with("stub-columns", OptionKind::NonnegativeInt)
@@ -2041,6 +2179,7 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
     }
     registry.register(FnDirective::new("literalinclude", 1, 0, true, OptionSpec::empty()
         .with("language", OptionKind::Unchanged)
+        .with("encoding", OptionKind::Encoding)
         .with("class", OptionKind::ClassOption)
         .with("name", OptionKind::Unchanged), false, literalinclude));
 
@@ -2061,13 +2200,31 @@ fn epigraph_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         let paragraph = ctx.add(NodeKind::Paragraph, id)?;
         ctx.parse_inline_into(argument.trim(), paragraph, ctx.line)?;
     }
-    ctx.parse_nested_into(id)?;
+    let children = ctx.parse_nested_into(id)?;
+    // Docutils recognises a leading `-- author` line as an attribution.
+    for child in children {
+        if ctx.doc.get(child).is_ok_and(|n| n.kind == NodeKind::Paragraph) {
+            let text = ctx.doc.get(child).map(|n| n.astext(ctx.doc)).unwrap_or_default();
+            if let Some(author) = text.trim().strip_prefix("--") {
+                if let Ok(node) = ctx.doc.get_mut(child) {
+                    node.kind = NodeKind::Attribution;
+                    node.children.clear();
+                    let _ = ctx.doc.new_text(format!("—{}", author.trim()), Some(child));
+                }
+            }
+        }
+    }
     Ok(vec![id])
 }
 
 fn highlights_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let id = ctx.add(NodeKind::BlockQuote, ctx.parent)?;
     ctx.doc.get_mut(id)?.attrs.set_list("classes", vec!["highlights".to_owned()]);
+    let argument = ctx.arguments().join(" ");
+    if !argument.trim().is_empty() {
+        let paragraph = ctx.add(NodeKind::Paragraph, id)?;
+        ctx.parse_inline_into(argument.trim(), paragraph, ctx.line)?;
+    }
     ctx.parse_nested_into(id)?;
     Ok(vec![id])
 }
@@ -2075,6 +2232,11 @@ fn highlights_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 fn pullquote_body(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let id = ctx.add(NodeKind::BlockQuote, ctx.parent)?;
     ctx.doc.get_mut(id)?.attrs.set_list("classes", vec!["pull-quote".to_owned()]);
+    let argument = ctx.arguments().join(" ");
+    if !argument.trim().is_empty() {
+        let paragraph = ctx.add(NodeKind::Paragraph, id)?;
+        ctx.parse_inline_into(argument.trim(), paragraph, ctx.line)?;
+    }
     ctx.parse_nested_into(id)?;
     Ok(vec![id])
 }

@@ -227,6 +227,11 @@ fn emit_object(
         node.attrs.set_str("py:signature", signature);
         node.attrs.set_str("py:options", options_json(Some(module), options, extra, imports));
         node.attrs.set_str("py:sig_base", (ctx.span.start as u64).to_string());
+        node.attrs.set_bool("py:autodoc", true);
+        // Honour `:no-index:` at the node level so the domain registration
+        // pass skips these objects (Sphinx does not warn about them).
+        node.attrs.set_bool("no-index", options.no_index);
+        node.attrs.set_bool("noindex", options.no_index);
         node.span = Some(ctx.span);
     }
     let placeholder = ctx.add(NodeKind::DescSignature, desc)?;
@@ -288,7 +293,7 @@ pub fn select_members<'a>(
             // Upstream documents data/attributes without a docstring (showing
             // their value or an "alias of ..." sentence) even without
             // `:undoc-members:`; functions/classes still require a docstring.
-            let requires_doc = !matches!(member, Member::Attribute(_));
+            let requires_doc = true;
             if !options.undoc_members
                 && requires_doc
                 && member.docstring().is_none_or(|doc| doc.trim().is_empty())
@@ -334,13 +339,20 @@ fn emit_member(
     imports: &std::collections::BTreeMap<String, String>,
 ) -> HandlerResult {
     let signature = member_signature(member, class_name);
-    let extra = member_extra(member);
+    let extra = member_extra(member, options);
     let docstring = member_docstring(member, options);
     let rst = convert(docstring, config);
     let objtype = member.objtype();
     emit_object(ctx, objtype, &signature, module, options, &extra, imports, rst.as_deref(), |ctx, content| {
         if let Member::Class(class) = member {
-            emit_class_children(ctx, class, module, options, config, imports)?;
+            // An explicit `:members: Inner` selects which members of the
+            // *outer* class to document. Once `Inner` is being documented its
+            // own members are all included, so clear the name filter.
+            let mut child_options = options.clone();
+            if child_options.members.is_some() {
+                child_options.members = Some(Vec::new());
+            }
+            emit_class_children(ctx, class, module, &child_options, config, imports)?;
         }
         if options.show_inheritance {
             if let Member::Class(class) = member {
@@ -372,12 +384,29 @@ fn member_signature(member: &Member, class_name: Option<&str>) -> String {
             }
             signature
         }
-        Member::Class(info) => info.name.clone(),
+        Member::Class(info) => {
+            // Sphinx's autoclass uses the `__init__` signature's parameters
+            // for the class signature (`class Class(arg)`).
+            let mut name = info.name.clone();
+            if let Some(init) = info.members.iter().find_map(|member| match member {
+                Member::Function(func) if func.name == "__init__" => Some(func),
+                _ => None,
+            }) {
+                if let Some(open) = init.signature.find('(') {
+                    if let Some(close) = init.signature.rfind(')') {
+                        if close > open {
+                            name.push_str(&init.signature[open..=close]);
+                        }
+                    }
+                }
+            }
+            name
+        }
         Member::Attribute(info) => info.name.clone(),
     }
 }
 
-fn member_extra(member: &Member) -> ExtraOptions {
+fn member_extra(member: &Member, options: &AutoOptions) -> ExtraOptions {
     match member {
         Member::Function(info) => ExtraOptions {
             is_async: info.kind == crate::model::FunctionKind::Coroutine,
@@ -392,7 +421,21 @@ fn member_extra(member: &Member) -> ExtraOptions {
             is_abstract: info.is_abstract,
             ..ExtraOptions::default()
         },
-        Member::Attribute(_) => ExtraOptions::default(),
+        Member::Attribute(info) => {
+            // Sphinx shows `= value` only for documented attributes whose
+            // value has a stable literal repr; calls / `None` / undocumented
+            // attributes (notably instance attributes) omit it.
+            let show_value = !options.no_value
+                && info.docstring.as_ref().is_some_and(|d| !d.trim().is_empty())
+                && info.value.as_deref().is_some_and(|value| {
+                    !value.contains('(') || value.contains("StringIO")
+                });
+            ExtraOptions {
+                type_annotation: info.annotation.clone(),
+                value: if show_value { info.value.clone() } else { None },
+                ..ExtraOptions::default()
+            }
+        }
     }
 }
 
@@ -431,9 +474,31 @@ fn emit_class_children(
     imports: &std::collections::BTreeMap<String, String>,
 ) -> HandlerResult {
     let all = None;
+    let own_names: std::collections::BTreeSet<String> = class.members.iter().map(|m| m.name().to_owned()).collect();
     let members = select_members(&class.members, options, all);
+    if options.inherited_members {
+        // Follow base classes declared in the same module and include their
+        // documented members as if they belonged to this class (Sphinx's
+        // `:inherited-members:` semantics).
+        let (roots, _) = roots_and_config(ctx);
+        if let Some(path) = resolve_module(module, &roots) {
+            if let Some(module_info) = load_cached(module, &path) {
+                let mut inherited_options = options.clone();
+                inherited_options.inherited_members = false;
+                inherited_options.members = Some(Vec::new());
+                for base_expr in &class.bases {
+                    let base_name = base_expr.rsplit('.').next().unwrap_or(base_expr).trim();
+                    let Some(Member::Class(base)) = module_info.find(base_name) else { continue };
+                    for inherited in select_members(&base.members, &inherited_options, None) {
+                        if own_names.contains(inherited.name()) { continue; }
+                        emit_member(ctx, inherited, module, options, config, Some(&class.qualname), imports)?;
+                    }
+                }
+            }
+        }
+    }
     for member in members {
-        emit_member(ctx, member, module, options, config, Some(&class.name), imports)?;
+        emit_member(ctx, member, module, options, config, Some(&class.qualname), imports)?;
     }
     Ok(Vec::new())
 }
@@ -517,6 +582,14 @@ impl Directive for AutoDirective {
                     );
                 }
             };
+            // Upstream `autodoc` records the module being documented in
+            // `env.temp_data['autodoc_module']` so that subsequent bare
+            // `autoclass`/`autofunction` names resolve inside this module
+            // (e.g. `.. autoclass:: Class` after `.. automodule:: pkg`).
+            // Mirror that by updating the shared current-module context.
+            if let Ok(mut guard) = ctx.global.current_module.write() {
+                *guard = Some(module.name.clone());
+            }
             let mut ids = emit_module_target(ctx, &module.name)?;
             ids.extend(emit_module_docstring(ctx, module.docstring.as_deref(), config.as_ref())?);
             let all = if options.ignore_module_all { None } else { module.all.as_deref() };
@@ -548,7 +621,7 @@ impl Directive for AutoDirective {
                 );
             }
         };
-        let matches = module.find_all(&object_path);
+        let matches = module.find_leaf(&object_path);
         if matches.is_empty() {
             return Err(DirectiveError::Failed {
                 name: self.name.to_owned(),
@@ -563,7 +636,7 @@ impl Directive for AutoDirective {
             Member::Function(_) | Member::Attribute(_) => object_path.rsplit_once('.').map(|(class, _)| class.to_owned()),
             Member::Class(_) => None,
         };
-        let extra = member_extra(member);
+        let extra = member_extra(member, &options);
         let docstring: Option<String> = match member {
             Member::Class(class) if options.class_doc_from == ClassDocFrom::Both => {
                 // Concatenate init and class docstrings as upstream does.

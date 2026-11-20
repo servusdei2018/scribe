@@ -62,7 +62,7 @@ pub const BUILTIN_TYPES: &[&str] = &[
 pub const KEYWORDS: &[&str] = &[
     "const", "volatile", "constexpr", "static", "inline", "virtual", "explicit", "friend",
     "public", "protected", "private", "typename", "class", "struct", "union", "enum", "typedef",
-    "template", "mutable",
+    "template", "mutable", "requires",
 ];
 
 fn normalized(src: &str) -> &str {
@@ -380,6 +380,27 @@ pub fn type_tokens(toks: &[Tok], domain: &str) -> Vec<SigToken> {
                     }
                 } else {
                     out.push(SigToken::reference(domain, token.text.clone(), "identifier", "cpp-identifier"));
+                    // A template-id `A<T1, T2>` is a single lookup key in
+                    // Sphinx; merge the argument tokens into the reference so
+                    // the warning names the whole construct.
+                    if toks.get(index + 1).is_some_and(|t| t.text == "<") {
+                        {
+                            let close = matching_close(toks, index + 1, "<", ">");
+                            if close < index + 2 { index += 1; continue; }
+                            let args: Vec<&str> = toks[index + 2..close].iter()
+                                .filter(|t| t.kind == TokKind::Word)
+                                .map(|t| t.text.as_str()).collect();
+                            if !args.is_empty()
+                                && toks[index + 2..close].iter().all(|t| t.kind == TokKind::Word || t.text == ",") {
+                                let merged = format!("{}<{}>", token.text, args.join(", "));
+                                if let Some(SigToken::Ref { text, target, .. }) = out.last_mut() {
+                                    text.clone_from(&merged);
+                                    target.clone_from(&merged);
+                                    index = close;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             TokKind::Punct => match token.text.as_str() {

@@ -87,7 +87,16 @@ fn object(
     // line. Upstream packs them into one `desc` with several signatures.
     let mut extra_signatures = Vec::new();
     let mut extra_lines = 0usize;
-    if content.starts_with([' ', '\t']) && !content.trim_start().starts_with(':') {
+    // C/C++ object directives set `final_argument_whitespace = True`, so
+    // additional overloaded declarations may arrive as undented content.
+    // Recognise a declaration line (a parenthesised declarator) as a further
+    // signature rather than documentation prose.
+    let declaration_content = (domain == "cpp" || domain == "c")
+        && !content.is_empty()
+        && !content.starts_with(':')
+        && !content.trim_start().starts_with("..")
+        && content.lines().next().is_some_and(|line| line.contains('(') && line.contains(')'));
+    if (content.starts_with([' ', '\t']) || declaration_content) && !content.trim_start().starts_with(':') {
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with(':') {

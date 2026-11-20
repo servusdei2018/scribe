@@ -406,6 +406,26 @@ impl Domain for CppDomain {
         document: &Document,
     ) -> DomainResult<Option<ResolvedReference>> {
         if typ == "expr" || typ == "texpr" {
+            // Sphinx's expression role links each bare identifier inside the
+            // expression as a `cpp:identifier` reference.
+            let words: Vec<String> = target.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let scope = document.get(node_id).ok()
+                .and_then(|node| node.get_str("c:scope").ok().flatten())
+                .unwrap_or("");
+            for word in words {
+                if crate::cpp::parser::KEYWORDS.contains(&word.as_str())
+                    || crate::cpp::parser::BUILTIN_TYPES.contains(&word.as_str()) { continue; }
+                if !self.find_obj(&word, "identifier", scope, false, false).is_empty() { continue; }
+                let message = format!("cpp:identifier reference target not found: {word}");
+                let source = document.get(node_id).ok().and_then(|node| node.source.clone());
+                ctx.push_diagnostic(crate::diagnostics::DomainDiagnostic::missing_reference(
+                    message, "identifier", &word,
+                    Some(ctx.docname.to_owned()), None,
+                ).with_source(source.as_ref()));
+            }
             return Ok(Some(ResolvedReference::default().passthrough()));
         }
         // Upstream raises `NoUri` for names in the `std::` namespace: they are

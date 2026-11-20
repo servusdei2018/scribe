@@ -96,49 +96,124 @@ fn render_page(manager: &ThemeManager, ctx: &RenderContext, _fallback_name: &str
     manager.render_template("page.html", ctx).map_err(HtmlError::theme)
 }
 
-/// Deterministic index body grouped by first letter.
+/// Deterministic index body grouped by first letter. Command-line options
+/// produce two entries in upstream's index: a symbol-keyed entry and a
+/// program-keyed group ("git-commit command line option") with nested links.
 fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&str) -> String) -> String {
-    let mut grouped: BTreeMap<char, Vec<&ObjectEntry>> = BTreeMap::new();
-    for entry in entries {
-        let key = entry.name.chars().next().unwrap_or('#').to_ascii_uppercase();
-        grouped.entry(key).or_default().push(entry);
+    const SYMBOLS: char = '#';
+    #[derive(Clone)]
+    struct Logical<'a> {
+        key: char,
+        entry: &'a ObjectEntry,
+        program: Option<String>,
+        option: Option<String>,
     }
+    let mut logical: Vec<Logical<'_>> = Vec::new();
+    for entry in entries {
+        if entry.objtype.contains("option") {
+            let (program, option) = entry.name.split_once('.').unwrap_or(("", entry.name.as_str()));
+            let option = option.to_owned();
+            // symbol-keyed entry
+            logical.push(Logical { key: SYMBOLS, entry, program: None, option: Some(option.clone()) });
+            // program-keyed entry (only when there is a program prefix)
+            if !program.is_empty() {
+                let first = program.chars().next().unwrap_or('#').to_ascii_uppercase();
+                logical.push(Logical {
+                    key: if first.is_ascii_alphanumeric() { first } else { SYMBOLS },
+                    entry,
+                    program: Some(program.to_owned()),
+                    option: Some(option),
+                });
+            }
+        } else {
+            let short = entry.name.rsplit('.').next().unwrap_or(&entry.name);
+            let first = short.chars().next().unwrap_or('#');
+            let key = if first.is_ascii_alphanumeric() { first.to_ascii_uppercase() } else { SYMBOLS };
+            logical.push(Logical { key, entry, program: None, option: None });
+        }
+    }
+    let mut grouped: BTreeMap<char, Vec<Logical<'_>>> = BTreeMap::new();
+    for item in logical { grouped.entry(item.key).or_default().push(item); }
+    let label = |key: char| if key == SYMBOLS { "Symbols".to_owned() } else { key.to_string() };
+    let target_for = |entry: &ObjectEntry| -> String {
+        if entry.docname.is_empty() {
+            "#".to_owned()
+        } else {
+            let href = href_for(&entry.docname);
+            if entry.anchor.is_empty() { href } else { format!("{href}#{}", entry.anchor) }
+        }
+    };
     let mut out = format!("<h1 id=\"{slug}\">{title}</h1>\n", slug = slug(title));
     if entries.is_empty() {
-        // Upstream's `genindex.html` always emits the (empty) letter jumpbox,
-        // even when the index has no entries. Mirror that DOM wrapper rather
-        // than a placeholder paragraph so the page's tag multiset matches.
         out.push_str("\n<div class=\"genindex-jumpbox\">\n \n</div>\n");
         return out;
     }
-    out.push_str("<div class=\"genindexwrapper\">\n<ul class=\"search\">\n");
-    for letter in grouped.keys() {
-        out.push_str(&format!("<li><a href=\"#letter-{letter}\">{letter}</a></li>\n"));
+    out.push_str("<div class=\"genindex-jumpbox\">\n ");
+    let mut first = true;
+    for key in grouped.keys() {
+        if !first { out.push_str(" | "); }
+        first = false;
+        let text = label(*key);
+        out.push_str(&format!("<a href=\"#{text}\"><strong>{text}</strong></a>"));
     }
-    out.push_str("</ul>\n");
-    for (letter, mut group) in grouped {
-        out.push_str(&format!("<section id=\"letter-{letter}\">\n<h2>{letter}</h2>\n<ul>\n"));
-        group.sort_by(|a, b| a.name.cmp(&b.name));
-        for entry in group {
-            let target = if entry.docname.is_empty() {
-                "#".to_owned()
-            } else {
-                let href = href_for(&entry.docname);
-                if entry.anchor.is_empty() {
-                    href
-                } else {
-                    format!("{href}#{}", entry.anchor)
+    out.push_str("\n \n</div>\n");
+    for (key, mut group) in grouped {
+        let text = label(key);
+        out.push_str(&format!("<h2 id=\"{text}\">{text}</h2>\n"));
+        group.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
+        let midpoint = group.len().div_ceil(2);
+        out.push_str("<table style=\"width: 100%\" class=\"indextable genindextable\"><tr>\n");
+        for column in [&group[..midpoint], &group[midpoint..]] {
+            out.push_str("<td style=\"width: 33%; vertical-align: top;\"><ul>\n");
+            if key == SYMBOLS {
+                for item in column {
+                    let option = item.option.as_deref().unwrap_or(&item.entry.name);
+                    out.push_str(&format!("      <li>\n    {}\n\n      <ul>\n", html_escape(option)));
+                    out.push_str(&format!(
+                        "        <li><a href=\"{}\">{}</a>\n</li>\n",
+                        html_escape(&target_for(item.entry)),
+                        html_escape(&item.entry.display_name)
+                    ));
+                    out.push_str("      </ul></li>\n");
                 }
-            };
-            out.push_str(&format!(
-                "<li><a href=\"{}\">{}</a></li>\n",
-                html_escape(&target),
-                html_escape(&entry.display_name)
-            ));
+            } else {
+                // Group program-keyed options so each program has one term
+                // with nested option links; other entries are plain links.
+                let mut index = 0usize;
+                while index < column.len() {
+                    let item = &column[index];
+                    if let Some(program) = &item.program {
+                        out.push_str(&format!("      <li>\n    {} command line option\n\n      <ul>\n", html_escape(program)));
+                        while index < column.len() && column[index].program.as_deref() == Some(program.as_str()) {
+                            let sub = &column[index];
+                            let opt = sub.option.as_deref().unwrap_or("");
+                            out.push_str(&format!(
+                                "        <li><a href=\"{}\">{}</a>\n</li>\n",
+                                html_escape(&target_for(sub.entry)),
+                                html_escape(opt)
+                            ));
+                            index += 1;
+                        }
+                        out.push_str("      </ul></li>\n");
+                    } else {
+                        let lbl = if item.entry.objtype == "term" || item.entry.objtype.starts_with("idx_") {
+                            format!("<strong>{}</strong>", html_escape(&item.entry.display_name))
+                        } else {
+                            html_escape(&item.entry.display_name)
+                        };
+                        out.push_str(&format!(
+                            "<li><a href=\"{}\">{}</a></li>\n",
+                            html_escape(&target_for(item.entry)),
+                            lbl
+                        ));
+                        index += 1;
+                    }
+                }
+            }
+            out.push_str("</ul></td>\n");
         }
-        out.push_str("</ul>\n</section>\n");
+        out.push_str("</tr></table>\n");
     }
-    out.push_str("</div>\n");
     out
 }
 
@@ -168,6 +243,43 @@ pub fn collect_objects(registry: &DomainRegistry) -> Vec<ObjectEntry> {
     entries
 }
 
+/// Collect index entries from every doctree's `index` nodes (Sphinx's
+/// `IndexCollector`). Each `entries` attribute is a Python-repr list of
+/// `(type, name, anchor, ...)` tuples; only the first three matter here.
+fn collect_doctree_index_entries(env: &scribe_core::BuildEnvironment) -> Vec<ObjectEntry> {
+    let mut entries = Vec::new();
+    for (docname, snapshot) in &env.documents {
+        let Some(doc) = snapshot.doctree.as_ref() else { continue };
+        for id in doc.preorder_ids() {
+            let Ok(node) = doc.get(id) else { continue };
+            if node.kind != scribe_ast::NodeKind::Index { continue; }
+            let raw = node.get_str("entries").ok().flatten().unwrap_or("");
+            for (kind, name, anchor) in parse_index_entries(raw) {
+                let display = name.rsplit(';').next().unwrap_or(&name).trim().to_owned();
+                if display.is_empty() { continue; }
+                let objtype = if anchor.starts_with("term-") { "term".to_owned() } else { format!("idx_{kind}") };
+                entries.push(ObjectEntry::new(name, display, objtype, docname.clone(), anchor, -1));
+            }
+        }
+    }
+    entries
+}
+
+/// Splits an `entries` attribute into `(type, name, anchor)` triples.
+fn parse_index_entries(raw: &str) -> Vec<(String, String, String)> {
+    let mut result = Vec::new();
+    for part in raw.split("['").skip(1) {
+        let inner = part.split("]").next().unwrap_or("");
+        let fields: Vec<&str> = inner.split("', '").collect();
+        if fields.len() < 3 { continue; }
+        let kind = fields[0].trim_matches(|c: char| c == '\'' || c == '"').to_owned();
+        let name = fields[1].trim_matches(|c: char| c == '\'' || c == '"').to_owned();
+        let anchor = fields[2].trim_matches(|c: char| c == '\'' || c == '"').to_owned();
+        if !name.is_empty() { result.push((kind, name, anchor)); }
+    }
+    result
+}
+
 /// Write all generated index/search pages into `outdir`.
 ///
 /// The output paths follow the flavor's target-URI convention, so dirhtml and
@@ -177,6 +289,7 @@ pub fn write_index_pages(
     manager: &ThemeManager,
     ctx: &RenderContext,
     registry: &DomainRegistry,
+    env: &scribe_core::BuildEnvironment,
     outdir: &Path,
     flavor: &BuildFlavor,
 ) -> Result<Vec<std::path::PathBuf>> {
@@ -185,10 +298,18 @@ pub fn write_index_pages(
     // and implicit `:ref:` targets, including the virtual `genindex`,
     // `modindex` and `search` labels) are never listed there. Filter every
     // label so named code blocks do not leak phantom rows into the index.
-    let objects: Vec<ObjectEntry> = collect_objects(registry)
+    let mut objects: Vec<ObjectEntry> = collect_objects(registry)
         .into_iter()
         .filter(|entry| entry.objtype != "label")
         .collect();
+    // Skip index nodes that merely mirror a registered domain object.
+    let known_anchors: std::collections::BTreeSet<String> = objects.iter()
+        .map(|entry| entry.anchor.clone()).collect();
+    let extra = collect_doctree_index_entries(env)
+        .into_iter()
+        .filter(|entry| !known_anchors.contains(&entry.anchor))
+        .collect::<Vec<_>>();
+    objects.extend(extra);
     let mut pages: Vec<(String, String)> = Vec::new();
     // Each generated page needs its own `docname` so `pathto` computes the
     // correct base URI (crucial for dirhtml's nested `genindex/index.html`).

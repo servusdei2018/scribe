@@ -164,11 +164,18 @@ impl JavaScriptDomain {
             }
         }
         candidates.push(target.clone());
-        for candidate in candidates {
-            if let Some(entry) = data.objects.get(&candidate) {
+        for candidate in &candidates {
+            if let Some(entry) = data.objects.get(candidate) {
                 if allowed.as_ref().is_none_or(|types| types.contains(&entry.objtype.as_str())) {
-                    return vec![(candidate, entry.clone())];
+                    return vec![(candidate.clone(), entry.clone())];
                 }
+            }
+        }
+        // Sphinx falls back to any JS object type when the role-specific type
+        // has no match (e.g. `:js:attr:` pointing at a documented function).
+        for candidate in &candidates {
+            if let Some(entry) = data.objects.get(candidate) {
+                return vec![(candidate.clone(), entry.clone())];
             }
         }
         if specific {
@@ -480,7 +487,7 @@ fn prepare_one(document: &mut Document, child: NodeId, scope: &JsScope) -> Domai
             node.attrs.set_str("entries", format!("['single', '{label}', '{fullname}', '', None]"));
         }
     }
-    build_signature(document, child, &name, &objtype, &effective, span)?;
+    build_signature(document, child, &name, &objtype, &effective, span, &signature)?;
     annotate_scope(document, child, &effective);
 
     let mut inner = effective.clone();
@@ -490,7 +497,7 @@ fn prepare_one(document: &mut Document, child: NodeId, scope: &JsScope) -> Domai
     prepare_children(document, child, &inner)
 }
 
-fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &str, scope: &JsScope, span: Span) -> DomainResult<()> {
+fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &str, scope: &JsScope, span: Span, signature: &str) -> DomainResult<()> {
     let signature_id = document.get(desc).ok().and_then(|node| node.children.iter().copied().find(|&id| {
         document.get(id).is_ok_and(|child| child.kind == NodeKind::DescSignature)
     })).unwrap_or(NodeId::NULL);
@@ -537,6 +544,149 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
     builder.sig(NodeKind::DescSigName, name, "n", name_node)?;
     let params = builder.add(NodeKind::DescParameterlist, signature_id)?;
     if let Ok(node) = builder.doc.get_mut(params) { node.attrs.set_str("xml:space", "preserve"); }
+    // Materialize the declared parameters (`foo(a, b[, c])`) as `desc_parameter`
+    // nodes with `desc_sig_name` leaves, matching Sphinx's JS signature DOM.
+    if let Some(open) = signature.find('(') {
+        if let Some(close) = signature.rfind(')') {
+            if close > open {
+                let args = &signature[open + 1..close];
+                for arg in args.split(',') {
+                    let arg = arg.trim().trim_start_matches("...");
+                    if arg.is_empty() { continue; }
+                    let param = builder.add(NodeKind::DescParameter, params)?;
+                    let leaf = builder.add(NodeKind::DescSigName, param)?;
+                    builder.classes(leaf, &["n"])?;
+                    let text = arg.trim_start_matches('[').trim_end_matches(']');
+                    if !text.is_empty() { builder.text(text, leaf)?; }
+                }
+            }
+        }
+    }
+    // Upstream's JS domain rewrites typed field bodies (`param Type name`,
+    // `throws Type`) into `js:class` cross-references.
+    let content_id = builder.doc.get(desc).ok().and_then(|node| node.children.iter().copied()
+        .find(|&id| builder.doc.get(id).is_ok_and(|n| n.kind == NodeKind::DescContent)));
+    if let Some(content) = content_id { rewrite_js_fields(builder.doc, content, scope)?; }
+    Ok(())
+}
+
+/// Rewrites JS object field lists so typed parameters and `:throws:` roles
+/// produce `js:class` cross-references (and their nitpicky warnings).
+fn rewrite_js_fields(document: &mut Document, content: NodeId, scope: &JsScope) -> DomainResult<()> {
+    let fieldlists: Vec<NodeId> = document.get(content).ok()
+        .map(|node| node.children.iter().copied()
+            .filter(|&id| document.get(id).is_ok_and(|n| n.kind == NodeKind::FieldList))
+            .collect()).unwrap_or_default();
+    for fieldlist in fieldlists {
+        let fields: Vec<NodeId> = document.get(fieldlist).ok().map(|n| n.children.to_vec()).unwrap_or_default();
+        let mut params: Vec<(String, Option<String>, NodeId, Option<scribe_ast::SourcePos>)> = Vec::new();
+        let mut throws: Vec<(String, NodeId, Option<scribe_ast::SourcePos>)> = Vec::new();
+        let mut other: Vec<NodeId> = Vec::new();
+        for field in fields {
+            let name = document.children(field).ok().and_then(|c| c.iter().copied()
+                .find(|&id| document.get(id).is_ok_and(|n| n.kind == NodeKind::FieldName)))
+                .map(|id| document.get(id).map(|n| n.astext(document)).unwrap_or_default()).unwrap_or_default();
+            let body = document.children(field).ok().and_then(|c| c.iter().copied()
+                .find(|&id| document.get(id).is_ok_and(|n| n.kind == NodeKind::FieldBody)));
+            let field_source = document.get(field).ok().and_then(|n| n.source.clone());
+            let text = name.trim();
+            if let Some(rest) = text.strip_prefix("param ") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                let (typ, pname) = if parts.len() >= 2 { (Some(parts[0].to_owned()), parts[1..].join(" ")) } else { (None, rest.to_owned()) };
+                params.push((pname, typ, body.unwrap_or(field), field_source));
+            } else if let Some(rest) = text.strip_prefix("throws ") {
+                throws.push((rest.trim().to_owned(), body.unwrap_or(field), field_source));
+            } else {
+                other.push(field);
+            }
+        }
+        let mut rebuilt: Vec<NodeId> = Vec::new();
+        if !params.is_empty() {
+            let field = document.add(NodeKind::Field, None)?;
+            let name = document.add(NodeKind::FieldName, None)?;
+            let _ = document.new_text("Parameters", Some(name));
+            let body = document.add(NodeKind::FieldBody, None)?;
+            let bullets = document.add(NodeKind::BulletList, None)?;
+            for (pname, typ, original_body, field_source) in &params {
+                let item = document.add(NodeKind::ListItem, None)?;
+                let para = document.add(NodeKind::Paragraph, None)?;
+                let strong = document.add(NodeKind::LiteralStrong, None)?;
+                let _ = document.new_text(pname, Some(strong));
+                let _ = document.append_child(para, strong);
+                if let Some(typ) = typ {
+                    let _ = document.new_text(" (", Some(para));
+                    let span = document.add(NodeKind::Inline, None)?;
+                    let xref = document.add(NodeKind::PendingXref, None)?;
+                    if let Ok(node) = document.get_mut(xref) {
+                        if let Some(mut view) = node.pending_xref_mut() {
+                            view.set_refdomain(Some("js".to_owned()));
+                            view.set_reftype(Some("class".to_owned()));
+                            view.set_reftarget(Some(typ.clone()));
+                            view.set_refspecific(Some(false));
+                        }
+                        node.attrs.set_str("js:module", scope.module_text());
+                        node.attrs.set_str("js:object", scope.object_text());
+                        node.attrs.set_list("classes", vec!["xref".to_owned(), "js".to_owned(), "js-class".to_owned()]);
+                        if let Some(pos) = field_source { node.source = Some(pos.clone()); }
+                    }
+                    let code = document.add(NodeKind::Literal, None)?;
+                    let _ = document.new_text(typ, Some(code));
+                    let _ = document.append_child(xref, code);
+                    let _ = document.append_child(span, xref);
+                    let _ = document.append_child(para, span);
+                    let _ = document.new_text(")", Some(para));
+                }
+                if let Some(original) = document.get(*original_body).ok().and_then(|n| n.children.first().copied()) {
+                    if let Some(text) = document.get(original).ok().map(|n| n.astext(document)) {
+                        let _ = document.new_text(format!(" – {text}"), Some(para));
+                    }
+                }
+                let _ = document.append_child(item, para);
+                let _ = document.append_child(bullets, item);
+            }
+            let _ = document.append_child(body, bullets);
+            let _ = document.append_child(field, name);
+            let _ = document.append_child(field, body);
+            rebuilt.push(field);
+        }
+        for (typ, original_body, field_source) in &throws {
+            let field = document.add(NodeKind::Field, None)?;
+            let name = document.add(NodeKind::FieldName, None)?;
+            let _ = document.new_text("Throws", Some(name));
+            let body = document.add(NodeKind::FieldBody, None)?;
+            let para = document.add(NodeKind::Paragraph, None)?;
+            let span = document.add(NodeKind::Inline, None)?;
+            let xref = document.add(NodeKind::PendingXref, None)?;
+            if let Ok(node) = document.get_mut(xref) {
+                if let Some(mut view) = node.pending_xref_mut() {
+                    view.set_refdomain(Some("js".to_owned()));
+                    view.set_reftype(Some("class".to_owned()));
+                    view.set_reftarget(Some(typ.clone()));
+                    view.set_refspecific(Some(false));
+                }
+                node.attrs.set_str("js:module", scope.module_text());
+                node.attrs.set_str("js:object", scope.object_text());
+                node.attrs.set_list("classes", vec!["xref".to_owned(), "js".to_owned(), "js-class".to_owned()]);
+                if let Some(pos) = field_source { node.source = Some(pos.clone()); }
+            }
+            let code = document.add(NodeKind::Literal, None)?;
+            let _ = document.new_text(typ, Some(code));
+            let _ = document.append_child(xref, code);
+            let _ = document.append_child(span, xref);
+            let _ = document.append_child(para, span);
+            if let Some(original) = document.get(*original_body).ok().and_then(|n| n.children.first().copied()) {
+                if let Some(text) = document.get(original).ok().map(|n| n.astext(document)) {
+                    let _ = document.new_text(format!(" – {text}"), Some(para));
+                }
+            }
+            let _ = document.append_child(body, para);
+            let _ = document.append_child(field, name);
+            let _ = document.append_child(field, body);
+            rebuilt.push(field);
+        }
+        rebuilt.extend(other);
+        let _ = document.replace_children(fieldlist, rebuilt);
+    }
     Ok(())
 }
 

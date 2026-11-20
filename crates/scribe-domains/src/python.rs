@@ -196,6 +196,23 @@ impl PythonDomain {
         aliased: bool,
         span: Option<Span>,
     ) {
+        self.note_object_ex(ctx, name, objtype, node_id, aliased, span, false);
+    }
+
+    /// `note_object` with an autodoc provenance flag. Autodoc duplicates use a
+    /// distinct diagnostic code so builders can emit only those (Sphinx logs
+    /// them with an `<unknown>:1` location, unlike ordinary domain duplicates).
+    #[allow(clippy::too_many_arguments)]
+    pub fn note_object_ex(
+        &self,
+        ctx: &DomainContext<'_>,
+        name: &str,
+        objtype: &str,
+        node_id: &str,
+        aliased: bool,
+        span: Option<Span>,
+        autodoc: bool,
+    ) {
         let mut data = self.data.write();
         if let Some(other) = data.objects.get(name) {
             if other.aliased && !aliased {
@@ -208,9 +225,17 @@ impl PythonDomain {
                     "duplicate object description of {name}, other instance in {}, use :no-index: for one of them",
                     other.docname
                 );
-                ctx.push_diagnostic(DomainDiagnostic::duplicate_object(
+                let mut diagnostic = DomainDiagnostic::duplicate_object(
                     message, objtype, name, Some(ctx.docname.to_owned()), span,
-                ));
+                );
+                // Sphinx warns about autodoc duplicates only when both
+                // descriptions live in the same document (e.g. `automodule`
+                // plus `autoclass` in one page). Cross-document re-exports are
+                // silently deduplicated.
+                if autodoc && other.docname == ctx.docname {
+                    diagnostic.code = crate::diagnostics::codes::AUTODOC_DUPLICATE.to_owned();
+                }
+                ctx.push_diagnostic(diagnostic);
             }
         }
         data.objects.insert(
@@ -656,13 +681,14 @@ impl Domain for PythonDomain {
                 self.note_module(ctx.docname, &object_key, &anchor, &synopsis, &platform, deprecated);
             }
 
-            self.note_object(ctx, &object_key, &objtype, &anchor, false, span);
+            let autodoc = node.attrs.get_bool("py:autodoc").ok().flatten().unwrap_or(false);
+            self.note_object_ex(ctx, &object_key, &objtype, &anchor, false, span, autodoc);
 
             // `canonical` registers an alias unless this is a `type` directive.
             if objtype != "type" {
                 if let Some(canonical) = node.get_str("py:canonical").ok().flatten() {
                     if !canonical.is_empty() {
-                        self.note_object(ctx, canonical, &objtype, &anchor, true, span);
+                        self.note_object_ex(ctx, canonical, &objtype, &anchor, true, span, autodoc);
                     }
                 }
             }

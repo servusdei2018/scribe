@@ -449,6 +449,7 @@ impl<'a> BlockParser<'a> {
         let mut parsed = parse_inline(
             &source,
             &InlineOptions {
+                index_counter: std::sync::Arc::clone(&self.options.index_counter),
                 source_name: self.options.source_name.clone(),
                 extlinks: Arc::clone(&self.options.extlinks),
                 default_role: self.options.default_role.clone(),

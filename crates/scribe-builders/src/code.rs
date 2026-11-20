@@ -510,7 +510,7 @@ fn run_code_block(
 
 /// Reads a file through the injectable resolver and expands tabs.
 fn read_source(ctx: &DirectiveContext<'_>, path: &str) -> Result<String, DirectiveError> {
-    let text = ctx.global.read_include(path)?;
+    let text = ctx.global.read_include_encoded(path, ctx.option_str("encoding").unwrap_or("utf-8"))?;
     let tab_width = ctx.option_int("tab-width").unwrap_or(0);
     if tab_width > 0 {
         Ok(expand_tabs(&text, tab_width as usize))

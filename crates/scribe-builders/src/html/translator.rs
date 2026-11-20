@@ -284,6 +284,13 @@ impl<'a> HTML5Translator<'a> {
             out.push('"');
         }
         out.push('>');
+        // Docutils' `starttag` emits an empty `<span id="...">` for every
+        // additional id on a non-sequential node (e.g. C++ aliases).
+        if let Some(first) = ids.iter().map(|id| id.trim()).find(|id| !id.is_empty()) {
+            for extra in ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty() && *id != first) {
+                out.push_str(&format!("<span id=\"{}\"></span>", escape_attr(extra)));
+            }
+        }
         out
     }
 
@@ -418,19 +425,9 @@ impl<'a> HTML5Translator<'a> {
 
     fn render_tgroup(&self, tgroup: &Node) -> String {
         let mut out = String::new();
-        let cols: Vec<&Node> = tgroup.children.iter()
-            .filter_map(|&id| self.doc.get(id).ok())
-            .filter(|n| n.kind == NodeKind::Colspec)
-            .collect();
-        if !cols.is_empty() {
-            out.push_str("<colgroup>\n");
-            for col in cols {
-                let width = node_str(col, "colwidth");
-                let style = if width.is_empty() { String::new() } else { format!(" style=\"width: {}\"", escape_attr(&width)) };
-                out.push_str(&format!("<col{style} />\n"));
-            }
-            out.push_str("</colgroup>\n");
-        }
+        // Docutils' HTML5 writer does not emit `<colgroup>`/`<col>` even when
+        // the doctree carries colspec nodes; column widths are applied to the
+        // individual cells instead. Emitting them would add non-oracle tags.
         let mut row_index = 0usize;
         for &child in &tgroup.children {
             let Ok(section) = self.doc.get(child) else { continue };
@@ -564,7 +561,19 @@ impl<'a> HTML5Translator<'a> {
                 if let Some(display) = section_number_display(node) {
                     self.emit(&format!("<span class=\"section-number\">{display}</span>"));
                 }
-                let mut frame = Frame::new(format!("</{tag}>\n"), NodeKind::Title);
+                // Section titles that are targets of a `.. contents::` entry
+                // carry a `refid` back to that entry; Sphinx wraps the title
+                // in `<a class="toc-backref" role="doc-backlink">`.
+                let backref = node.get_str("refid").ok().flatten().filter(|s| !s.is_empty()).map(str::to_owned);
+                if let Some(backref) = &backref {
+                    self.emit(&format!("<a class=\"toc-backref\" href=\"#{}\" role=\"doc-backlink\">", escape_attr(backref)));
+                }
+                let close = if backref.is_some() {
+                    format!("</a></{tag}>\n")
+                } else {
+                    format!("</{tag}>\n")
+                };
+                let mut frame = Frame::new(close, NodeKind::Title);
                 if self.ctx.add_permalinks {
                     if let Some(parent) = self.parent_node(id) {
                         let ids = parent.ids().unwrap_or_default();
@@ -761,7 +770,7 @@ fn node_text(doc: &Document, node: &Node) -> String {
 /// sections of `doc`. The first top-level section links to `#` (the page top),
 /// matching Sphinx's document-title behaviour.
 #[must_use]
-pub fn render_local_toc(doc: &Document, maxdepth: usize) -> String {
+pub fn render_local_toc(doc: &Document, maxdepth: usize, numbers: Option<&scribe_core::SectionNumbers>, docname: &str) -> String {
     fn sections_of(doc: &Document, parent: NodeId) -> Vec<NodeId> {
         doc.get(parent)
             .map(|node| node.children.iter().copied()
@@ -778,19 +787,81 @@ pub fn render_local_toc(doc: &Document, maxdepth: usize) -> String {
     fn anchor_of(doc: &Document, section: NodeId) -> Option<String> {
         doc.get(section).ok()?.ids().ok()?.into_iter().next()
     }
-    fn walk(doc: &Document, parent: NodeId, depth: usize, maxdepth: usize, first: bool, out: &mut String) {
+    /// Domain objects that Sphinx adds to a section's local ToC entry. The
+    /// doctree has already had its signatures expanded, so the `Desc` nodes
+    /// carry `py:fullname` / `py:module` / `py:anchor` provenance.
+    fn section_objects(doc: &Document, section: NodeId) -> Vec<NodeId> {
+        let mut result = Vec::new();
+        fn visit(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
+            let Ok(node) = doc.get(id) else { return };
+            if node.kind == NodeKind::Desc
+                && node.get_str("py:fullname").ok().flatten().is_some()
+            {
+                out.push(id);
+            }
+            if node.kind == NodeKind::Section { return; }
+            // Recurse through every container so nested class members are
+            // collected too (Sphinx lists them in the local ToC).
+            for &child in &node.children { visit(doc, child, out); }
+        }
+        // Object descriptions are siblings of the section title, not children
+        // of a nested container; walk the section's direct children.
+        if let Ok(node) = doc.get(section) {
+            for &child in &node.children { visit(doc, child, &mut result); }
+        }
+        result
+    }
+    fn object_toc_entry(doc: &Document, desc: NodeId) -> Option<String> {
+        let node = doc.get(desc).ok()?;
+        let fullname = node.get_str("py:fullname").ok().flatten()?.trim().to_owned();
+        let module = node.get_str("py:module").ok().flatten().unwrap_or("");
+        let anchor = node.get_str("py:anchor").ok().flatten().unwrap_or("");
+        let objtype = node.get_str("objtype").ok().flatten().unwrap_or("");
+        // Sphinx's local ToC uses the object name relative to its module, with
+        // `()` appended for callable types.
+        let mut display = if !module.is_empty() {
+            fullname.strip_prefix(&format!("{module}.")).unwrap_or(&fullname).to_owned()
+        } else {
+            fullname.clone()
+        };
+        if matches!(objtype, "function" | "method" | "classmethod" | "staticmethod" | "cfunction" | "cmacro") {
+            display.push_str("()");
+        }
+        let href = if anchor.is_empty() { "#".to_owned() } else { format!("#{anchor}") };
+        Some(format!(
+            "<li><a class=\"reference internal\" href=\"{}\"><code class=\"docutils literal notranslate\"><span class=\"pre\">{}</span></code></a></li>\n",
+            escape_attr(&href), escape_html(&display)
+        ))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn walk(doc: &Document, parent: NodeId, depth: usize, maxdepth: usize, first: bool,
+            numbers: Option<&scribe_core::SectionNumbers>, docname: &str, out: &mut String) {
         let sections = sections_of(doc, parent);
         if sections.is_empty() || depth > maxdepth { return; }
         out.push_str("<ul>\n");
         for section in sections {
             let title = title_of(doc, section).unwrap_or_default();
+            let anchor = anchor_of(doc, section).unwrap_or_default();
             let href = if first { "#".to_owned() } else {
-                anchor_of(doc, section).map(|a| format!("#{a}")).unwrap_or_else(|| "#".to_owned())
+                if anchor.is_empty() { "#".to_owned() } else { format!("#{anchor}") }
             };
-            out.push_str(&format!("<li><a class=\"reference internal\" href=\"{}\">{}</a>", escape_attr(&href), escape_html(&title)));
+            let number = numbers
+                .and_then(|n| n.get(docname, &format!("#{anchor}")))
+                .filter(|n| !n.is_empty())
+                .map(|n| format!("{}. ", n.iter().map(i64::to_string).collect::<Vec<_>>().join(".")))
+                .unwrap_or_default();
+            out.push_str(&format!("<li><a class=\"reference internal\" href=\"{}\">{}{}</a>", escape_attr(&href), escape_html(&number), escape_html(&title)));
+            let objects = section_objects(doc, section);
+            if !objects.is_empty() {
+                out.push_str("\n<ul>\n");
+                for object in objects {
+                    if let Some(entry) = object_toc_entry(doc, object) { out.push_str(&entry); }
+                }
+                out.push_str("</ul>\n");
+            }
             if depth < maxdepth {
                 let mut nested = String::new();
-                walk(doc, section, depth + 1, maxdepth, false, &mut nested);
+                walk(doc, section, depth + 1, maxdepth, false, numbers, docname, &mut nested);
                 if !nested.is_empty() { out.push('\n'); out.push_str(&nested); }
             }
             out.push_str("</li>\n");
@@ -798,7 +869,7 @@ pub fn render_local_toc(doc: &Document, maxdepth: usize) -> String {
         out.push_str("</ul>\n");
     }
     let mut out = String::new();
-    walk(doc, doc.root, 1, maxdepth, true, &mut out);
+    walk(doc, doc.root, 1, maxdepth, true, numbers, docname, &mut out);
     out
 }
 
@@ -895,7 +966,13 @@ impl Visitor for HTML5Translator<'_> {
         }
         if let Some(frame) = self.stack.pop() {
             if frame.kind == NodeKind::Section { self.section_level = self.section_level.saturating_sub(1); }
-            if matches!(frame.kind, NodeKind::Literal | NodeKind::LiteralEmphasis | NodeKind::LiteralStrong) {
+            if matches!(
+                frame.kind,
+                NodeKind::Literal
+                    | NodeKind::LiteralEmphasis
+                    | NodeKind::LiteralStrong
+                    | NodeKind::DescSignature
+            ) {
                 self.literal_depth = self.literal_depth.saturating_sub(1);
             }
             if let Some(extra) = frame.extra { self.emit(&extra); }
@@ -1025,7 +1102,12 @@ impl HTML5Translator<'_> {
             }
 
             NodeKind::Inline => {
-                if node.classes().unwrap_or_default().is_empty() { None } else {
+                if let Some(explanation) = node.get_str("explanation").ok().flatten() {
+                    self.emit(&format!("<abbr title=\"{}\">", escape_attr(explanation)));
+                    Some(Frame::new("</abbr>", NodeKind::Inline))
+                } else if node.classes().unwrap_or_default().is_empty() {
+                    None
+                } else {
                     self.starttag(node, "span", &[], &[]);
                     Some(Frame::new("</span>", NodeKind::Inline))
                 }
@@ -1155,7 +1237,10 @@ impl HTML5Translator<'_> {
 
             NodeKind::FieldName => {
                 self.starttag(node, "dt", &[], &[]);
-                Some(Frame::new("</dt>\n", NodeKind::FieldName))
+                // Docutils' `depart_field_name` appends `<span class="colon">:`
+                // before closing the `<dt>`.
+                Some(Frame::new("</dt>\n", NodeKind::FieldName)
+                    .with_extra("<span class=\"colon\">:</span>".to_owned()))
             }
 
             NodeKind::FieldBody => {
@@ -1217,9 +1302,12 @@ impl HTML5Translator<'_> {
             }
 
             NodeKind::BlockQuote => {
-                let open = self.open_tag(node, "blockquote", &[], &[]);
+                let mut open = self.open_tag(node, "blockquote", &[], &[]);
+                let classes = node.classes().unwrap_or_default();
+                let wrapped = classes.iter().any(|c| matches!(c.as_str(), "epigraph" | "highlights" | "pull-quote"));
+                if wrapped { open.push_str("\n<div>"); }
                 self.emitln(&open);
-                Some(Frame::new("</blockquote>\n", NodeKind::BlockQuote))
+                Some(Frame::new(if wrapped { "</div></blockquote>\n" } else { "</blockquote>\n" }, NodeKind::BlockQuote))
             }
 
             NodeKind::Attribution => {
@@ -1293,9 +1381,16 @@ impl HTML5Translator<'_> {
                 Some(Frame::new("</div>\n", node.kind))
             }
 
-            // Sphinx emits `versionmodified` inline (`<span class="versionmodified …">`),
-            // which the parser already materialises on the child `inline` node.
-            NodeKind::VersionModified | NodeKind::VersionAdded | NodeKind::VersionChanged | NodeKind::Deprecated => None,
+            // Sphinx 9 wraps each version-modification directive in a
+            // `<div class="versionadded">` / `versionchanged` / `deprecated` /
+            // `versionremoved`; the `versionmodified` marker span itself is
+            // materialised as an inline child by the parser.
+            NodeKind::VersionModified | NodeKind::VersionAdded | NodeKind::VersionChanged | NodeKind::Deprecated => {
+                let class = node_str(node, "type");
+                let class = if class.is_empty() { "versionmodified" } else { &class };
+                self.emit(&format!("<div class=\"{}\">\n", escape_attr(class)));
+                Some(Frame::new("</div>\n", node.kind))
+            }
 
             NodeKind::Table => {
                 let html = self.render_table(node);
@@ -1468,12 +1563,48 @@ impl HTML5Translator<'_> {
             NodeKind::DescSignature => {
                 let open = self.open_tag(node, "dt", &["sig", "sig-object"], &[]);
                 self.emit(&open);
-                Some(Frame::new("</dt>\n", NodeKind::DescSignature))
+                // Sphinx 9's `visit_desc_signature` increments
+                // `protect_literal_text`, so every text token in the signature
+                // is wrapped in `<span class="pre">` (whitespace stays bare).
+                self.literal_depth += 1;
+                let mut frame = Frame::new("</dt>\n", NodeKind::DescSignature);
+                // `depart_desc_signature` calls `add_permalink_ref` for
+                // single-line signatures when permalinks are enabled.
+                let mut extra = String::new();
+                if self.ctx.add_permalinks {
+                    if let Some(anchor) = node.ids().unwrap_or_default().first().map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
+                        extra.push_str(&format!(
+                            "<a class=\"headerlink\" href=\"#{}\" title=\"Link to this definition\">{}</a>",
+                            escape_attr(&anchor), escape_html(&self.ctx.permalinks_icon)
+                        ));
+                    }
+                }
+                // Sphinx's C domain emits a `desc_signature_line`, whose
+                // `depart` appends `<br />` to every declaration.
+                if !extra.is_empty() { frame = frame.with_extra(extra); }
+                Some(frame)
             }
 
             NodeKind::DescSignatureLine => {
-                self.emit("<span class=\"sig sig-object\">");
-                Some(Frame::new("</span>", NodeKind::DescSignatureLine))
+                // Sphinx's `visit_desc_signature_line` emits nothing; its
+                // `depart` adds a permalink (for C/C++ declarations) and a
+                // trailing `<br />`.
+                let mut extra = String::new();
+                if node.attrs.get_bool("add_permalink").ok().flatten().unwrap_or(false) {
+                    let anchor_node = self.doc.parent(id).ok().flatten()
+                        .and_then(|parent| self.doc.parent(parent).ok().flatten())
+                        .and_then(|grand| self.doc.get(grand).ok());
+                    if let Some(anchor_node) = anchor_node {
+                        if let Some(anchor) = anchor_node.ids().unwrap_or_default().first().map(|a| a.trim().to_owned()).filter(|a| !a.is_empty()) {
+                            extra.push_str(&format!(
+                                "<a class=\"headerlink\" href=\"#{}\" title=\"Link to this definition\">{}</a>",
+                                escape_attr(&anchor), escape_html(&self.ctx.permalinks_icon)
+                            ));
+                        }
+                    }
+                }
+                extra.push_str("<br />");
+                Some(Frame::new("", NodeKind::DescSignatureLine).with_extra(extra))
             }
 
             NodeKind::DescContent => {
@@ -1487,23 +1618,53 @@ impl HTML5Translator<'_> {
                 Some(Frame::new("</span>", NodeKind::DescInline))
             }
 
-            NodeKind::DescName | NodeKind::DescAddname | NodeKind::DescType | NodeKind::DescAnnotation
-            | NodeKind::DescReturns | NodeKind::DescSigName | NodeKind::DescSigKeywordType => {
+            NodeKind::DescAnnotation => {
+                // Sphinx's `visit_desc_annotation` hardcodes CLASS='property'.
+                self.starttag(node, "span", &["property"], &[]);
+                Some(Frame::new("</span>", node.kind))
+            }
+
+            NodeKind::DescReturns => {
+                // Sphinx's `visit_desc_returns` emits a `sig-return` group with
+                // an arrow icon and a type-hint span.
+                self.emit("<span class=\"sig-return\"><span class=\"sig-return-icon\">&#x2192;</span> <span class=\"sig-return-typehint\">");
+                Some(Frame::new("</span></span>", NodeKind::DescReturns))
+            }
+            NodeKind::DescName | NodeKind::DescAddname | NodeKind::DescType
+            | NodeKind::DescSigName | NodeKind::DescSigKeywordType => {
                 self.starttag(node, "span", &[], &[]);
                 Some(Frame::new("</span>", node.kind))
             }
 
-            NodeKind::DescParameterlist | NodeKind::DescTypeParameterList => {
-                self.emit("<span class=\"sig-param\">(");
-                Some(Frame::new(")</span>", node.kind))
+            NodeKind::DescParameterlist => {
+                self.emit("<span class=\"sig-paren\">(</span>");
+                Some(Frame::new("<span class=\"sig-paren\">)</span>", node.kind))
             }
 
-            NodeKind::DescParameter | NodeKind::DescTypeParameter | NodeKind::DescOptional => {
-                self.starttag(node, "span", &["sig-param"], &[]);
-                Some(Frame::new("</span>", node.kind))
+            NodeKind::DescTypeParameterList => {
+                self.emit("<span class=\"sig-paren\">[</span>");
+                Some(Frame::new("<span class=\"sig-paren\">]</span>", node.kind))
             }
 
-            NodeKind::DescSigSpace => { self.emit(" "); None }
+            NodeKind::DescParameter | NodeKind::DescTypeParameter => {
+                self.emit("<em class=\"sig-param\">");
+                Some(Frame::new("</em>", node.kind))
+            }
+
+            NodeKind::DescOptional => {
+                self.emit("<span class=\"optional\">[</span>");
+                Some(Frame::new("]</span>", node.kind))
+            }
+
+            NodeKind::DescSigSpace => {
+                // A `desc_sig_space` carries class `w`; its single-space text
+                // stays a bare space because `protect_literal_text` only wraps
+                // non-whitespace tokens. Emit it here and skip the child text
+                // node so the space is not duplicated.
+                self.emit("<span class=\"w\"> </span>");
+                self.skip_children = true;
+                None
+            }
 
             NodeKind::DescSigOperator => {
                 self.starttag(node, "span", &["o"], &[]);
@@ -1511,8 +1672,17 @@ impl HTML5Translator<'_> {
             }
 
             NodeKind::DescSigPunctuation => {
-                self.starttag(node, "span", &["p"], &[]);
-                Some(Frame::new("</span>", NodeKind::DescSigPunctuation))
+                // Sphinx's C/C++ domains emit an empty argument list as two
+                // `sig-paren` spans; scribe's tokenizer produces a single "()"
+                // punctuation token. Normalise it to the oracle markup.
+                if node.astext(self.doc).trim() == "()" {
+                    self.emit("<span class=\"sig-paren\">(</span><span class=\"sig-paren\">)</span>");
+                    self.skip_children = true;
+                    None
+                } else {
+                    self.starttag(node, "span", &["p"], &[]);
+                    Some(Frame::new("</span>", NodeKind::DescSigPunctuation))
+                }
             }
 
             NodeKind::DescSigKeyword => {

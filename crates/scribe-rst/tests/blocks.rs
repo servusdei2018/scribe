@@ -304,6 +304,7 @@ fn prolog_and_epilog_injection() {
         default_role: None,
         default_domain: None,
         extlinks: scribe_rst::extlinks::empty_roles(),
+            index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
     };
     let output = parse_with_options("Body.\n", options);
     let doc = output.document.to_pseudoxml().unwrap();

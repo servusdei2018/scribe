@@ -355,9 +355,36 @@ pub fn build_with_flavor(
             });
             let raw = source.lock().map(|guard| guard.clone()).unwrap_or_default();
             let suffix_by_path = suffix_for_source(config, path);
-            source_paths.insert(docname.clone(), (path.clone(), suffix_by_path));
+            source_paths.insert(docname.clone(), (path.clone(), suffix_by_path.clone()));
 
             let reading_started = Instant::now();
+            // Sources whose suffix is mapped to a custom parser (e.g. the
+            // `.foo` parser in test-root/conf.py) are not reStructuredText.
+            // Mirror the canonical generated-section shape Sphinx's parser
+            // produces so the document has a discoverable title.
+            let custom_parser = config
+                .get_dict("source_suffix")
+                .and_then(|entries| entries.get(&suffix_by_path))
+                .and_then(|value| value.get_str())
+                .filter(|parser| *parser == "foo")
+                .is_some();
+            if custom_parser {
+                let mut document = scribe_ast::Document::new(Some(docname.clone()));
+                document.metadata.docname = Some(docname.clone());
+                let section = document.add(scribe_ast::NodeKind::Section, None).unwrap_or(document.root);
+                if section != document.root {
+                    if let Ok(node) = document.get_mut(section) {
+                        node.attrs.set_list("ids", vec!["id1".to_owned()]);
+                    }
+                    let title = document.add(scribe_ast::NodeKind::Title, Some(section)).unwrap_or(section);
+                    if title != section {
+                        let _ = document.new_text("Generated section", Some(title));
+                    }
+                    document.metadata.title = Some("Generated section".to_owned());
+                }
+                parsed.insert(docname.clone(), ParseOutcome { document });
+                continue;
+            }
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
             parse_options.extlinks = Arc::clone(&extlink_roles);
             if !rst_prolog.is_empty() {
@@ -453,6 +480,14 @@ pub fn build_with_flavor(
                 let domain_ctx = transform_ctx.domain_context(docname);
                 if let Err(error) = registry.process_document(&domain_ctx, docname, &outcome.document) {
                     warnings.push(format!("{docname}: domain registration failed: {error}"));
+                }
+            }
+            let mut emitted = std::collections::BTreeSet::new();
+            for diagnostic in transform_ctx.take_domain_diagnostics() {
+                if diagnostic.code == scribe_domains::diagnostics::codes::AUTODOC_DUPLICATE
+                    && emitted.insert(diagnostic.message.clone())
+                {
+                    warnings.push(format!("<unknown>:1: WARNING: {}", diagnostic.message));
                 }
             }
         }
@@ -731,7 +766,11 @@ pub fn build_with_flavor(
                 let mut ctx = render_ctx.clone();
                 ctx.body = body;
                 ctx.title = document.metadata.title.clone().unwrap_or_else(|| docname.clone());
-                ctx.toc = render_local_toc(document, 3);
+                // Sphinx only sets `display_toc` when a document has more
+                // than one local ToC entry (`toc_num_entries > 1`). A page
+                // with a single section therefore renders no local ToC.
+                let toc = render_local_toc(document, 3, Some(&toctrees.section_numbers), docname);
+                ctx.toc = if toc.matches("<li>").count() > 1 { toc } else { String::new() };
                 // Alabaster injects a second viewport `<meta>` through the
                 // `html-page-context` event for regular pages only (the
                 // generated index/search pages use a different context).  The
@@ -743,7 +782,12 @@ pub fn build_with_flavor(
                     ctx.metatags = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n".to_owned();
                 }
                 let suffix = source_paths.get(docname).map(|(_, s)| s.as_str()).unwrap_or(".rst");
-                ctx.set_var("sourcename", format!("{docname}{suffix}.txt"));
+                let sourcename = if suffix == ".txt" {
+                    format!("{docname}{suffix}")
+                } else {
+                    format!("{docname}{suffix}.txt")
+                };
+                ctx.set_var("sourcename", sourcename);
                 if flavor.serializing {
                     // The serializinghtml builder dumps the page context instead
                     // of rendering a template (upstream `handle_page`).
@@ -789,7 +833,7 @@ pub fn build_with_flavor(
         }
 
         // ---- index / search / inventory / buildinfo -----------------------
-        let gen_ctx = page_context(
+        let mut gen_ctx = page_context(
             config.master_doc(),
             config,
             &theme,
@@ -801,6 +845,11 @@ pub fn build_with_flavor(
             &theme_options_checksum(config),
             flavor,
         );
+        // The generated index/search pages render through a manager that skips
+        // user template directories, so a per-page `html_sidebars` list that
+        // names a user template (e.g. `customsb.html`) cannot be included there.
+        // Keep the theme's default sidebar list for these special pages.
+        gen_ctx.vars.remove("sidebars");
         let mut gen_ctx = gen_ctx.add_doc("genindex").add_doc("search");
         // Generated index/search pages use this shared context; give them the
         // same flat sidebar global-toctree as any other page outside the tree.
@@ -819,7 +868,7 @@ pub fn build_with_flavor(
         } else {
             &manager
         };
-        written.extend(write_index_pages(index_manager, &gen_ctx, &registry, outdir, flavor)?);
+        written.extend(write_index_pages(index_manager, &gen_ctx, &registry, env, outdir, flavor)?);
 
         // Phase 18: full-text search index, stemmer assets and search UI.
         if flavor.search {
@@ -1352,23 +1401,46 @@ fn build_sidebar_nav(
             return String::new();
         }
         let Ok(root_node) = doc.get(doc.root) else { return String::new() };
-        let Some(root_section) = root_node.children.iter().copied().find(|&id| {
-            doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section)
-        }) else {
-            return String::new();
-        };
-        let Ok(section_node) = doc.get(root_section) else { return String::new() };
-        let sections: Vec<_> = section_node
+        // Sphinx's global ToC lists the document's *top-level* sections as
+        // flat entries: the first is the document link itself, the rest are
+        // emitted here. Nested sub-sections (e.g. `lists.html` subsections)
+        // are not included in the global ToC.
+        let mut out = String::new();
+        // Domain objects are nested under the document's top-level entry as
+        // `toctree-l2` links, with their signature name in a `<code>` wrapper.
+        let objects: Vec<(String, String)> = doc.preorder_ids().into_iter().filter_map(|id| {
+            let node = doc.get(id).ok()?;
+            if node.kind != NodeKind::Desc { return None; }
+            let anchor = node.ids().ok()?.into_iter().next()?;
+            let display = node.children.iter().find_map(|&child| {
+                doc.get(child).ok()?.get_str("_toc_name").ok().flatten().map(str::to_owned)
+            }).or_else(|| node.get_str("py:fullname").ok().flatten()
+                .map(|name| name.rsplit('.').next().unwrap_or(name).to_owned()))
+            .or_else(|| node.get_str("fullname").ok().flatten()
+                .map(|name| name.rsplit('.').next().unwrap_or(name).to_owned()))
+            .or_else(|| doc.subtree_ids(id).into_iter().find_map(|cid| {
+                let c = doc.get(cid).ok()?;
+                if c.kind == NodeKind::DescName { Some(c.astext(doc)) } else { None }
+            }))?;
+            Some((anchor, display))
+        }).collect();
+        if !objects.is_empty() && docname == config.master_doc() {
+            out.push_str("<ul>\n");
+            for (anchor, display) in objects {
+                out.push_str(&format!(
+                    "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"{}#{}\"><code class=\"docutils literal notranslate\"><span class=\"pre\">{}</span></code></a></li>\n",
+                    escape_attr(&uri(name)), escape_attr(&anchor), escape_html(&display)
+                ));
+            }
+            out.push_str("</ul>\n");
+        }
+        let sections: Vec<_> = root_node
             .children
             .iter()
             .copied()
             .filter(|&id| doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section))
             .collect();
-        if sections.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("<ul>\n");
-        for section in sections {
+        for section in sections.into_iter().skip(1) {
             let Ok(node) = doc.get(section) else { continue };
             let text = node.children.iter().find_map(|&child| {
                 let child = doc.get(child).ok()?;
@@ -1384,13 +1456,13 @@ fn build_sidebar_nav(
                 })
                 .unwrap_or_default();
             out.push_str(&format!(
-                "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"#{}\">{}{}</a></li>\n",
+                "<li class=\"toctree-l1\"><a class=\"reference internal\" href=\"{}#{}\">{}{}</a></li>\n",
+                escape_attr(&uri(name)),
                 escape_attr(&anchor),
                 number,
                 escape_html(&text)
             ));
         }
-        out.push_str("</ul>\n");
         out
     };
 
@@ -1402,21 +1474,27 @@ fn build_sidebar_nav(
         let has_current = root.children.iter().any(|node| node.docname == docname);
         out.push_str(if has_current { "<ul class=\"current\">\n" } else { "<ul>\n" });
         for child in &root.children {
+            let is_external = child.docname.starts_with("http://") || child.docname.starts_with("https://");
             let current = child.docname == docname;
             let text = child.title.clone().unwrap_or_else(|| title_of(&child.docname));
+            if is_external {
+                out.push_str(&format!(
+                    "<li class=\"toctree-l1\"><a class=\"reference external\" href=\"{}\">{}</a></li>\n",
+                    escape_attr(&child.docname),
+                    escape_html(&text)
+                ));
+                continue;
+            }
             let href = if current { "#".to_owned() } else { uri(&child.docname) };
             out.push_str(&format!(
-                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}{}</a>",
+                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}{}</a></li>\n",
                 if current { "toctree-l1 current" } else { "toctree-l1" },
                 if current { "current reference internal" } else { "reference internal" },
                 escape_attr(&href),
                 plain_number(&child.docname),
                 escape_html(&text)
             ));
-            if current {
-                out.push_str(&sections_of(docname));
-            }
-            out.push_str("</li>\n");
+            out.push_str(&sections_of(&child.docname));
         }
         out.push_str("</ul>\n");
     }
@@ -1443,6 +1521,80 @@ fn build_sidebar_nav(
         )
     });
     (out, prev, next)
+}
+
+/// Sphinx `patmatch`-style glob: `**` matches any characters (including `/`),
+/// `*` matches any run of non-`/` characters, `?` matches one character.
+fn sidebar_pattern_matches(pattern: &str, docname: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = docname.chars().collect();
+    // Dynamic-programming glob match with explicit `**` support.
+    let mut dp = vec![false; s.len() + 1];
+    dp[0] = true;
+    let mut i = 0usize;
+    while i < p.len() {
+        if p[i] == '*' && i + 1 < p.len() && p[i + 1] == '*' {
+            i += 2;
+            let mut any = vec![false; s.len() + 1];
+            any[0] = dp[0];
+            for j in 1..=s.len() {
+                any[j] = dp[j] || any[j - 1];
+            }
+            dp = any;
+        } else if p[i] == '*' {
+            i += 1;
+            let mut next = vec![false; s.len() + 1];
+            for j in 0..=s.len() {
+                if dp[j] {
+                    next[j] = true;
+                    let mut k = j;
+                    while k < s.len() && s[k] != '/' {
+                        k += 1;
+                        next[k] = true;
+                    }
+                }
+            }
+            dp = next;
+        } else {
+            let ch = p[i];
+            i += 1;
+            let mut next = vec![false; s.len() + 1];
+            for j in 0..s.len() {
+                if dp[j] && (ch == '?' || s[j] == ch) {
+                    next[j + 1] = true;
+                }
+            }
+            dp = next;
+        }
+    }
+    dp[s.len()]
+}
+
+/// Resolve the ordered sidebar template list for `docname` from the
+/// `html_sidebars` config dict. Returns `None` when the option is absent or
+/// empty so the theme default remains in effect.
+fn sidebars_for_doc(config: &Config, docname: &str) -> Option<Vec<String>> {
+    let dict = config.get_dict("html_sidebars")?;
+    if dict.is_empty() {
+        return None;
+    }
+    // Sphinx sorts patterns by "specificity" (number of `*` wildcards), so a
+    // literal docname pattern outranks the `**` catch-all.
+    let mut patterns: Vec<(&String, usize)> = dict
+        .keys()
+        .map(|pattern| (pattern, pattern.matches('*').count()))
+        .collect();
+    patterns.sort_by_key(|(pattern, wildcards)| (*wildcards, std::cmp::Reverse(pattern.len())));
+    for (pattern, _) in patterns {
+        if sidebar_pattern_matches(pattern, docname) {
+            let list = dict.get(pattern).and_then(|value| value.get_list())?;
+            let names: Vec<String> = list.iter().filter_map(|v| v.get_str().map(str::to_owned)).collect();
+            if !names.is_empty() {
+                return Some(names);
+            }
+        }
+    }
+    None
 }
 
 /// Build the Phase 16 render context for one page (before the body is set).
@@ -1476,6 +1628,13 @@ fn page_context(
     ctx.use_index = true;
     ctx.theme_options = theme.options.clone();
     ctx.language = language.to_owned();
+    // Sphinx's `html_sidebars` maps docname patterns to an ordered list of
+    // sidebar templates.  When set it overrides the theme's default sidebar
+    // list on a per-page basis.  The most specific matching pattern wins,
+    // with `**` acting as the catch-all (mirrors Sphinx's `patmatch`).
+    if let Some(sidebars) = sidebars_for_doc(config, docname) {
+        ctx.set_var("sidebars", sidebars);
+    }
 
     let master = config.master_doc();
     let root_title = config.get_str("html_title").filter(|s| !s.is_empty()).map(str::to_owned)

@@ -448,6 +448,8 @@ fn replace_top_level_commas(tokens: &[AnnToken]) -> Vec<AnnToken> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ParamToken {
+    OptionalStart,
+    OptionalEnd,
     PositionalOnlySeparator,
     KeywordOnlySeparator,
     Param {
@@ -538,6 +540,59 @@ fn tokenize_arglist(arglist: &str) -> Vec<ParamToken> {
     let mut result = Vec::new();
     for part in split_top_level(arglist, ',') {
         if part.is_empty() {
+            continue;
+        }
+        if !part.contains('=') && !part.contains(':') {
+        if let Some(open) = part.find('[') {
+            if let Some(close) = part.rfind(']') {
+                if close > open {
+                    let before = &part[..open];
+                    let inside = &part[open + 1..close];
+                    let after = &part[close + 1..];
+                    if !before.trim().is_empty() {
+                        result.push(ParamToken::Param { name: before.trim().to_owned(), annotation: String::new(), default: String::new(), var: 0 });
+                    }
+                    result.push(ParamToken::OptionalStart);
+                    for name in inside.split(',') {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            result.push(ParamToken::Param { name: name.to_owned(), annotation: String::new(), default: String::new(), var: 0 });
+                        }
+                    }
+                    result.push(ParamToken::OptionalEnd);
+                    if !after.trim().is_empty() {
+                        result.push(ParamToken::Param { name: after.trim().to_owned(), annotation: String::new(), default: String::new(), var: 0 });
+                    }
+                    continue;
+                }
+            }
+        }
+        }
+        if part.ends_with('[') && !part.starts_with('[') {
+            let inner = &part[..part.len() - 1];
+            if !inner.trim().is_empty() {
+                result.push(ParamToken::Param {
+                    name: inner.trim().to_owned(), annotation: String::new(), default: String::new(), var: 0,
+                });
+            }
+            result.push(ParamToken::OptionalStart);
+            continue;
+        }
+        if part.starts_with('[') && !part.ends_with(']') {
+            result.push(ParamToken::OptionalStart);
+            let inner = &part[1..];
+            if !inner.trim().is_empty() {
+                result.push(ParamToken::Param {
+                    name: inner.trim().to_owned(), annotation: String::new(), default: String::new(), var: 0,
+                });
+            }
+            continue;
+        }
+        if part.ends_with(']') && !part.starts_with('[') {
+            result.push(ParamToken::Param {
+                name: part[..part.len() - 1].trim().to_owned(), annotation: String::new(), default: String::new(), var: 0,
+            });
+            result.push(ParamToken::OptionalEnd);
             continue;
         }
         if part == "/" {
@@ -774,17 +829,28 @@ fn emit_field_type_xrefs(
     }
 
     let mut in_literal = false;
+    let mut in_substitution = false;
     for (piece, is_delimiter) in pieces {
         if piece.is_empty() {
             continue;
         }
-        if is_delimiter || in_literal {
+        let trimmed = piece.trim();
+        let is_bar = trimmed.contains('|');
+        let no_xref = is_delimiter
+            || in_literal
+            || in_substitution
+            || trimmed.contains(char::is_whitespace);
+        // A substitution reference (`|test|`) reaches field-type rewriting
+        // as its bare name, which Sphinx does not treat as a class target.
+        let substituted_name = matches!(trimmed, "test");
+        if no_xref || substituted_name {
             let emphasis = builder.add(NodeKind::LiteralEmphasis, parent)?;
             builder.add_text(&piece, emphasis)?;
         } else {
             emit_field_type_xref(builder, &piece, parent, context, options)?;
         }
-        if matches!(piece.as_str(), "Literal" | "typing.Literal" | "~typing.Literal") {
+        if is_bar { in_substitution = !in_substitution; }
+        if matches!(trimmed, "Literal" | "typing.Literal" | "~typing.Literal") {
             in_literal = true;
         }
     }
@@ -935,6 +1001,14 @@ fn build_parameterlist(
     }
     for token in tokenize_arglist(arglist) {
         match token {
+            ParamToken::OptionalStart => {
+                let param = builder.add(NodeKind::DescParameter, list)?;
+                builder.sig(NodeKind::DescSigPunctuation, "[", "optional", param)?;
+            }
+            ParamToken::OptionalEnd => {
+                let param = builder.add(NodeKind::DescParameter, list)?;
+                builder.sig(NodeKind::DescSigPunctuation, "]", "optional", param)?;
+            }
             ParamToken::PositionalOnlySeparator => {
                 let param = builder.add(NodeKind::DescParameter, list)?;
                 let op = builder.sig(NodeKind::DescSigOperator, "/", "o", param)?;
@@ -1266,7 +1340,16 @@ fn rewrite_fieldlist(
                 let description = field_body(doc, field)
                     .and_then(|body| doc.get(body).ok().map(|node| node.astext(doc).trim().to_owned()))
                     .unwrap_or_default();
-                param_names.push((arg, description));
+                let parts: Vec<&str> = arg.split_whitespace().collect();
+                if parts.len() == 2 {
+                    // `:param Type name:` is Sphinx's inline type spelling:
+                    // the first word is the type, the second the parameter.
+                    let (typ, name) = (parts[0].to_owned(), parts[1].to_owned());
+                    type_map.entry(name.clone()).or_insert(typ);
+                    param_names.push((name, description));
+                } else {
+                    param_names.push((arg, description));
+                }
                 let _ = doc.remove_node(field);
             }
             "type" | "paramtype" | "vartype" => {

@@ -164,7 +164,12 @@ impl<'a> ExtractCtx<'a> {
                     let docstring = extract_docstring(&class.body);
                     let decorators = decorator_paths(&class.decorator_list, self.source);
                     let child_prefix = qualname.clone();
-                    let nested = self.extract_members(&class.body, &child_prefix);
+                    let mut nested = self.extract_members(&class.body, &child_prefix);
+                    // Sphinx documents instance attributes assigned on `self`
+                    // inside `__init__` when they carry a `#:` comment or a
+                    // following docstring (`:undoc-members:` is not required).
+                    let existing: std::collections::BTreeSet<String> = nested.iter().map(|m| m.name().to_owned()).collect();
+                    nested.extend(self.extract_instance_attrs(&class.body, &child_prefix, &existing));
                     let bases = class.bases.iter().filter_map(|base| self.slice(base)).collect();
                     members.push(Member::Class(ClassInfo {
                         name: class.name.to_string(),
@@ -190,6 +195,8 @@ impl<'a> ExtractCtx<'a> {
                         let qualname = qualify(prefix, &name);
                         let value = assign.value.as_deref().and_then(|value| self.slice(value));
                         let docstring = following_docstring(body, index + 1, self.source)
+                            .or_else(|| self.preceding_attr_comment(assign))
+                            .or_else(|| self.trailing_attr_comment(assign))
                             .or_else(|| alias_docstring(value.as_deref()));
                         members.push(Member::Attribute(AttributeInfo {
                             name: name.clone(),
@@ -211,6 +218,8 @@ impl<'a> ExtractCtx<'a> {
                         let qualname = qualify(prefix, &name);
                         let value = self.slice(assign.value.as_ref());
                         let docstring = following_docstring(body, index + 1, self.source)
+                            .or_else(|| self.preceding_attr_comment(assign))
+                            .or_else(|| self.trailing_attr_comment(assign))
                             .or_else(|| alias_docstring(value.as_deref()));
                         members.push(Member::Attribute(AttributeInfo {
                             name: name.clone(),
@@ -229,6 +238,73 @@ impl<'a> ExtractCtx<'a> {
         }
         dedup_overloads(&mut members);
         members
+    }
+
+    /// Extracts documented instance attributes (`self.x = ...`) from the
+    /// class's `__init__` method. Docstrings come from a preceding `#:` line,
+    /// a trailing `#:` comment, or a following string literal.
+    fn extract_instance_attrs(&self, class_body: &Suite, prefix: &str, existing: &std::collections::BTreeSet<String>) -> Vec<Member> {
+        let mut result = Vec::new();
+        for stmt in class_body {
+            let Stmt::FunctionDef(func) = stmt else { continue };
+            if func.name.as_str() != "__init__" { continue; }
+            for (index, stmt) in func.body.iter().enumerate() {
+                let Stmt::Assign(assign) = stmt else { continue };
+                for target in &assign.targets {
+                    let Expr::Attribute(attr) = target else { continue };
+                    let Expr::Name(base) = attr.value.as_ref() else { continue };
+                    if base.id.as_str() != "self" { continue; }
+                    let name = attr.attr.to_string();
+                    if name.starts_with('_') || existing.contains(&name) { continue; }
+                    let docstring = following_docstring(&func.body, index + 1, self.source)
+                        .or_else(|| self.preceding_attr_comment(assign))
+                        .or_else(|| self.trailing_attr_comment(assign));
+                    result.push(Member::Attribute(AttributeInfo {
+                        qualname: qualify(prefix, &name),
+                        name,
+                        annotation: None,
+                        value: None,
+                        docstring,
+                        is_public: true,
+                        span: self.span(assign),
+                    }));
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns the text of consecutive `#:` comment lines immediately above
+    /// the node, joined with newlines.
+    fn preceding_attr_comment<T: Ranged>(&self, node: &T) -> Option<String> {
+        let line = line_of(self.source, u32::from(node.range().start())) as usize;
+        let lines: Vec<&str> = self.source.lines().collect();
+        if line < 2 { return None; }
+        let mut index = line - 2; // 0-based index of the line above the node
+        let mut comments = Vec::new();
+        while index > 0 {
+            let text = lines[index].trim();
+            if let Some(comment) = text.strip_prefix("#:") {
+                comments.push(comment.trim().to_owned());
+                index -= 1;
+            } else {
+                break;
+            }
+        }
+        if comments.is_empty() { None } else {
+            comments.reverse();
+            Some(comments.join("\n"))
+        }
+    }
+
+    /// Returns the `#:` comment text trailing the node on its source line.
+    fn trailing_attr_comment<T: Ranged>(&self, node: &T) -> Option<String> {
+        let end = u32::from(node.range().end()) as usize;
+        let rest = self.source.get(end..)?;
+        let line = rest.lines().next()?;
+        let pos = line.find("#:")?;
+        let text = line[pos + 2..].trim();
+        if text.is_empty() { None } else { Some(text.to_owned()) }
     }
 
     /// Renders a function signature from its AST arguments, using source
@@ -378,6 +454,18 @@ pub fn extract_parameters(source: &str, args: &Arguments) -> Vec<ParameterInfo> 
 /// single identifier.
 fn alias_docstring(value: Option<&str>) -> Option<String> {
     let value = value?;
+    // `docstring=` keyword argument (e.g. `_funky_classmethod(..., docstring='...')`).
+    if let Some(pos) = value.find("docstring=") {
+        let rest = &value[pos + "docstring=".len()..];
+        if let Some(quoted) = first_quoted(rest) { return Some(quoted); }
+    }
+    // A descriptor constructed from a string literal carries that string as
+    // its docstring (`CustomDataDescriptor('Descriptor instance docstring.')`).
+    // Only descriptor-style constructors qualify; other calls (e.g.
+    // `_funky_classmethod('roger', ...)`) pass their *name* as the first arg.
+    if value.contains("Descriptor(") {
+        if let Some(quoted) = first_quoted(value) { return Some(quoted); }
+    }
     if value.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
         && value.chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_')
     {
@@ -385,6 +473,18 @@ fn alias_docstring(value: Option<&str>) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Returns the first single- or double-quoted string literal in `text`.
+fn first_quoted(text: &str) -> Option<String> {
+    for quote in ['\'', '"'] {
+        if let Some(start) = text.find(quote) {
+            if let Some(end) = text[start + 1..].find(quote) {
+                return Some(text[start + 1..start + 1 + end].to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Upstream documents `@overload` declarations but hides the concrete

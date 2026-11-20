@@ -46,7 +46,7 @@ fn metadata_matches_upstream_standard_domain() {
     let names: Vec<&str> = domain.object_types().iter().map(|object| object.name.as_str()).collect();
     // `event` is registered natively to mirror `sphinx/doc/conf.py`'s
     // `app.add_object_type('event', ...)` in its `setup()` hook.
-    assert_eq!(names, ["term", "token", "label", "confval", "event", "envvar", "cmdoption", "doc"]);
+    assert_eq!(names, ["term", "token", "label", "confval", "event", "envvar", "cmdoption", "doc", "userdesc"]);
     assert_eq!(domain.object_types()[2].roles, ["ref", "keyword"]);
     assert_eq!(
         domain.directive_names(),

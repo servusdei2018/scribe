@@ -98,6 +98,8 @@ pub struct ParseOptions {
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
     /// Empty by default; the builder fills it from the `extlinks` config.
     pub extlinks: extlinks::ExtLinkRoles,
+    /// Shared counter for generated `index-N` anchors.
+    pub index_counter: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ParseOptions {
@@ -111,6 +113,7 @@ impl ParseOptions {
             default_role: None,
             default_domain: None,
             extlinks: extlinks::empty_roles(),
+            index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -328,6 +331,7 @@ mod tests {
             default_role: None,
             default_domain: None,
             extlinks: crate::extlinks::empty_roles(),
+            index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let (augmented, docinfo_lines, inserted_lines) = augment_source(":author: me\n\nBody.\n", &options);
         assert!(augmented.starts_with(":author: me\n\n.. |x| replace:: X\n\n"));

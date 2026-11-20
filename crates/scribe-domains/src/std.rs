@@ -129,6 +129,9 @@ fn object_types() -> &'static [ObjectTypeAlias] {
             ObjectType::new("envvar", "environment variable", &["envvar"]),
             ObjectType::new("cmdoption", "program option", &["option"]),
             ObjectType::new("doc", "document", &["doc"]).with_priority(-1),
+            // Custom object type registered via `app.add_object_type` in
+            // `test-root/conf.py::setup`.
+            ObjectType::new("userdesc", "user desc", &["userdescrole"]),
         ]
     })
 }
@@ -476,6 +479,33 @@ impl StandardDomain {
         let target = target.trim();
         let mut found = lookup(ctx.program, target);
         if found.is_none() {
+            // An explicit `program option` spelling names the program in the
+            // target itself (e.g. `:option:`perl +p``), independent of the
+            // current `.. program::` context.
+            if let Some((program, option)) = target.split_once(' ') {
+                found = lookup(Some(program), option.trim());
+            }
+        }
+        if found.is_none() {
+            // A multi-word program (`.. program:: git commit`) followed by an
+            // option: split at the last space so the program stays intact.
+            if let Some((program, option)) = target.rsplit_once(' ') {
+                let normalized = program.replace(' ', "-");
+                found = lookup(Some(&normalized), option.trim());
+            }
+        }
+        if found.is_none() {
+            // An option declared with a value placeholder (`-j[=N]`) is also
+            // referencable by its bare stem (`-j`).
+            for bare in [target.split(['[', '=']).next().unwrap_or(target), &format!("{}[", target)] {
+                if bare != target {
+                    found = lookup(ctx.program, bare);
+                    if found.is_none() { found = lookup(None, bare); }
+                    if found.is_some() { break; }
+                }
+            }
+        }
+        if found.is_none() {
             // `:option:` may include a value: `-foo=bar`, `-foo[=bar]`, `-foo bar`.
             for needle in ["=", "[=", " "] {
                 if let Some((stem, _, _)) = split_once_keep(target, needle) {
@@ -619,12 +649,19 @@ impl StandardDomain {
                     let title = title_for_label(document, id);
                     self.note_label(ctx, name, &labelid, title.as_deref(), span);
                 }
-            } else if matches!(node.kind, NodeKind::Container | NodeKind::LiteralBlock)
+            } else if ((matches!(node.kind, NodeKind::Container | NodeKind::LiteralBlock | NodeKind::Compound)
                 && (node.kind != NodeKind::Container
-                    || node.attrs.get_bool("literal_block").unwrap_or_default().unwrap_or(false))
+                    || node.attrs.get_bool("literal_block").unwrap_or_default().unwrap_or(false)
+                    || document.subtree_ids(id).iter().any(|&child| {
+                        document.get(child).is_ok_and(|n| n.kind == NodeKind::Toctree)
+                    })))
+                || matches!(node.kind, NodeKind::Figure | NodeKind::Image | NodeKind::Table))
                 && !names.is_empty()
                 && !ids.is_empty()
             {
+                // Figures, images, tables and named toctree wrappers carrying
+                // `:name:` are named targets in Sphinx; `:ref:`/`:numref:` must
+                // resolve to them.
                 // `.. code-block::` with `:name:` stores the explicit target
                 // directly on its wrapper container (upstream's
                 // `literal_block` enumerable node). Without a `:caption:` the
@@ -677,7 +714,7 @@ impl StandardDomain {
             }
             group.push((child, text));
         }
-        for (index, (id, text)) in group.iter().enumerate() {
+        for (id, text) in &group {
             let labelid = document
                 .get(*id)
                 .ok()
@@ -685,14 +722,6 @@ impl StandardDomain {
                 .and_then(|ids| ids.first().cloned())
                 .unwrap_or_else(|| make_id("term", text));
             self.note_term(ctx, text, &labelid, span);
-            // Upstream's older `seealso` aliases: every additional term in a
-            // glossary definition points at the first term's anchor.
-            if index > 0 {
-                if let Some((_, first_text)) = group.first() {
-                    let first_id = make_id("term", first_text);
-                    self.note_term(ctx, text, &first_id, span);
-                }
-            }
         }
     }
 
@@ -802,6 +831,17 @@ fn title_for_label(document: &Document, id: NodeId) -> Option<String> {
             })
             .and_then(|&child| document.get(child).ok())
             .map(|title| title.astext(document).trim().to_owned()),
+        NodeKind::Compound => document
+            .subtree_ids(id)
+            .iter()
+            .find_map(|&child| {
+                let node = document.get(child).ok()?;
+                if node.kind == NodeKind::Toctree {
+                    node.get_str("caption").ok().flatten().map(str::to_owned)
+                } else {
+                    None
+                }
+            }),
         NodeKind::Toctree => None,
         _ => {
             // Definition-list / field-list labels: use the first term/name.

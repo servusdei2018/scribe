@@ -1667,7 +1667,14 @@ impl Transform for ContentsTransform {
             // The ToC root is the section (or document) containing the topic.
             // For a local ToC upstream starts at the topic's parent and walks
             // up to the nearest section/document.
-            let mut root = document.parent(topic).ok().flatten().unwrap_or(document.root);
+            // A non-local `.. contents::` tables the whole document; only
+            // `:local:` scopes it to the containing section.
+            let is_local = details.get("local").is_some_and(|value| value == "1" || value == "True" || value == "true");
+            let mut root = if is_local {
+                document.parent(topic).ok().flatten().unwrap_or(document.root)
+            } else {
+                document.root
+            };
             while document.get(root).is_ok_and(|node| {
                 node.kind != NodeKind::Section && node.kind != NodeKind::Document
             }) {
@@ -1675,7 +1682,7 @@ impl Transform for ContentsTransform {
                 root = parent;
             }
             let mut used = collect_used_ids(document);
-            let bullet = build_contents(document, root, 1, depth, &mut used);
+                        let bullet = build_contents(document, root, 1, depth, &mut used);
             if let Some(bullet) = bullet {
                 let index = document.children(topic).ok().and_then(|children| {
                     children.iter().position(|&child| child == pending)

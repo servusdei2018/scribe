@@ -45,6 +45,7 @@ impl InlineContext {
 pub fn parse_inline_placeholder(text: &str, ctx: &InlineContext) -> RstResult<Vec<InlineNode>> {
     let source = InlineSource::single(text, ctx.span.start);
     let parsed = crate::inline::parse_inline(&source, &crate::inline::InlineOptions {
+        index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         source_name: ctx.source_name.clone(),
         extlinks: crate::extlinks::empty_roles(),
         default_role: None,

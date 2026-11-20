@@ -17,6 +17,10 @@ pub mod codes {
     pub const MISSING_REFERENCE: &str = "scribe::domains::missing_reference";
     /// A duplicate or conflicting object registration.
     pub const DUPLICATE_OBJECT: &str = "scribe::domains::duplicate_object";
+    /// A duplicate object registration produced by autodoc. Sphinx logs these
+    /// with an `<unknown>:1` location; builders emit them explicitly while
+    /// ordinary domain duplicates stay suppressed as upstream suppresses them.
+    pub const AUTODOC_DUPLICATE: &str = "scribe::domains::autodoc_duplicate";
     /// A malformed object description or xref payload.
     pub const MALFORMED_OBJECT: &str = "scribe::domains::malformed_object";
     /// Incremental inventory inconsistency (`check_consistency`).

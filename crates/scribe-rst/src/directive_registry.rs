@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, atomic::AtomicU32};
 
 use miette::{Diagnostic, SourceSpan};
 use scribe_ast::{AstError, AstResult, Document, Node, NodeId, NodeKind, SourcePos, Span};
@@ -53,6 +53,8 @@ pub struct Context {
     pub custom_roles: Arc<RwLock<HashMap<String, crate::role_registry::CustomRoleInfo>>>,
     /// Role selected by `.. default-role::`.
     pub default_role: Arc<RwLock<Option<String>>>,
+    /// Monotone counter for generated `index-N` anchors (PEP/RFC/index roles).
+    pub index_counter: Arc<AtomicU32>,
     /// Domain selected by `.. default-domain::`. Unprefixed directives and
     /// roles are resolved against this domain first (mirroring
     /// `SphinxDirective`'s `env.current_document.default_domain` lookup).
@@ -78,6 +80,7 @@ impl Default for Context {
             substitution_directives: BTreeMap::new(),
             custom_roles: Arc::new(RwLock::new(HashMap::new())),
             default_role: Arc::new(RwLock::new(None)),
+            index_counter: Arc::new(AtomicU32::new(0)),
             default_domain: Arc::new(RwLock::new(None)),
             current_module: Arc::new(RwLock::new(None)),
             extlinks: crate::extlinks::empty_roles(),
@@ -115,8 +118,19 @@ impl Context {
 
     /// Reads an included file relative to `source_dir`.
     pub fn read_include(&self, path: &str) -> Result<String, DirectiveError> {
-        self.include_resolver
-            .resolve(self.source_dir.as_deref(), self.source_name.as_deref(), path)
+        self.read_include_encoded(path, "utf-8")
+    }
+
+    /// Reads an included file decoded with the named Python-style encoding
+    /// (only `utf-8` and the latin-1 family are distinguished; docutils' other
+    /// aliases map to UTF-8).
+    pub fn read_include_encoded(&self, path: &str, encoding: &str) -> Result<String, DirectiveError> {
+        self.include_resolver.resolve_encoded(
+            self.source_dir.as_deref(),
+            self.source_name.as_deref(),
+            path,
+            encoding,
+        )
     }
 }
 
@@ -133,12 +147,58 @@ pub trait IncludeResolver: Send + Sync + std::fmt::Debug {
         source_name: Option<&str>,
         path: &str,
     ) -> Result<String, DirectiveError>;
+
+    /// Encoding-aware variant. The default ignores `encoding` and delegates
+    /// to [`IncludeResolver::resolve`] so custom resolvers stay compatible.
+    fn resolve_encoded(
+        &self,
+        source_dir: Option<&Path>,
+        source_name: Option<&str>,
+        path: &str,
+        _encoding: &str,
+    ) -> Result<String, DirectiveError> {
+        self.resolve(source_dir, source_name, path)
+    }
 }
 
 /// Default [`IncludeResolver`]: reads UTF-8 files relative to the *including
 /// document* (Sphinx/docutils semantics), falling back to the source dir.
 #[derive(Debug, Clone, Copy)]
 pub struct FsIncludeResolver;
+
+fn resolve_include_path(source_dir: Option<&Path>, source_name: Option<&str>, path: &str) -> PathBuf {
+    // Sphinx treats a leading `/` in `include`/`literalinclude` paths as
+    // relative to the source directory (confdir), not the filesystem root.
+    let normalized = path.strip_prefix('/').unwrap_or(path);
+    let candidate = Path::new(normalized);
+    let full = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        // Docutils anchors relative includes at the document containing the
+        // directive, not the project root. When a docname is known, try
+        // `<source_dir>/<doc-parent>/<path>` first, then fall back to
+        // `<source_dir>/<path>` for callers passing root-relative paths.
+        let doc_relative = source_dir.zip(source_name).and_then(|(dir, name)| {
+            Path::new(name).parent().map(|parent| dir.join(parent).join(normalized))
+        });
+        doc_relative
+            .or_else(|| source_dir.map(|dir| dir.join(normalized)))
+            .or_else(|| {
+                source_name
+                    .and_then(|name| Path::new(name).parent())
+                    .map(|parent| parent.join(normalized))
+            })
+            .unwrap_or_else(|| candidate.to_path_buf())
+    };
+    if full.is_file() {
+        full
+    } else if let Some(dir) = source_dir {
+        let root_relative = dir.join(normalized);
+        if root_relative.is_file() { root_relative } else { full }
+    } else {
+        full
+    }
+}
 
 impl IncludeResolver for FsIncludeResolver {
     fn resolve(
@@ -147,43 +207,26 @@ impl IncludeResolver for FsIncludeResolver {
         source_name: Option<&str>,
         path: &str,
     ) -> Result<String, DirectiveError> {
-        let candidate = Path::new(path);
-        let full = if candidate.is_absolute() {
-            candidate.to_path_buf()
-        } else {
-            // Docutils anchors relative includes at the document containing
-            // the directive, not the project root. When a docname is known,
-            // try `<source_dir>/<doc-parent>/<path>` first, then fall back to
-            // `<source_dir>/<path>` for callers that pass root-relative paths.
-            let doc_relative = source_dir.zip(source_name).and_then(|(dir, name)| {
-                Path::new(name)
-                    .parent()
-                    .map(|parent| dir.join(parent).join(path))
-            });
-            doc_relative
-                .or_else(|| source_dir.map(|dir| dir.join(path)))
-                .or_else(|| {
-                    source_name
-                        .and_then(|name| Path::new(name).parent())
-                        .map(|parent| parent.join(path))
-                })
-                .unwrap_or_else(|| candidate.to_path_buf())
-        };
-        // Prefer the document-relative file when both candidates exist; the
-        // docutils behaviour wins over the legacy source-dir fallback.
-        let full = if full.is_file() {
-            full
-        } else if let Some(dir) = source_dir {
-            let root_relative = dir.join(path);
-            if root_relative.is_file() {
-                root_relative
-            } else {
-                full
-            }
-        } else {
-            full
-        };
-        std::fs::read_to_string(&full).map_err(|source| DirectiveError::IncludeIo {
+        self.resolve_encoded(source_dir, source_name, path, "utf-8")
+    }
+
+    fn resolve_encoded(
+        &self,
+        source_dir: Option<&Path>,
+        source_name: Option<&str>,
+        path: &str,
+        encoding: &str,
+    ) -> Result<String, DirectiveError> {
+        let full = resolve_include_path(source_dir, source_name, path);
+        let bytes = std::fs::read(&full).map_err(|source| DirectiveError::IncludeIo {
+            path: full.display().to_string(),
+            detail: source.to_string(),
+        })?;
+        let lower = encoding.to_ascii_lowercase();
+        if matches!(lower.as_str(), "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1") {
+            return Ok(bytes.iter().map(|&b| b as char).collect());
+        }
+        String::from_utf8(bytes).map_err(|source| DirectiveError::IncludeIo {
             path: full.display().to_string(),
             detail: source.to_string(),
         })
@@ -342,6 +385,7 @@ impl<'a> DirectiveContext<'a> {
         let parsed = parse_inline(
             &source,
             &InlineOptions {
+                index_counter: Arc::clone(&self.global.index_counter),
                 source_name: self.global.source_name.clone(),
                 extlinks: Arc::clone(&self.global.extlinks),
                 default_role: self
@@ -419,6 +463,7 @@ impl<'a> DirectiveContext<'a> {
                     .ok()
                     .and_then(|guard| guard.clone()),
                 extlinks: Arc::clone(&self.global.extlinks),
+                index_counter: Arc::clone(&self.global.index_counter),
             },
         );
         let mut result = Vec::new();

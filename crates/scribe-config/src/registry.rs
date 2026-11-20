@@ -444,6 +444,8 @@ impl ConfigRegistry {
             entry("html_extra_path", string_list(&[]), ConfigType::List, "html", "Extra file directories."),
             entry("html_context", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "html", "Template context."),
             entry("html_sidebars", ConfigValue::Dict(BTreeMap::new()), ConfigType::Dict, "html", "Sidebar templates."),
+            // Legacy MathJax path, still accepted (and silently ignored) by Sphinx 9.
+            entry("jsmath_path", ConfigValue::from("dummy.js"), ConfigType::Str, "html", "Legacy MathJax script path."),
             entry("html_last_updated_fmt", ConfigValue::None, ConfigType::Str, "html", "Last-updated date format."),
             entry("html_baseurl", ConfigValue::from(""), ConfigType::Str, "html", "Canonical base URL."),
             entry("html_copy_source", ConfigValue::Bool(true), ConfigType::Bool, "html", "Copy source files."),

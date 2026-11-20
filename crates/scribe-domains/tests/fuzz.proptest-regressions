@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 71ada78ddc249e4892694a0f1f22ff315877c1f99b2293b1a9156d7415454af0 # shrinks to input = "=aa", objtype = "function", domain = "cpp"
+cc 373d30bafcb6f56b66cad4aa05858c0910fea57516210be6fb6011722304c973 # shrinks to input = "(a:a<"
+cc 2bd2b2256f986d3f00be5094c83b1481d7e463d545096a44226d577f637dc0d1 # shrinks to input = "a)aaaa<", objtype = "function", domain = "cpp"

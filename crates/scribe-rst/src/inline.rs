@@ -233,6 +233,8 @@ pub struct XrefMeta {
 /// Options for inline parsing.
 #[derive(Clone, Debug, Default)]
 pub struct InlineOptions {
+    /// Shared counter for generated `index-N` anchors.
+    pub index_counter: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Document name, used for `refdoc` on `pending_xref` nodes.
     pub source_name: Option<String>,
     /// Dynamic external-link roles registered by `sphinx.ext.extlinks`.
@@ -1568,7 +1570,7 @@ fn emit_role(
             // `target` carrying a generated `index-N` id. Emit them in the
             // same order so the pseudoxml doctree matches the oracle.
             if is_pep || is_rfc {
-                let serial = out.iter().filter(|n| n.kind == NodeKind::Index).count();
+                let serial = options.index_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
                 let index_id = format!("index-{serial}");
                 let label = if is_pep {
                     format!("Python Enhancement Proposals; PEP {target}")

@@ -172,6 +172,7 @@ fn include_with_line_ranges_and_literal_mode() {
             default_role: None,
             default_domain: None,
             extlinks: scribe_rst::extlinks::empty_roles(),
+            index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         },
     );
     let context = Context::new(&root, Tags::new());
@@ -465,6 +466,7 @@ fn prolog_directives_and_roles_resolve() {
             default_role: None,
             default_domain: None,
             extlinks: scribe_rst::extlinks::empty_roles(),
+            index_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         },
     );
     let report = resolve_output(&mut output, &DirectiveRegistry::builtin(), &Context::default());

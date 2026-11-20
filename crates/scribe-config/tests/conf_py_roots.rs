@@ -132,15 +132,20 @@ fn python_bridge_executes_imports_and_tags() {
 
 #[test]
 fn unknown_keys_become_warnings_not_errors() {
-    // `test-root/conf.py` defines `jsmath_path`, which is not a registered key.
+    // Inject a conf.py with a genuinely unknown key into a temp directory.
+    let dir = std::env::temp_dir().join(format!("scribe-unknown-key-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let conf = dir.join("conf.py");
+    std::fs::write(&conf, "project = 'X'\nscribe_definitely_unknown_key = 1\n").expect("write conf");
     let request = LoadRequest {
-        conf_dir: roots_dir().join("test-root"),
+        conf_dir: dir.clone(),
         strategy: BridgeStrategy::Static,
         ..LoadRequest::default()
     };
     let (config, warnings) = load_config_with(request).expect("load");
     assert!(warnings.iter().any(|warning| warning.kind == ConfigWarningKind::UnknownKey));
-    assert_eq!(config.get_str("project"), Some("Sphinx <Tests>"));
+    assert_eq!(config.get_str("project"), Some("X"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

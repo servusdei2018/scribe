@@ -28,7 +28,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 98.5% over 34 applicable fixtures (33 pass, 1 partial, 0 fail, 5 skip)
+## Aggregate semantic parity: 99.6% over 34 applicable fixtures (34 pass, 0 partial, 0 fail, 5 skip)
 
 ## Per-fixture results
 
@@ -38,7 +38,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-basic | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-changes | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 30/30 | 0/0 | — |
 | test-default_role | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
-| test-directive-code | html | directive | pass | 1.000 | 1.000 | 1.000 | 26/26 | 0/0 | — |
+| test-directive-code | html | directive | pass | 0.986 | 0.984 | 1.000 | 26/26 | 0/0 | html classes |
 | test-directive-csv-table | pseudoxml | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-directive-include | pseudoxml | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-directive-only | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
@@ -53,7 +53,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-domain-py-xref-warning | pseudoxml | domain | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-ext-autodoc | pseudoxml | domain | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
 | test-ext-graphviz | html | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
-| test-footnotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 41/41 | 0/0 | — |
+| test-footnotes | pseudoxml | parser | pass | 0.992 | 0.990 | 1.000 | 41/41 | 0/0 | domain, html classes, parser |
 | test-glossary | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-highlight_options | html | directive | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
 | test-linkcheck | html | builder | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
@@ -67,12 +67,12 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-prolog | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-reST-code-block | html | parser | pass | 1.000 | 1.000 | 1.000 | 20/20 | 0/0 | — |
 | test-reST-code-role | html | parser | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
-| test-root | html | builder | partial | 0.542 | 0.605 | 0.187 | 48/46 | 0/0 | directive, html classes, parser, warning codes |
+| test-root | html | builder | pass | 0.950 | 0.945 | 0.977 | 48/46 | 0/0 | html classes, parser, warning codes |
 | test-smartquotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-theming | html | builder | pass | 1.000 | 1.000 | 1.000 | 20/20 | 0/0 | — |
 | test-toctree | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-toctree-glob | pseudoxml | builder | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
-| test-toctree-maxdepth | html | builder | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
+| test-toctree-maxdepth | html | builder | pass | 0.991 | 0.989 | 1.000 | 21/21 | 0/0 | html classes |
 
 ## Skipped fixtures
 
@@ -84,9 +84,8 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 ## Divergences by category
 
-- **directive**: test-root (html)
-- **domain**: test-domain-cpp (pseudoxml)
-- **html classes**: test-domain-cpp (pseudoxml), test-root (html)
-- **parser**: test-domain-cpp (pseudoxml), test-root (html)
+- **domain**: test-domain-cpp (pseudoxml), test-footnotes (pseudoxml)
+- **html classes**: test-directive-code (html), test-domain-cpp (pseudoxml), test-footnotes (pseudoxml), test-root (html), test-toctree-maxdepth (html)
+- **parser**: test-domain-cpp (pseudoxml), test-footnotes (pseudoxml), test-root (html)
 - **warning codes**: test-domain-cpp (pseudoxml), test-root (html)
 

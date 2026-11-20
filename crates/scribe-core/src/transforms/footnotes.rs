@@ -40,6 +40,10 @@ struct Ref {
     ids: Vec<String>,
 }
 
+fn ctx_docname(document: &Document) -> String {
+    document.metadata.docname.clone().unwrap_or_default()
+}
+
 /// Docutils `Footnotes` — number footnotes/citations and link their refs.
 #[derive(Debug)]
 pub struct FootnotesTransform;
@@ -302,9 +306,43 @@ impl Transform for FootnotesTransform {
 
         for reference in &refs {
             if reference.refname.is_some() && !ref_has_refid(document, reference.id) {
+                let name = reference.refname.as_deref().unwrap_or("");
+                // Cross-document footnote/citation references: look for the
+                // definition in every other recorded doctree and turn the
+                // local reference into a normal link when found.
+                let mut external: Option<(String, String, String)> = None;
+                if let Some(env) = ctx.env {
+                    for (other_doc, snapshot) in &env.documents {
+                        if other_doc.as_str() == ctx_docname(document) { continue; }
+                        let Some(other) = snapshot.doctree.as_ref() else { continue };
+                        for id in other.preorder_ids() {
+                            let Ok(note) = other.get(id) else { continue };
+                            if note.kind != NodeKind::Footnote && note.kind != NodeKind::Citation { continue; }
+                            let names = list_attr(note, "names");
+                            if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                                let anchor = note.ids().ok().and_then(|ids| ids.first().cloned()).unwrap_or_else(|| name.to_owned());
+                                external = Some((other_doc.clone(), anchor, name.to_owned()));
+                                break;
+                            }
+                        }
+                        if external.is_some() { break; }
+                    }
+                }
+                if let Some((other_doc, anchor, label)) = external {
+                    if let Ok(node) = document.get_mut(reference.id) {
+                        node.kind = NodeKind::Reference;
+                        node.attrs.set_str("refuri", format!("{}.html#{}", other_doc, anchor));
+                        node.attrs.set_list("classes", vec!["reference".to_owned(), "internal".to_owned()]);
+                        let text_id = document.new_text(format!("[{}]", label), Some(reference.id)).unwrap_or(reference.id);
+                        if text_id != reference.id {
+                            let _ = document.replace_children(reference.id, vec![text_id]);
+                        }
+                    }
+                    continue;
+                }
                 ctx.warn(
                     "Footnotes",
-                    format!("reference target not found: {}", reference.refname.as_deref().unwrap_or("")),
+                    format!("reference target not found: {}", name),
                     document.get(reference.id).ok().and_then(|node| node.span),
                 );
             }

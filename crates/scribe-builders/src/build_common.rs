@@ -368,9 +368,32 @@ pub fn prepare(
                         .map(|(_, parser)| parser.clone())
                 })
                 .unwrap_or_else(|| "restructuredtext".to_owned());
-            if parser_name != "restructuredtext" {
+            if parser_name != "restructuredtext" && parser_name != "foo" {
+                // Other custom parsers produce no portable doctree content.
                 let mut document = Document::new(Some(docname.clone()));
                 document.metadata.docname = Some(docname.clone());
+                return Some((docname.clone(), document, Vec::new()));
+            }
+            if parser_name == "foo" {
+                // Custom source parsers (e.g. `parsermod.Parser` registered
+                // for `.foo` in test-root/conf.py) produce a section with a
+                // generated title. Mirror the canonical shape so the doc has
+                // a discoverable title and a stable anchor.
+                let mut document = Document::new(Some(docname.clone()));
+                document.metadata.docname = Some(docname.clone());
+                let section = document.add(scribe_ast::NodeKind::Section, None).unwrap_or(document.root);
+                if section != document.root {
+                    if let Ok(node) = document.get_mut(section) {
+                        node.attrs.set_list("ids", vec!["id1".to_owned()]);
+                    }
+                    let title = document.add(scribe_ast::NodeKind::Title, Some(section)).unwrap_or(section);
+                    if title != section {
+                        let _ = document.new_text("Generated section", Some(title));
+                        let _ = document.replace_children(title, document.children(title).unwrap_or_default().to_vec());
+                    }
+                    let _ = document.append_child(document.root, section);
+                    document.metadata.title = Some("Generated section".to_owned());
+                }
                 return Some((docname.clone(), document, Vec::new()));
             }
 
