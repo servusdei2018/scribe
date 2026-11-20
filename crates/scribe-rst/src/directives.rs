@@ -1244,8 +1244,13 @@ fn role_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         None => (first, "generic".to_owned()),
     };
     if !name.is_empty() {
+        let language = ctx.option_str("language").map(str::to_owned);
+        let classes = ctx.classes();
         if let Ok(mut roles) = ctx.global.custom_roles.write() {
-            roles.insert(name.to_owned(), base);
+            roles.insert(
+                name.to_owned(),
+                crate::role_registry::CustomRoleInfo { base, language, classes },
+            );
         }
     }
     Ok(Vec::new())

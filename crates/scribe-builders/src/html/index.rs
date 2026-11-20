@@ -105,7 +105,10 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
     }
     let mut out = format!("<h1 id=\"{slug}\">{title}</h1>\n", slug = slug(title));
     if entries.is_empty() {
-        out.push_str("<p>No entries.</p>\n");
+        // Upstream's `genindex.html` always emits the (empty) letter jumpbox,
+        // even when the index has no entries. Mirror that DOM wrapper rather
+        // than a placeholder paragraph so the page's tag multiset matches.
+        out.push_str("\n<div class=\"genindex-jumpbox\">\n \n</div>\n");
         return out;
     }
     out.push_str("<div class=\"genindexwrapper\">\n<ul class=\"search\">\n");
@@ -177,18 +180,14 @@ pub fn write_index_pages(
     outdir: &Path,
     flavor: &BuildFlavor,
 ) -> Result<Vec<std::path::PathBuf>> {
-    // The std domain keeps virtual `:ref:` labels (`genindex`, `modindex`,
-    // `search`) so those xrefs resolve; they are not real domain objects and
-    // upstream's general index never lists them as entries (its genindex body
-    // is generated from `IndexEntries.create_index`, which only sees indexable
-    // objects/terms).  Filter them here so we neither render phantom index
-    // rows nor emit a link to a `py-modindex.html` page that does not exist.
+    // Sphinx's general index is generated from `IndexEntries.create_index`,
+    // which only sees *indexable* objects/terms. `std:label` objects (explicit
+    // and implicit `:ref:` targets, including the virtual `genindex`,
+    // `modindex` and `search` labels) are never listed there. Filter every
+    // label so named code blocks do not leak phantom rows into the index.
     let objects: Vec<ObjectEntry> = collect_objects(registry)
         .into_iter()
-        .filter(|entry| {
-            !(entry.objtype == "label"
-                && matches!(entry.name.as_str(), "genindex" | "modindex" | "search"))
-        })
+        .filter(|entry| entry.objtype != "label")
         .collect();
     let mut pages: Vec<(String, String)> = Vec::new();
     // Each generated page needs its own `docname` so `pathto` computes the

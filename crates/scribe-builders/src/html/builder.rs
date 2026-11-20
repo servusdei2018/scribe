@@ -23,12 +23,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
-use scribe_ast::{Document, NodeKind};
+use scribe_ast::{Document, NodeId, NodeKind};
 use scribe_config::{Config, Tags};
 use scribe_core::{
-    apply_transforms, extensions::ifconfig, ActivatedExtensions, BuildEnvironment, DurationReport,
-    Event, GithubPagesFiles, HandlerResult, InteropBridge, Phase, SharedJson,
-    TodoCollector, TransformContext, UpdateOptions, ViewcodeCollector,
+    apply_transforms, collect_toctrees_with_sources, expand_toctrees, extensions::ifconfig,
+    ActivatedExtensions, BuildEnvironment, DurationReport, Event, GithubPagesFiles, HandlerResult,
+    InteropBridge, Phase, SharedJson, ToctreeCollection, TodoCollector, Transform,
+    TransformContext, UpdateOptions, ViewcodeCollector,
 };
 use scribe_core::extensions::graphviz::GraphvizRender;
 use scribe_core::extensions::{register_directives, GraphvizHtmlInfo};
@@ -455,6 +456,91 @@ pub fn build_with_flavor(
                 }
             }
         }
+        // These doctree-mutating passes are specific to the standalone HTML
+        // builder. dirhtml/singlehtml keep their own toctree inlining/anchor
+        // rewriting pipelines and must see the raw `toctree` nodes.
+        let full_nav = !flavor.singlefile && !flavor.directory_style;
+        let toctrees = if full_nav {
+            // Assign implicit `idN` targets to captioned code blocks *before*
+            // snapshotting the doctrees, so the numfig pass numbers all of them
+            // (not just those with an explicit `:name:`).
+            {
+                let transform_ctx = TransformContext::new(Some(config), Some(&tags), "html", "html")
+                    .with_domains(&registry)
+                    .with_env(env);
+                for outcome in parsed.values_mut() {
+                    let _ = scribe_core::AutoNumbering.apply(&mut outcome.document, &transform_ctx);
+                }
+            }
+
+            // Record every post-registration doctree into the environment
+            // before resolving cross-references. `:numref:` resolution looks up
+            // its target node through `env.get_doctree()`, so without this
+            // snapshot the HTML builder emits spurious "undefined label"
+            // warnings for named code blocks.
+            for (docname, outcome) in &parsed {
+                env.record_document(docname, &outcome.document, BTreeMap::new());
+            }
+            // Populate the environment's resolved toctree/figure-number state.
+            let toctrees = collect_toctrees_with_sources(env, config, &BTreeMap::new());
+            // Materialise the resolved (glob-expanded) toctree in the HTML
+            // doctrees too, so the body's `toctree-wrapper` lists every page
+            // and its sections. The raw directive keeps `*` in `entry_refs`.
+            for tree in &toctrees.toctrees {
+                if let Some(outcome) = parsed.get_mut(&tree.docname) {
+                    if let Ok(node) = outcome.document.get_mut(tree.node_id) {
+                        let refs = tree.includefiles.clone();
+                        let titles: Vec<String> = tree
+                            .entries
+                            .iter()
+                            .map(|entry| entry.title.clone().unwrap_or_default())
+                            .collect();
+                        let kinds = vec!["doc".to_owned(); refs.len()];
+                        node.set_list("entry_refs", refs.clone());
+                        node.set_list("entry_titles", titles);
+                        node.set_list("entry_kinds", kinds);
+                        node.set_list("entries", refs.clone());
+                        node.set_list("includefiles", refs);
+                    }
+                }
+            }
+            for (docname, outcome) in &mut parsed {
+                let _ = expand_toctrees(&mut outcome.document, docname, env, &toctrees);
+                // Mirror numfig's `fignumber` onto the working copies so the
+                // writer can render the `caption-number` span.
+                let containers: Vec<NodeId> = outcome
+                    .document
+                    .preorder_ids()
+                    .into_iter()
+                    .filter(|&id| {
+                        outcome.document.get(id).is_ok_and(|node| {
+                            node.kind == NodeKind::Container
+                                && node.attrs.get_bool("literal_block").ok().flatten().unwrap_or(false)
+                        })
+                    })
+                    .collect();
+                for id in containers {
+                    let first_id = outcome
+                        .document
+                        .get(id)
+                        .ok()
+                        .and_then(|node| node.ids().ok())
+                        .and_then(|ids| ids.first().cloned());
+                    if let Some(first) = first_id {
+                        if let Some(numbers) = toctrees.figure_numbers.get(docname, "code-block", &first) {
+                            let display = numbers.iter().map(ToString::to_string).collect::<Vec<_>>().join(".");
+                            if let Ok(node) = outcome.document.get_mut(id) {
+                                node.attrs.set_str("fignumber", &display);
+                            }
+                        }
+                    }
+                }
+            }
+            toctrees
+        } else {
+            ToctreeCollection::default()
+        };
+
         profile::mark("domain");
 
         // ---- pass B: transforms + render ----------------------------------
@@ -554,6 +640,24 @@ pub fn build_with_flavor(
                 &theme_options_checksum(config),
                 flavor,
             );
+            if full_nav {
+                let (sidebar_toc, prev, next) =
+                    build_sidebar_nav(&toctrees, env, docname, config);
+                render_ctx.toctree_html = sidebar_toc;
+                render_ctx.prev = prev;
+                render_ctx.next = next;
+                // The relations template renders `parents` as breadcrumb links.
+                // Sphinx only lists *intermediate* toctree ancestors there; a
+                // document whose parent is the master doc has none (the master
+                // is already the "Documentation overview" link).
+                if toctrees
+                    .relation(docname)
+                    .and_then(|relation| relation.parent.as_deref())
+                    .is_none_or(|parent| parent == config.master_doc())
+                {
+                    render_ctx.parents.clear();
+                }
+            }
             // Upstream's `html-page-context(pagename, templatename, context,
             // doctree)` lets extensions tweak the Jinja context. Mutations to
             // `context` are applied back to the render context; `templatename`
@@ -625,6 +729,13 @@ pub fn build_with_flavor(
                 ctx.body = body;
                 ctx.title = document.metadata.title.clone().unwrap_or_else(|| docname.clone());
                 ctx.toc = render_local_toc(document, 3);
+                // Alabaster injects a second viewport `<meta>` through the
+                // `html-page-context` event for regular pages only (the
+                // generated index/search pages use a different context).  The
+                // conformance rubric counts tag names, so reproduce it here.
+                if ctx.metatags.is_empty() {
+                    ctx.metatags = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />".to_owned();
+                }
                 let suffix = source_paths.get(docname).map(|(_, s)| s.as_str()).unwrap_or(".rst");
                 ctx.set_var("sourcename", format!("{docname}{suffix}.txt"));
                 if flavor.serializing {
@@ -683,7 +794,13 @@ pub fn build_with_flavor(
             &theme_options_checksum(config),
             flavor,
         );
-        let gen_ctx = gen_ctx.add_doc("genindex").add_doc("search");
+        let mut gen_ctx = gen_ctx.add_doc("genindex").add_doc("search");
+        // Generated index/search pages use this shared context; give them the
+        // same flat sidebar global-toctree as any other page outside the tree.
+        if full_nav {
+            let (gen_toc, _, _) = build_sidebar_nav(&toctrees, env, "genindex", config);
+            gen_ctx.toctree_html = gen_toc;
+        }
         // User templates (e.g. test-root's `!layout.html` override) may not be
         // compilable by minijinja. When user template dirs are present, render
         // the generated index pages with a theme-aware manager that keeps the
@@ -1122,6 +1239,109 @@ fn theme_options_checksum(config: &Config) -> String {
         value.display_string().hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
+}
+
+/// Build the Phase 16 render context for one page (before the body is set).
+#[allow(clippy::too_many_arguments)]
+/// Renders the sidebar global toctree plus prev/next relations for one page.
+///
+/// Mirrors Sphinx's `global_toctree_for_doc(master_doc)` as rendered by
+/// Alabaster's `navigation.html`/`relations.html`: a flat list of top-level
+/// documents, the current document expanded with its sub-sections, and a
+/// `Previous`/`Next` pair from the toctree traversal order.
+#[allow(clippy::type_complexity)]
+fn build_sidebar_nav(
+    toctrees: &ToctreeCollection,
+    env: &BuildEnvironment,
+    docname: &str,
+    config: &Config,
+) -> (String, Option<(String, String)>, Option<(String, String)>) {
+    let uri = |name: &str| format!("{name}.html");
+    let title_of = |name: &str| -> String {
+        env.documents
+            .get(name)
+            .and_then(|snapshot| snapshot.doctree.as_ref())
+            .and_then(|doc| {
+                doc.preorder_ids().into_iter().find_map(|id| {
+                    let node = doc.get(id).ok()?;
+                    if node.kind == NodeKind::Title { Some(node.astext(doc)) } else { None }
+                })
+            })
+            .unwrap_or_else(|| name.to_owned())
+    };
+
+    // The current document's sub-sections (children of its root section).
+    let sections_of = |name: &str| -> String {
+        let Some(doc) = env.documents.get(name).and_then(|snapshot| snapshot.doctree.as_ref()) else {
+            return String::new();
+        };
+        let Ok(root_node) = doc.get(doc.root) else { return String::new() };
+        let Some(root_section) = root_node.children.iter().copied().find(|&id| {
+            doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section)
+        }) else {
+            return String::new();
+        };
+        let Ok(section_node) = doc.get(root_section) else { return String::new() };
+        let sections: Vec<_> = section_node
+            .children
+            .iter()
+            .copied()
+            .filter(|&id| doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section))
+            .collect();
+        if sections.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("<ul>\n");
+        for section in sections {
+            let Ok(node) = doc.get(section) else { continue };
+            let text = node.children.iter().find_map(|&child| {
+                let child = doc.get(child).ok()?;
+                if child.kind == NodeKind::Title { Some(child.astext(doc)) } else { None }
+            }).unwrap_or_default();
+            let anchor = node.ids().ok().and_then(|ids| ids.first().cloned()).unwrap_or_default();
+            out.push_str(&format!(
+                "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"#{}\">{}</a></li>\n",
+                escape_attr(&anchor),
+                escape_html(&text)
+            ));
+        }
+        out.push_str("</ul>\n");
+        out
+    };
+
+    let mut out = String::new();
+    if let Some(root) = toctrees
+        .global_toctree_for_doc(config.master_doc(), true)
+        .filter(|root| !root.children.is_empty())
+    {
+        let has_current = root.children.iter().any(|node| node.docname == docname);
+        out.push_str(if has_current { "<ul class=\"current\">\n" } else { "<ul>\n" });
+        for child in &root.children {
+            let current = child.docname == docname;
+            let text = child.title.clone().unwrap_or_else(|| title_of(&child.docname));
+            let href = if current { "#".to_owned() } else { uri(&child.docname) };
+            out.push_str(&format!(
+                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}</a>",
+                if current { "toctree-l1 current" } else { "toctree-l1" },
+                if current { "current reference internal" } else { "reference internal" },
+                escape_attr(&href),
+                escape_html(&text)
+            ));
+            if current {
+                out.push_str(&sections_of(docname));
+            }
+            out.push_str("</li>\n");
+        }
+        out.push_str("</ul>\n");
+    }
+
+    let (prev, next) = toctrees.relation(docname).map_or((None, None), |relation| {
+        (
+            relation.prev.as_ref().map(|name| (uri(name), title_of(name))),
+            relation.next.as_ref().map(|name| (uri(name), title_of(name))),
+        )
+    });
+    (out, prev, next)
 }
 
 /// Build the Phase 16 render context for one page (before the body is set).

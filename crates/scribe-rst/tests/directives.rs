@@ -429,7 +429,7 @@ fn role_and_default_role_directives_update_context_seam() {
     let source = ".. role:: shiny(code)\n\n.. default-role:: literal\n";
     let (_, _, context) = resolve(source);
     assert_eq!(
-        context.custom_roles.read().expect("lock").get("shiny").map(String::as_str),
+        context.custom_roles.read().expect("lock").get("shiny").map(|info| info.base.as_str()),
         Some("code")
     );
     assert_eq!(

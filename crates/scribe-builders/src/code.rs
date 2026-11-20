@@ -886,7 +886,10 @@ fn run_literal_include(
         }
     }
 
-    let code = apply_dedent(ctx, &lines.join("\n"), &mut warnings);
+    // Preserve the trailing newline across the split/join round-trips so a
+    // file of blank lines keeps all of its physical lines (Pygments receives
+    // the raw text, including the final newline).
+    let code = apply_dedent(ctx, &format!("{}\n", lines.join("\n")), &mut warnings);
     let selected = split_include_lines(&code);
     let mut final_lines = selected;
     if let Some(prepend) = ctx.option_str("prepend") {
@@ -895,7 +898,11 @@ fn run_literal_include(
     if let Some(append) = ctx.option_str("append") {
         final_lines.push(append.to_owned());
     }
-    let code = final_lines.join("\n");
+    let code = if final_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", final_lines.join("\n"))
+    };
 
     let language = if diff_option.is_some() {
         "udiff".to_owned()

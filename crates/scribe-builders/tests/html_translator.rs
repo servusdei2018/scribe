@@ -232,8 +232,12 @@ fn footnotes_and_citations() {
         doc.get_mut(reference).unwrap().set_str("refid", "fn1");
         text(doc, reference, "1");
     });
-    assert!(out.contains("<aside id=\"fn1\" class=\"footnote\">"), "{out}");
-    assert!(out.contains("<a class=\"reference internal footnote-reference\" href=\"#fn1\">1</a>"), "{out}");
+    assert!(out.contains("class=\"footnote-list brackets\""), "{out}");
+    assert!(out.contains("id=\"fn1\" class=\"footnote brackets\" role=\"doc-footnote\""), "{out}");
+    assert!(
+        out.contains("<a class=\"footnote-reference brackets\" role=\"doc-noteref\" href=\"#fn1\"><span class=\"fn-bracket\">[</span>1<span class=\"fn-bracket\">]</span></a>"),
+        "{out}"
+    );
 }
 
 #[test]

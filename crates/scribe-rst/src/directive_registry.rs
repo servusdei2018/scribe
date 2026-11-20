@@ -48,10 +48,9 @@ pub struct Context {
     /// [`crate::resolve_output`](crate::resolve::resolve_output) from the
     /// additive Phase 04/05 side table.
     pub substitution_directives: BTreeMap<u32, crate::SubstitutionDirective>,
-    /// Custom roles declared by `.. role::`, mapped to their base role.
-    /// Phase 05's pure inline recogniser cannot read per-document state, so
-    /// this is the documented seam for a future stateful inline pass.
-    pub custom_roles: Arc<RwLock<HashMap<String, String>>>,
+    /// Custom roles declared by `.. role::`, mapped to their base role and
+    /// forwarded `:language:`/`:class:` options.
+    pub custom_roles: Arc<RwLock<HashMap<String, crate::role_registry::CustomRoleInfo>>>,
     /// Role selected by `.. default-role::`.
     pub default_role: Arc<RwLock<Option<String>>>,
     /// Domain selected by `.. default-domain::`. Unprefixed directives and

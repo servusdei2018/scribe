@@ -619,15 +619,17 @@ impl StandardDomain {
                     let title = title_for_label(document, id);
                     self.note_label(ctx, name, &labelid, title.as_deref(), span);
                 }
-            } else if node.kind == NodeKind::Container
-                && node.attrs.get_bool("literal_block").unwrap_or_default().unwrap_or(false)
+            } else if matches!(node.kind, NodeKind::Container | NodeKind::LiteralBlock)
+                && (node.kind != NodeKind::Container
+                    || node.attrs.get_bool("literal_block").unwrap_or_default().unwrap_or(false))
                 && !names.is_empty()
                 && !ids.is_empty()
             {
                 // `.. code-block::` with `:name:` stores the explicit target
                 // directly on its wrapper container (upstream's
-                // `literal_block` enumerable node).  Register it as a label
-                // with the caption as section name so `:ref:` can resolve it.
+                // `literal_block` enumerable node). Without a `:caption:` the
+                // name lives on the `literal_block` node itself. Register both
+                // shapes so `:ref:`/`:numref:` can resolve them.
                 let labelid = ids.first().cloned().unwrap_or_default();
                 let title = title_for_label(document, id);
                 for name in &names {

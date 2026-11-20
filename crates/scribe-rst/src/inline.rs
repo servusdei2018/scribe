@@ -243,10 +243,9 @@ pub struct InlineOptions {
     /// resolved against it before falling back to the standard domain.
     pub default_domain: Option<String>,
     /// Custom roles declared by `.. role:: name(base)` in document order.
-    /// Maps the local role name to its base role name. The base role supplies
-    /// the emitted node kind, while the custom name supplies the `classes`
-    /// attribute (matching Docutils' `roles.CustomRole`).
-    pub custom_roles: HashMap<String, String>,
+    /// Maps the local role name to its base role plus any forwarded
+    /// `:language:`/`:class:` options (matching Docutils' `roles.CustomRole`).
+    pub custom_roles: HashMap<String, crate::role_registry::CustomRoleInfo>,
 }
 
 // ----- tokenizer ------------------------------------------------------------
@@ -1502,7 +1501,9 @@ fn emit_role(
     // base role but overrides the `classes` attribute with the custom name.
     let base = options.custom_roles.get(&role.to_ascii_lowercase());
     let custom_class = base.map(|_| role.to_owned());
-    let effective_role = base.map_or(role, String::as_str);
+    let effective_role = base.map_or(role, |info| info.base.as_str());
+    let custom_language = base.and_then(|info| info.language.clone());
+    let custom_classes = base.map(|info| info.classes.clone()).unwrap_or_default();
 
     // A custom role with no explicit base uses Docutils' generic custom role:
     // a plain `inline` node classed with the custom role name.
@@ -1597,6 +1598,53 @@ fn emit_role(
     }
 
     apply_custom_class(out, out_start, custom_class);
+    apply_custom_role_options(
+        out,
+        out_start,
+        effective_role,
+        custom_language.as_deref(),
+        &custom_classes,
+    );
+}
+
+/// Forwards a custom `code` role's `:language:`/`:class:` options onto the
+/// `literal` element emitted by its base role, mirroring Sphinx's `CodeRole`.
+fn apply_custom_role_options(
+    out: &mut [InlineNode],
+    from: usize,
+    base: &str,
+    language: Option<&str>,
+    classes: &[String],
+) {
+    if base != "code" || (language.is_none() && classes.is_empty()) {
+        return;
+    }
+    for node in &mut out[from..] {
+        if node.text.is_some() || node.kind != NodeKind::Literal {
+            continue;
+        }
+        if let Some(lang) = language {
+            node.attrs.push(("language".to_owned(), AttributeValue::Str(lang.to_owned())));
+        }
+        if !classes.is_empty() {
+            let mut merged = node
+                .attrs
+                .iter()
+                .find(|(key, _)| key == "classes")
+                .and_then(|(_, value)| match value {
+                    AttributeValue::List(values) => Some(values.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            for class in classes {
+                if !merged.contains(class) {
+                    merged.push(class.clone());
+                }
+            }
+            node.attrs.retain(|(key, _)| key != "classes");
+            node.attrs.push(("classes".to_owned(), AttributeValue::List(merged)));
+        }
+    }
 }
 
 /// Merges the custom role's name into the `classes` attribute of the element(s)

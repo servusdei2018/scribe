@@ -18,6 +18,29 @@ use once_cell::sync::Lazy;
 use scribe_ast::{AstError, Document, Node, NodeId, NodeKind};
 use thiserror::Error;
 
+/// Metadata captured by a `.. role:: name(base)` directive.
+///
+/// Docutils' `CustomRole` delegates node construction to the base role but
+/// forwards `:language:`/`:class:` options onto the emitted element. Sphinx's
+/// `sphinx.roles.CodeRole` uses `:language:` to attach a `language` attribute,
+/// which the HTML writer turns into a highlighted inline `<code>` element.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomRoleInfo {
+    /// Name of the base role (`code`, `literal`, `generic`, …).
+    pub base: String,
+    /// `:language:` option, forwarded onto `code` roles as `language`.
+    pub language: Option<String>,
+    /// `:class:` option values, merged into the emitted node's classes.
+    pub classes: Vec<String>,
+}
+
+impl CustomRoleInfo {
+    /// Creates the plain `base` form (no forwarded options).
+    pub fn new(base: impl Into<String>) -> Self {
+        Self { base: base.into(), language: None, classes: Vec::new() }
+    }
+}
+
 /// The inner-node class used by Sphinx's `XRefRole` and Docutils generic roles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InnerKind {

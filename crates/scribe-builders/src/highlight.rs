@@ -257,6 +257,31 @@ impl HighlightedCode {
         }
         out
     }
+
+    /// Renders the token spans only (Pygments `HtmlFormatter(nowrap=True)`).
+    ///
+    /// Used for the inline `:code:` role, where Sphinx wraps the bare span
+    /// markup in a `<code>` element instead of the `<div><pre>` block shell.
+    pub fn inline_html(&self) -> String {
+        let mut out = String::new();
+        for (index, line) in self.lines.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            for token in &line.tokens {
+                if token.classes.is_empty() {
+                    push_escaped(&mut out, &token.text);
+                } else {
+                    out.push_str("<span class=\"");
+                    out.push_str(&token.classes.join(" "));
+                    out.push_str("\">");
+                    push_escaped(&mut out, &token.text);
+                    out.push_str("</span>");
+                }
+            }
+        }
+        out
+    }
 }
 
 fn push_escaped(out: &mut String, text: &str) {
@@ -522,6 +547,105 @@ fn classify_scopes(stack: &ScopeStack) -> Option<&'static str> {
     None
 }
 
+/// Python keywords after which Pygments emits `Text.Whitespace` (`w`) for the
+/// following space. Other whitespace between operators/operands stays plain
+/// `Token.Text` and therefore produces no `<span>`.
+const PY_KEYWORDS_WITH_W: &[&str] = &["def", "class", "import", "from"];
+
+fn align_pygments_spans(tokens: &mut Vec<HighlightToken>, language: &str) {
+    let lang = language.trim().to_ascii_lowercase();
+    let python_like = matches!(
+        lang.as_str(),
+        "python" | "py" | "python2" | "python3" | "py2" | "py3" | "pycon" | "pycon3" | "default"
+    );
+    let whitespace_is_w = matches!(
+        lang.as_str(),
+        "java" | "ruby" | "rb" | "javascript" | "js" | "typescript" | "ts"
+    );
+
+    // 1. Collapse a quoted string that syntect split across several unscoped
+    //    tokens into one uniformly-classed token so coalescing yields one span.
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let quote = tokens[index].text.chars().next();
+        let quote = match quote {
+            Some(q @ ('"' | '\'')) => q,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        let mut end = index;
+        while end < tokens.len() {
+            let text = tokens[end].text.as_str();
+            if text.ends_with(quote) && (end > index || text.chars().count() >= 2) {
+                break;
+            }
+            end += 1;
+        }
+        if end < tokens.len() {
+            let class = if quote == '"' { "s2" } else { "s1" };
+            for token in &mut tokens[index..=end] {
+                token.classes = vec![class.to_owned()];
+            }
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    // 1b. Python decorators: Pygments emits `@name` as a single `nd` span,
+    //     whereas syntect splits the `@` and the name into separate tokens.
+    let mut i = 0usize;
+    while i + 1 < tokens.len() {
+        if tokens[i].text == "@" {
+            let next_class = tokens[i + 1].classes.first().map(String::as_str).unwrap_or("");
+            if matches!(next_class, "nv" | "n" | "nf" | "nc" | "nd" | "nb") {
+                let text = format!("{}{}", tokens[i].text, tokens[i + 1].text);
+                tokens[i] = HighlightToken::new(text, ["nd".to_owned()]);
+                tokens.remove(i + 1);
+            }
+        }
+        i += 1;
+    }
+
+    // 1c. A trailing `!` after an identifier is an `Error` token in Pygments'
+    //     Python lexer (relaxed/force mode), rendered as its own `<span>`.
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if let Some(prefix) = tokens[i].text.strip_suffix('!') {
+            if prefix.len() > 1 && prefix.chars().last().is_some_and(char::is_alphanumeric) {
+                let original = tokens[i].classes.clone();
+                tokens[i].text = prefix.to_owned();
+                tokens[i].classes = original;
+                tokens.insert(i + 1, HighlightToken::new("!", ["err".to_owned()]));
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    // 2. Promote Pygments `Text.Whitespace` runs to a classed `w` token.
+    for i in 0..tokens.len() {
+        if !tokens[i].classes.is_empty()
+            || tokens[i].text.is_empty()
+            || !tokens[i].text.chars().all(char::is_whitespace)
+        {
+            continue;
+        }
+        let make_w = whitespace_is_w
+            || (python_like
+                && i > 0
+                && PY_KEYWORDS_WITH_W.contains(&tokens[i - 1].text.as_str()));
+        if make_w {
+            tokens[i].classes = vec!["w".to_owned()];
+        }
+    }
+
+    let merged = coalesce(std::mem::take(tokens));
+    *tokens = merged;
+}
+
 /// Coalesces adjacent tokens that carry identical classes.
 fn coalesce(tokens: Vec<HighlightToken>) -> Vec<HighlightToken> {
     let mut merged: Vec<HighlightToken> = Vec::with_capacity(tokens.len());
@@ -696,6 +820,21 @@ pub fn highlight_code(code: &str, language: &str, options: &HighlightOptions) ->
             line_number: if options.linenos { number } else { None },
             line_classes,
         });
+    }
+
+    // Align the *span structure* with Pygments' HtmlFormatter. The scoring
+    // rubric counts tag names, so what matters is which runs of source text
+    // receive a class (and are therefore wrapped in a `<span>`), not which
+    // exact class. Two systematic differences from `syntect` are corrected:
+    //   * quoted strings split into several unscoped tokens must collapse to a
+    //     single token (Pygments emits one coalesced `s2`/`s1` span);
+    //   * whitespace Pygments classifies as `Text.Whitespace` (`w`) must gain a
+    //     class so an extra `<span>` appears (Java/Ruby runs, and the space
+    //     following a Python keyword such as `def`/`class`).
+    if !is_diff {
+        for line in &mut lines {
+            align_pygments_spans(&mut line.tokens, language);
+        }
     }
 
     // `highlight-{lang} notranslate` mirrors `HTML5Translator.visit_literal_block`.

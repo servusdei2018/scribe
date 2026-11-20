@@ -166,8 +166,15 @@ impl<'a> BlockParser<'a> {
                 None => (spec, "generic".to_owned()),
             };
             if !role_name.is_empty() {
-                self.custom_roles
-                    .insert(role_name.to_ascii_lowercase(), base_role);
+                let language = options.get("language").cloned();
+                let classes = options
+                    .get("class")
+                    .map(|value| value.split_whitespace().map(str::to_owned).collect())
+                    .unwrap_or_default();
+                self.custom_roles.insert(
+                    role_name.to_ascii_lowercase(),
+                    crate::role_registry::CustomRoleInfo { base: base_role, language, classes },
+                );
             }
         }
 

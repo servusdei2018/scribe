@@ -129,8 +129,8 @@ pub(crate) struct BlockParser<'a> {
     /// Role xref contract side table (forwarded to `ParseOutput`).
     pub(crate) inline_xrefs: Vec<(NodeId, XrefMeta)>,
     /// Custom roles declared by `.. role:: name(base)` in document order.
-    /// Maps the local name to its base role; consumed by inline parsing.
-    pub(crate) custom_roles: HashMap<String, String>,
+    /// Maps the local name to its base role and forwarded options.
+    pub(crate) custom_roles: HashMap<String, crate::role_registry::CustomRoleInfo>,
     /// Substitution-directive side table (forwarded to `ParseOutput`).
     pub(crate) substitution_directives: Vec<(NodeId, SubstitutionDirective)>,
     /// Exclusive upper bound for the current parse region (`usize::MAX` at root).

@@ -1268,6 +1268,16 @@ impl Transform for AutoNumbering {
                 NodeKind::Table => node.children.iter().any(|&child| {
                     document.get(child).is_ok_and(|child| child.kind == NodeKind::Title)
                 }),
+                // Sphinx's `note_implicit_target` on a captioned code block
+                // assigns the id to the `literal-block-wrapper` container
+                // itself, which is what numfig numbers and the caption's
+                // headerlink points at.
+                NodeKind::Container => {
+                    node.attrs.get_bool("literal_block").ok().flatten().unwrap_or(false)
+                        && node.children.iter().any(|&child| {
+                            document.get(child).is_ok_and(|child| child.kind == NodeKind::Caption)
+                        })
+                }
                 NodeKind::LiteralBlock => document.parent(id).ok().flatten().is_some_and(|parent| {
                     document.get(parent).is_ok_and(|parent| {
                         parent.kind == NodeKind::Container

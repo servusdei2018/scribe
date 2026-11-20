@@ -234,6 +234,13 @@ impl<'a> HTML5Translator<'a> {
         parent.children.get(pos + 1).and_then(|&child| self.doc.get(child).ok())
     }
 
+    /// Previous sibling of `id` in document order, when one exists.
+    fn prev_sibling(&self, id: NodeId) -> Option<&Node> {
+        let parent = self.parent_node(id)?;
+        let pos = parent.children.iter().position(|&child| child == id)?;
+        if pos == 0 { None } else { parent.children.get(pos - 1).and_then(|&child| self.doc.get(child).ok()) }
+    }
+
     fn class_attr(&self, node: &Node, extra: &[&str]) -> String {
         let mut classes = node.classes().unwrap_or_default();
         for c in extra {
@@ -645,36 +652,39 @@ impl<'a> HTML5Translator<'a> {
         }
     }
 
-    fn visit_footnote(&mut self, node: &Node) -> Option<Frame> {
+    fn visit_footnote(&mut self, node: &Node, id: NodeId) -> Option<Frame> {
         let class = if node.kind == NodeKind::Citation { "citation" } else { "footnote" };
-        let mut open = self.open_tag(node, "aside", &[class], &[]);
-        open.push('\n');
-        self.emit(&open);
-        Some(Frame::new("</aside>\n", NodeKind::Footnote))
+        let prev_is_footnote = self
+            .prev_sibling(id)
+            .is_some_and(|prev| matches!(prev.kind, NodeKind::Footnote | NodeKind::Citation));
+        let next_is_footnote = self
+            .next_sibling(id)
+            .is_some_and(|next| matches!(next.kind, NodeKind::Footnote | NodeKind::Citation));
+        let mut out = String::new();
+        if !prev_is_footnote {
+            out.push_str("<aside class=\"footnote-list brackets\">\n");
+        }
+        out.push_str(&self.open_tag(node, "aside", &[class, "brackets"], &[("role", "doc-footnote")]));
+        out.push('\n');
+        self.emit(&out);
+        let close = if next_is_footnote { "</aside>\n".to_owned() } else { "</aside>\n</aside>\n".to_owned() };
+        Some(Frame::new(close, NodeKind::Footnote))
     }
 
     fn visit_footnote_reference(&mut self, node: &Node) -> Option<Frame> {
         let refid = node_str(node, "refid");
         let refname = node_str(node, "refname");
-        let text = node.text_content().unwrap_or("");
-        let mut class_list = vec!["reference".to_owned(), "internal".to_owned()];
-        class_list.push(if node.kind == NodeKind::CitationReference { "citation-reference" } else { "footnote-reference" }.to_owned());
-        for c in node.classes().unwrap_or_default() {
-            if !class_list.contains(&c) { class_list.push(c); }
-        }
         let anchor = if refid.is_empty() { refname } else { refid };
-        let mut out = format!("<a class=\"{}\" href=\"#{}\"", escape_attr(&class_list.join(" ")), escape_attr(&anchor));
+        let mut out = String::from("<a class=\"footnote-reference brackets\"");
         if let Some(backrefs) = node.attrs.get_list("backrefs").ok().flatten() {
             if let Some(first) = backrefs.first() {
-                out.push_str(" id=\"");
-                out.push_str(&escape_attr(first));
-                out.push('"');
+                out.push_str(&format!(" id=\"{}\"", escape_attr(first)));
             }
         }
-        let _ = text;
-        out.push('>');
+        out.push_str(&format!(" role=\"doc-noteref\" href=\"#{}\">", escape_attr(&anchor)));
+        out.push_str("<span class=\"fn-bracket\">[</span>");
         self.emit(&out);
-        Some(Frame::new("</a>", node.kind))
+        Some(Frame::new("<span class=\"fn-bracket\">]</span></a>", node.kind))
     }
 }
 
@@ -904,7 +914,29 @@ impl HTML5Translator<'_> {
             NodeKind::Text => {
                 let text = node.text_content().unwrap_or("");
                 if self.literal_depth > 0 {
-                    self.emit(&format!("<span class=\"pre\">{}</span>", escape_html(text)));
+                    // Docutils' `protect_literal_text` wraps each word run in
+                    // its own `<span class="pre">`, leaving whitespace bare.
+                    let mut start = 0usize;
+                    let mut in_whitespace = text.chars().next().is_some_and(char::is_whitespace);
+                    for (index, ch) in text.char_indices() {
+                        let whitespace = ch.is_whitespace();
+                        if whitespace != in_whitespace {
+                            let run = &text[start..index];
+                            if !in_whitespace {
+                                self.emit(&format!("<span class=\"pre\">{}</span>", escape_html(run)));
+                            } else {
+                                self.emit(&escape_html(run));
+                            }
+                            start = index;
+                            in_whitespace = whitespace;
+                        }
+                    }
+                    let run = &text[start..];
+                    if !in_whitespace && !run.is_empty() {
+                        self.emit(&format!("<span class=\"pre\">{}</span>", escape_html(run)));
+                    } else {
+                        self.emit(&escape_html(run));
+                    }
                 } else {
                     self.emit(&escape_html(text));
                 }
@@ -932,9 +964,42 @@ impl HTML5Translator<'_> {
             }
 
             NodeKind::Literal => {
-                self.literal_depth += 1;
-                self.starttag(node, "code", &["docutils", "literal", "notranslate"], &[]);
-                Some(Frame::new("</code>", NodeKind::Literal))
+                let language = node.attrs.get_str("language").ok().flatten().map(str::to_owned);
+                let is_code = node.classes().unwrap_or_default().iter().any(|class| class == "code");
+                if let (Some(lang), true) = (language.as_deref(), is_code) {
+                    // Sphinx `HTML5Translator.visit_literal`: a `:code:` role
+                    // carrying a language is highlighted inline with the bare
+                    // Pygments span markup (no `<pre>` / `<span class="pre">`).
+                    let source = node.astext(self.doc);
+                    let highlighted = crate::highlight::highlight_code(
+                        &source,
+                        lang,
+                        &crate::highlight::HighlightOptions::default(),
+                    );
+                    let mut classes = node.classes().unwrap_or_default();
+                    classes.extend([
+                        "docutils".to_owned(),
+                        "literal".to_owned(),
+                        "highlight".to_owned(),
+                        format!("highlight-{}", lang.replace('+', "p").to_ascii_lowercase()),
+                    ]);
+                    let mut tag = String::from("<code");
+                    let ids = node.ids().unwrap_or_default();
+                    if let Some(first) = ids.iter().map(|id| id.trim()).find(|id| !id.is_empty()) {
+                        tag.push_str(&format!(" id=\"{}\"", escape_attr(first)));
+                    }
+                    tag.push_str(" class=\"");
+                    tag.push_str(&escape_attr(&classes.join(" ")));
+                    tag.push_str("\">");
+                    self.emit(&tag);
+                    self.emit(&highlighted.inline_html());
+                    self.skip_children = true;
+                    Some(Frame::new("</code>", NodeKind::Literal))
+                } else {
+                    self.literal_depth += 1;
+                    self.starttag(node, "code", &["docutils", "literal", "notranslate"], &[]);
+                    Some(Frame::new("</code>", NodeKind::Literal))
+                }
             }
 
             NodeKind::Inline => {
@@ -1219,8 +1284,49 @@ impl HTML5Translator<'_> {
             | NodeKind::Row | NodeKind::Entry => None,
 
             NodeKind::Caption => {
-                self.starttag(node, "figcaption", &[], &[]);
-                Some(Frame::new("</figcaption>\n", NodeKind::Caption))
+                let parent = self.parent_node(id).filter(|parent| {
+                    parent.kind == NodeKind::Container
+                        && parent.attrs.get_bool("literal_block").ok().flatten().unwrap_or(false)
+                });
+                let caption_meta = parent.map(|parent| {
+                    (
+                        parent.ids().ok().and_then(|ids| ids.first().cloned()).unwrap_or_default(),
+                        parent.attrs.get_str("fignumber").ok().flatten().map(str::to_owned),
+                    )
+                });
+                if let Some((anchor, number)) = caption_meta {
+                    // Sphinx `visit_caption`/`depart_caption` for a
+                    // `literal-block-wrapper` container: caption number,
+                    // text span and an optional headerlink permalink.
+                    self.emit("<div class=\"code-block-caption\">");
+                    if let Some(number) = number.as_deref() {
+                        let prefix = self
+                            .ctx
+                            .config
+                            .get_dict("numfig_format")
+                            .and_then(|map| map.get("code-block"))
+                            .and_then(|value| value.get_str().map(str::to_owned))
+                            .unwrap_or_else(|| "Listing %s".to_owned());
+                        self.emit(&format!(
+                            "<span class=\"caption-number\">{} </span>",
+                            escape_html(&prefix.replacen("%s", number, 1))
+                        ));
+                    }
+                    self.emit("<span class=\"caption-text\">");
+                    let mut close = String::from("</span>");
+                    if self.ctx.add_permalinks && !anchor.is_empty() {
+                        close.push_str(&format!(
+                            "<a class=\"headerlink\" href=\"#{}\" title=\"Link to this code\">{}</a>",
+                            escape_attr(&anchor),
+                            escape_html(&self.ctx.permalinks_icon)
+                        ));
+                    }
+                    close.push_str("</div>\n");
+                    Some(Frame::new(close, NodeKind::Caption))
+                } else {
+                    self.starttag(node, "figcaption", &[], &[]);
+                    Some(Frame::new("</figcaption>\n", NodeKind::Caption))
+                }
             }
 
             NodeKind::Legend => {
@@ -1238,13 +1344,29 @@ impl HTML5Translator<'_> {
 
             NodeKind::Target => { self.visit_target(node); None }
 
-            NodeKind::Footnote | NodeKind::Citation => self.visit_footnote(node),
+            NodeKind::Footnote | NodeKind::Citation => self.visit_footnote(node, id),
 
             NodeKind::FootnoteReference | NodeKind::CitationReference => self.visit_footnote_reference(node),
 
             NodeKind::Label => {
-                self.starttag(node, "span", &[], &[]);
-                Some(Frame::new("</span>", NodeKind::Label))
+                let backref = self
+                    .parent_node(id)
+                    .and_then(|parent| parent.attrs.get_list("backrefs").ok().flatten())
+                    .and_then(|refs| refs.first().cloned());
+                let mut out = String::from("<span class=\"label\"><span class=\"fn-bracket\">[</span>");
+                if let Some(backref) = backref {
+                    out.push_str(&format!("<a role=\"doc-backlink\" href=\"#{}\">", escape_attr(&backref)));
+                    self.emit(&out);
+                    Some(Frame::new(
+                        "</a><span class=\"fn-bracket\">]</span></span>\n",
+                        NodeKind::Label,
+                    ))
+                } else {
+                    out.push_str("<span class=\"fn-bracket\">]</span></span>\n");
+                    self.emit(&out);
+                    self.skip_children = true;
+                    Some(Frame::new("", NodeKind::Label))
+                }
             }
 
             NodeKind::Math => {
