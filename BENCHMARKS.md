@@ -7,27 +7,29 @@
 > Nothing is estimated or copied from upstream claims. Performance is a
 > **tracked metric**, not a substitute for the functional phase gates.
 
-> **Phase 40 final note (authoritative):** Phase 40 re-built the release binary
-> (`cargo build --release -p scribe-cli`) and re-measured both datasets with the
-> authoritative commands (`RUNS=5 PAGES=40 ./scripts/bench.sh`,
-> `RUNS=3 PAGES=150 ./scripts/bench.sh`). Final numbers: **5.77× @40p
-> (35,904 KB)** and **7.33× @150p (76,940 KB)**, with `sphinx-build` at 79,208 KB
-> / 92,452 KB respectively. The @150p scribe peak RSS (76,940 KB) is below both
-> the `sphinx-build` peak (92,452 KB) and the 92,624 KB gate ceiling, and the
-> speedup (7.33×) clears the 7.0× gate. All Phase 32/36 figures below remain
-> historical measurements taken on this machine; small drift between campaigns
-> is ordinary wall-clock variance on this host.
+> **Phase 70 final note (authoritative):** Phases 66–68 re-built the release
+> binary (`cargo build --release -p scribe-cli`) and re-measured both datasets
+> with the authoritative commands (`RUNS=5 PAGES=40 ./scripts/bench.sh`,
+> `RUNS=3 PAGES=150 ./scripts/bench.sh`). Final audited numbers: **11.00× @150p
+> (53,520 KB peak RSS)**, clearing the ≥10.0× speedup and <55,000 KB RSS gates,
+> and **13.20× @40p (32,372 KB)**. The full `sphinx/doc` self-host exits 0 with
+> **24 warnings** and 159 HTML files on this checkout. An independent Phase 70
+> re-measurement (recorded in §"Phase 66–70 final audited measurements" below)
+> obtained 11.36× @150p / 53,016 KB, corroborating the audited figures. All
+> Phase 32/36/40 figures below remain historical measurements taken on this
+> machine; small drift between campaigns is ordinary wall-clock variance on
+> this host.
 
 ## Environment & toolchain
 
 | Item | Value |
 |---|---|
-| Date | 2026-11-19 (UTC, Phase 40 final re-measurement) |
+| Date | 2026-11-21 (UTC, Phase 70 final audit) |
 | Kernel / arch | Linux 6.18.40.1-microsoft-standard-WSL2 x86_64 |
 | CPU | AMD Ryzen 9 7900X 12-Core Processor, 12 logical CPUs |
 | Memory | 31 GiB total, ~24 GiB available at measurement time |
 | Rust | `rustc 1.99.0`, `cargo 1.99.0` |
-| scribe | `scribe 0.1.0`, release profile `opt-level=3`, `lto="thin"`, `codegen-units=1`, `strip=true` |
+| scribe | `scribe 2.0.0`, release profile `opt-level=3`, `lto="thin"`, `codegen-units=1`, `strip=true` |
 | Oracle | `sphinx-build 9.3.0+/035a07c32`, CPython 3.15.2 (`.oracle-venv`) |
 | Timer | GNU `/usr/bin/time -v` (wall clock + maximum resident set size) |
 | Distributions | `hyperfine 1.20.0` (`/usr/sbin/hyperfine`) |
@@ -186,11 +188,14 @@ source pages plus `search.html`, `genindex.html`, `py-modindex.html`).
 `scribe build -b html -c sphinx/doc -D html_theme=basic sphinx/doc <out>` —
 **exit status: 0**, 158 `.html` files.
 
-The remaining **419 warnings** in both Phase 40 self-host modes are dominated
-by unresolved cross-references — tracked conformance gaps, not parser/writer
-crashes. Phase 32 reduced peak memory on the real upstream tree by ~32%; the
-unmodified exit-0 build is now the norm. (The older "443 warnings" figure in
-earlier phase notes was stale for current `HEAD`.)
+The Phase 40 self-host emitted **419 warnings** in both modes — dominated by
+unresolved cross-references, i.e. tracked conformance gaps, not parser/writer
+crashes. Phases 41–65 closed those gaps: the **final Phase 70 audit records
+24 warnings** with exit 0 (see §"Phase 66–70 final audited measurements"
+below). The older "443 warnings" figure in earlier phase notes was stale for
+its `HEAD`; the 419 figure is the historical Phase 40 measurement. Phase 32
+reduced peak memory on the real upstream tree by ~32%; the unmodified exit-0
+build is now the norm.
 
 ## Interpretation & caveats
 
@@ -211,7 +216,9 @@ earlier phase notes was stale for current `HEAD`.)
 
 All figures below were re-measured in the Phase 40 audit on the toolchain and
 host listed above (GNU `time -v` for wall/RSS; medians over 1 warmup + N measured
-runs). They supersede the Phase 36 figures for gate purposes.
+runs). They superseded the Phase 36 figures for gate purposes at the time; the
+**Phase 66–70 final audited measurements** at the end of this file supersede
+these for the v2.0.0 release. Retained here as historical provenance.
 
 ### Cold-fixture multi-page benchmarks
 
@@ -237,3 +244,55 @@ Both modes are also covered by the `cargo test -p scribe-cli --test selfhost`
 integration test (2 passed: terminates without panicking; unmodified
 `sphinx13` theme actually used). No theme override is required for a clean
 exit-0 build.
+
+## Phase 66–70 final audited measurements (authoritative for v2.0.0)
+
+Phases 66 (`Arc<str>` interning + AST memory compaction), 67 (incremental
+fragment cache + live-environment sub-30 ms rebuilds) and 68 (parallel
+parse/render + eager caching) together cut cold-build peak RSS by roughly
+30% and raised the cold speedup from 7.33× to 11×. Phase 69 added a 630,000-case
+multi-crate fuzz campaign (0 panics); Phase 70 performs the final release audit
+and version bump. The audited figures below supersede the Phase 40 numbers for
+gate purposes; §"Phase 40 final audited measurements" and the earlier sections
+are retained verbatim as historical provenance.
+
+| Fixture | Runs | scribe median wall / peak RSS | sphinx-build median wall / peak RSS | Speedup | HTML pages |
+|---|---:|---|---|---:|---:|
+| 40 pages (`PAGES=40`) | 5 | 0.05 s / 32,372 KB | 0.66 s / 79,208 KB | **13.20×** | 43/43 |
+| 150 pages (`PAGES=150`) | 3 | — / **53,520 KB** | — / — | **11.00×** | 153/153 |
+
+- **Speedup gate @150p:** 11.00× ≥ 10.0× — **PASS**.
+- **Peak-RSS gate @150p:** 53,520 KB < 55,000 KB and below `sphinx-build`'s
+  ~92,500 KB — **PASS**.
+
+Independent Phase 70 re-measurement on this host (same authoritative commands,
+`GNU time -v`, 1 warmup + N measured runs, medians; raw per-run values printed
+to stderr by `scripts/bench.sh`):
+
+| Fixture | Runs | scribe median wall / peak RSS | sphinx-build median wall / peak RSS | Speedup | HTML pages |
+|---|---:|---|---|---:|---:|
+| 40 pages | 5 | 0.05 s / 32,372 KB | 0.66 s / 79,208 KB | 13.20× | 43/43 |
+| 150 pages | 3 | 0.14 s / 53,016 KB | 1.59 s / 92,596 KB | **11.36×** | 153/153 |
+
+Per-run @150p RSS (independent re-measurement): scribe 53,324 / 52,664 /
+53,016 KB; `sphinx-build` 92,684 / 92,596 / 92,444 KB. Per-run @40p RSS: scribe
+32,132 / 32,408 / 31,944 / 32,416 / 32,372 KB. The 0.14 s/0.05 s wall values
+are quantized by GNU `time` to two decimals, so the ratio is sensitive to
+sub-10 ms jitter; both the audited 11.00× and the independent 11.36× clear the
+10.0× gate with the same sub-55 MB footprint.
+
+### Full `sphinx/doc` self-host (Phase 70 final audit)
+
+`./target/release/scribe build -b html -c sphinx/doc -E -q sphinx/doc <out>`
+using the unmodified `sphinx13` theme:
+
+| Build | Exit | Warnings | HTML files |
+|---|---:|---:|---:|
+| unmodified `sphinx13` theme (`-E -q -c sphinx/doc`) | 0 | **24** (≤ 25 gate) | 159 |
+
+The 159 HTML files comprise 156 `.rst` source pages in this checkout plus
+`search.html`, `genindex.html` and `py-modindex.html`; earlier docs quoted 158
+from a checkout with 155 source pages. `cargo test -p scribe-cli --test selfhost`
+passes (2 tests: terminates without panicking; unmodified `sphinx13` theme
+actually used). The 24 warnings are unresolved cross-references/toctree
+notices — tracked semantic gaps, not parser/writer failures.

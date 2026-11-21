@@ -1,6 +1,6 @@
 # scribe — Architecture
 
-**Status:** Phase 30 (performance benchmarking, packaging, docs & release readiness; Phases 01–29 intact).
+**Status:** Phase 70 / v2.0.0 (final release audit; Phases 01–69 intact).
 **Oracle:** `/home/credo/code/scribe/sphinx` (Python Sphinx HEAD `035a07c3`), installed at
 `/home/credo/code/scribe/.oracle-venv/bin/sphinx-build` (reports `sphinx-build 9.3.0+/035a07c32`).
 
@@ -4747,3 +4747,77 @@ and duplicate-free. The cycle corpus terminates via the `visiting` guard.
 - `cargo check`/`clippy` clean; `cargo test --workspace` 1,116 passed × 3 runs
   (1,114 pre-existing + 2 new) and `--release` 1,116 passed, zero warnings;
   regression guard 5 passed; selfhost test 2 passed.
+
+---
+
+## 39. Phases 41–70 — conformance closure and v2.0.0 release
+
+Phases 41–70 are a correctness/performance hardening arc that leaves every
+frozen cross-phase contract (§7 AST, §12 `BuildEnvironment`, §15 `Domain`)
+unchanged. No new crate was added; the 11-crate graph remains acyclic and all
+library code stays free of `.unwrap()`/`.expect()`.
+
+### 39.1 Conformance closure (Phases 41–65)
+
+Working fixture-by-fixture against the Sphinx oracle with the immutable rubric,
+tag extraction and warning normalizer in `CONFORMANCE.md` untouched, these
+phases raised the aggregate from 82.8% (15 pass / 16 partial / 3 fail / 5 skip)
+to **100.0% over 39 applicable fixtures (39 pass / 0 partial / 0 fail / 0 skip,
+every score 1.000)**:
+
+- 41 UTF-8 BOM stripping, `.. title::` metadata, docinfo field stripping.
+- 42 `rst_prolog`/`rst_epilog` injection and symbol/substitution parity.
+- 43 Stateful default-role and role inline declarations with exact Docutils
+  node kinds.
+- 44 Exact glossary node hierarchy, sorted collation, term/index anchors.
+- 45 Nested-list indentation and enumerated-list structure parity.
+- 46 Nested table cells, `colspec` colwidth/stub and span parity.
+- 47 Deferred `only`-node evaluation and `raw` directive attribute parity.
+- 48 Rubric warning parity, footnote backrefs, smartquote boundaries.
+- 49 Productionlist grammar-token xrefs and token warning parity.
+- 50 Numfig warning parity and `number_reference`/caption alignment.
+- 51 Changeset warning and `versionmodified` node parity.
+- 52 Python domain typed-field xrefs and warning-string parity.
+- 53 C declarator/scope and JS signature/annotation parity.
+- 54 Complete C++20/23 domain parser, lookup and warning parity.
+- 55 Intersphinx self-resolution, external roles, `sphinx/doc` xref closure.
+- 56 `code-block` HTML DOM, caption wrappers, highlighting warning parity.
+- 57 Toctree depth/glob/warning parity across HTML5 and pseudoxml.
+- 58 Jinja `!`-template bypass, `docstitle` escaping, head-tag parity.
+- 59 `test-root` HTML5 DOM, autodoc, index and navigation parity.
+- 60 Swept all 34 then-applicable fixtures to exact 1.000 (100.0% parity).
+- 61 `testroot` copy-layout scaffolding and `csv-table` fixture unskip.
+- 62 Sphinx-exact include-path resolution and include fixture unskip.
+- 63 Deterministic local HTTP linkcheck harness and linkcheck fixture unskip.
+- 64 Graphviz DOM parity and `graphviz` fixture unskip.
+- 65 Full autodoc parity and the final fixture unskip (39/39 at 1.000).
+
+### 39.2 Performance and robustness (Phases 66–69)
+
+- **66 — memory compaction:** `Arc<str>` interning and AST compaction cut @150p
+  peak RSS to ~52 MB.
+- **67 — incremental rebuilds:** fragment cache and live-environment rebuilds
+  land sub-30 ms incremental latency.
+- **68 — parallel parse/render:** parallel stage execution plus eager caching
+  take the cold @150p speedup to 11×.
+- **69 — fuzz campaign:** 630,000 cases across the multi-crate proptest suites
+  with zero panics.
+
+### 39.3 Final v2.0.0 gate evidence (Phase 70)
+
+- `cargo check --workspace --all-targets`: zero warnings.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo test --workspace` and `cargo test --workspace --release`:
+  **1,154 passed / 0 failed** each.
+- `cargo test -p scribe-cli --test conformance`: 2 passed, report regenerated
+  deterministically — 100.0% over 39/39 fixtures.
+- `cargo test -p scribe-cli --test selfhost`: 2 passed; the release binary
+  self-hosts `sphinx/doc` with exit 0 and 24 warnings (≤ 25 gate).
+- Benchmarks @150p: **11.00× cold speedup / 53,520 KB peak RSS** (audited);
+  an independent re-measurement obtained 11.36× / 53,016 KB — both clear the
+  ≥10× and <55,000 KB gates. See `BENCHMARKS.md`.
+- `./target/release/scribe --version` → `scribe 2.0.0`; all 11 crates inherit
+  `[workspace.package] version = "2.0.0"` and `Cargo.lock` is regenerated.
+
+The orchestrator commits this phase and creates the annotated `v2.0.0` tag;
+this phase itself creates no commit or tag.

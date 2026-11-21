@@ -5,12 +5,14 @@ reads the same `.rst`/`.md` sources and a `conf.py`, and exposes a
 `sphinx-build`-compatible CLI. This guide describes what transfers unchanged,
 what needs a `scribe.toml`, and where the two engines still diverge.
 
-> **Honest framing:** scribe covers the parser, the standard/py/c/cpp/js/rst
-> domains, the core builders and a set of bundled extensions. It does **not**
-> execute arbitrary Python extensions. See `CONFORMANCE.md` for the measured
-> per-fixture parity (65.6% over 34 applicable fixtures) and `BENCHMARKS.md`
-> for the self-hosting outcome. Treat a migration as "try it, diff the
-> warnings", not as a guaranteed byte-for-byte swap.
+> **Honest framing (v2.0.0):** scribe covers the parser, the
+> standard/py/c/cpp/js/rst domains, the core builders and a set of bundled
+> extensions. It does **not** execute arbitrary Python extensions. See
+> `CONFORMANCE.md` for the measured per-fixture parity (100.0% over 39
+> applicable fixtures, all at 1.000) and `BENCHMARKS.md` for the self-hosting
+> outcome. Treat a migration as "try it, diff the warnings", not as a
+> guaranteed byte-for-byte swap: the conformance score is a structural/warning
+> overlap metric, not a byte-identity claim.
 
 ## 1. Quick start
 
@@ -176,15 +178,17 @@ Differences to be aware of:
 ## 6. Known divergences
 
 - **Doctree/DOM output is not byte-identical to Sphinx.** `CONFORMANCE.md`
-  tracks the measured 65.6% semantic parity and lists every divergent fixture
-  and category (parser, directive, domain, HTML classes, warning codes).
+  tracks the measured 100.0% semantic parity over 39 fixtures (structural and
+  warning overlap, all at 1.000) and records the fixture/category coverage.
 - **Warning codes and counts differ.** Scribe emits far fewer warning types;
   a `-W` build can therefore succeed where Sphinx fails, or vice versa.
 - **Custom themes are limited.** Four themes are bundled (`basic`, `classic`,
-  `nature`, `alabaster`). A custom theme that inherits from a non-bundled
-  theme fails with a theme-resolution error. Override with
-  `-D html_theme=basic` as a workaround (see the `sphinx/doc` self-hosting
-  run in `BENCHMARKS.md`).
+  `nature`, `alabaster`). External themes are resolved through `html_theme_path`
+  plus site-packages discovery, which is why the unmodified `sphinx/doc`
+  self-host now uses its custom `sphinx13` theme with no override (exit 0).
+  A custom theme that inherits from a genuinely absent root theme still fails
+  with a theme-resolution error; `-D html_theme=basic` remains a workaround
+  (see `BENCHMARKS.md`).
 - **Python-only features** (arbitrary extensions, true autodoc import of
   native modules, graph backends other than `dot`) are unavailable or
   partial.
