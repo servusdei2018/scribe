@@ -192,16 +192,20 @@ impl JavaScriptDomain {
     }
 
     fn make_refnode(&self, ctx: &DomainContext<'_>, entry: &JavaScriptObjectEntry, title: String, role: &str) -> ResolvedReference {
+        // Upstream reuses the role's `literal` content node as the reference's
+        // child, so the emitted HTML is `<code class="xref js …">`, not a
+        // generic `<span>`. The resolved object name is only the reftitle.
         let mut reference = if ctx.docname == entry.docname {
-            ResolvedReference::local(entry.node_id.clone(), Some(title))
+            ResolvedReference::local(entry.node_id.clone(), None)
         } else {
             let mut uri = ctx.relative_uri(ctx.docname, &entry.docname);
             if !entry.node_id.is_empty() {
                 uri.push('#');
                 uri.push_str(&entry.node_id);
             }
-            ResolvedReference::uri(uri, Some(title))
+            ResolvedReference::uri(uri, None)
         };
+        reference.reftitle = Some(title);
         reference.docname = Some(entry.docname.clone());
         let class = format!("js-{role}");
         reference.classes = vec!["xref".to_owned(), "js".to_owned(), class];
@@ -502,10 +506,17 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
         document.get(id).is_ok_and(|child| child.kind == NodeKind::DescSignature)
     })).unwrap_or(NodeId::NULL);
     if signature_id == NodeId::NULL { return Ok(()); }
+    let anchor = document.get(desc).ok()
+        .and_then(|node| node.ids().ok())
+        .and_then(|ids| ids.first().cloned())
+        .unwrap_or_else(|| name.to_owned());
     let source = document.get(desc).ok().and_then(|node| node.source.clone());
     let mut builder = SigBuilder::new_with_source(document, span, "js", source);
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
+        // The anchor lives on the `<dt>` upstream so the writer emits the
+        // permalink headerlink on that element.
+        node.attrs.set_list("ids", vec![anchor]);
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "js".to_owned()]);
         node.attrs.set_str("fullname", name);
         let module = if scope.module_text().is_empty() { "True".to_owned() } else { scope.module_text() };
@@ -542,6 +553,11 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
     builder.classes(name_node, &["sig-name", "descname"])?;
     if let Ok(node) = builder.doc.get_mut(name_node) { node.attrs.set_str("xml:space", "preserve"); }
     builder.sig(NodeKind::DescSigName, name, "n", name_node)?;
+    // JS classes/functions/methods always carry a `desc_parameterlist`, even
+    // with an empty signature; data/attribute/module objects are just a name.
+    if matches!(objtype, "data" | "attribute" | "module") {
+        return Ok(());
+    }
     let params = builder.add(NodeKind::DescParameterlist, signature_id)?;
     if let Ok(node) = builder.doc.get_mut(params) { node.attrs.set_str("xml:space", "preserve"); }
     // Materialize the declared parameters (`foo(a, b[, c])`) as `desc_parameter`
@@ -553,11 +569,28 @@ fn build_signature(document: &mut Document, desc: NodeId, name: &str, objtype: &
                 for arg in args.split(',') {
                     let arg = arg.trim().trim_start_matches("...");
                     if arg.is_empty() { continue; }
-                    let param = builder.add(NodeKind::DescParameter, params)?;
-                    let leaf = builder.add(NodeKind::DescSigName, param)?;
-                    builder.classes(leaf, &["n"])?;
-                    let text = arg.trim_start_matches('[').trim_end_matches(']');
-                    if !text.is_empty() { builder.text(text, leaf)?; }
+                    // `b[, c]` / `callback[, errback]` render the brackets as
+                    // standalone `optional` spans, never part of a name.
+                    let has_open = arg.contains('[');
+                    let has_close = arg.contains(']');
+                    let text: String = arg.chars().filter(|ch| *ch != '[' && *ch != ']').collect();
+                    if !text.is_empty() {
+                        let param = builder.add(NodeKind::DescParameter, params)?;
+                        let leaf = builder.add(NodeKind::DescSigName, param)?;
+                        builder.classes(leaf, &["n"])?;
+                        builder.text(&text, leaf)?;
+                    }
+                    // The `[` opens the optional run after the last required
+                    // parameter (`callback[`), and `]` closes it after the
+                    // last optional one (`errback]`).
+                    if has_open {
+                        let optional = builder.add(NodeKind::DescOptional, params)?;
+                        builder.text("[", optional)?;
+                    }
+                    if has_close {
+                        let optional = builder.add(NodeKind::DescOptional, params)?;
+                        builder.text("]", optional)?;
+                    }
                 }
             }
         }
@@ -674,9 +707,14 @@ fn rewrite_js_fields(document: &mut Document, content: NodeId, scope: &JsScope) 
             let _ = document.append_child(xref, code);
             let _ = document.append_child(span, xref);
             let _ = document.append_child(para, span);
+            // Keep the original field body's inline children intact (e.g. a
+            // `href` title-reference renders as `<cite>`); flattening them to
+            // `astext()` would drop that markup.
+            let _ = document.new_text(" – ", Some(para));
             if let Some(original) = document.get(*original_body).ok().and_then(|n| n.children.first().copied()) {
-                if let Some(text) = document.get(original).ok().map(|n| n.astext(document)) {
-                    let _ = document.new_text(format!(" – {text}"), Some(para));
+                let children = document.get(original).map(|n| n.children.clone()).unwrap_or_default();
+                for child in children {
+                    let _ = document.append_child(para, child);
                 }
             }
             let _ = document.append_child(body, para);

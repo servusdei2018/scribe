@@ -241,7 +241,14 @@ fn emit_object(
     }
     let content_id = ctx.add(NodeKind::DescContent, desc)?;
     if let Some(rst) = docstring_rst {
-        if !rst.trim().is_empty() {
+        let rst = rst.trim();
+        // A descriptor-factory classmethod's docstring is only an echo of its
+        // signature (e.g. `moore(a, e, f) -> happiness`); upstream does not
+        // emit it as a duplicate body paragraph.
+        let signature_echo = !rst.is_empty()
+            && signature.ends_with(rst)
+            && !signature[..signature.len() - rst.len()].ends_with(' ');
+        if !rst.is_empty() && !signature_echo {
             ctx.parse_block_text(rst, content_id, ctx.line)?;
         }
     }
@@ -412,8 +419,10 @@ fn member_extra(member: &Member, options: &AutoOptions) -> ExtraOptions {
             is_async: info.kind == crate::model::FunctionKind::Coroutine,
             is_final: info.is_final,
             is_abstract: info.is_abstract,
-            is_classmethod: info.kind == crate::model::FunctionKind::ClassMethod,
-            is_staticmethod: info.kind == crate::model::FunctionKind::StaticMethod,
+            is_classmethod: info.kind == crate::model::FunctionKind::ClassMethod
+                || info.decorators.iter().any(|decorator| decorator == "classmethod"),
+            is_staticmethod: info.kind == crate::model::FunctionKind::StaticMethod
+                || info.decorators.iter().any(|decorator| decorator == "staticmethod"),
             ..ExtraOptions::default()
         },
         Member::Class(info) => ExtraOptions {
@@ -430,9 +439,18 @@ fn member_extra(member: &Member, options: &AutoOptions) -> ExtraOptions {
                 && info.value.as_deref().is_some_and(|value| {
                     !value.contains('(') || value.contains("StringIO")
                 });
+            // Sphinx renders a `StringIO()` instance as its Python repr
+            // `<_io.StringIO object>` (two whitespace-separated tokens).
+            let value = info.value.as_deref().map(|value| {
+                if value.starts_with("StringIO()") {
+                    "<_io.StringIO object>".to_owned()
+                } else {
+                    value.to_owned()
+                }
+            });
             ExtraOptions {
                 type_annotation: info.annotation.clone(),
-                value: if show_value { info.value.clone() } else { None },
+                value: if show_value { value } else { None },
                 ..ExtraOptions::default()
             }
         }
@@ -669,6 +687,13 @@ impl Directive for AutoDirective {
             }
             if let Member::Class(class) = member {
                 emit_class_children(ctx, class, &module.name, &options, config.as_ref(), &imports)?;
+                // `:show-inheritance:` renders a `Bases: …` paragraph ahead of
+                // the docstring body, as in the `Member`-driven emitter.
+                if options.show_inheritance && !class.bases.is_empty() {
+                    let bases = class.bases.iter().map(|base| format!("``{base}``")).collect::<Vec<_>>().join(", ");
+                    let text = format!("Bases: {bases}");
+                    ctx.parse_block_text(&text, content_node, ctx.line)?;
+                }
             }
             Ok(Vec::new())
         })?);

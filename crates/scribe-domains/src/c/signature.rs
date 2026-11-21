@@ -383,7 +383,7 @@ pub fn build_signature(
         }))
         .unwrap_or(NodeId::NULL);
     if signature_id != NodeId::NULL {
-        build_signature_into(document, signature_id, &decl, objtype, scope, span)?;
+        build_signature_into(document, signature_id, &decl, &anchor, objtype, scope, span)?;
     }
 
     Ok(CSignatureInfo {
@@ -416,6 +416,7 @@ fn build_signature_into(
     document: &mut Document,
     signature_id: NodeId,
     decl: &Decl,
+    anchor: &str,
     objtype: &str,
     scope: &Scope,
     span: Span,
@@ -425,6 +426,7 @@ fn build_signature_into(
     // Reset any previous children of the placeholder signature.
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
+        node.attrs.set_list("ids", vec![anchor.to_owned()]);
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "c".to_owned()]);
         // Upstream stamps `_toc_name` on indexable object signatures; the
         // TocTreeCollector uses it for the local ToC `literal()` label. The

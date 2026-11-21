@@ -182,6 +182,21 @@ impl TodoCollector {
         let include = config.get_bool("todo_include_todos").unwrap_or(false);
         let link_only = config.get_bool("todo_link_only").unwrap_or(false);
 
+        // Upstream's `todo` directives contribute nothing to the output unless
+        // `todo_include_todos` is enabled: drop the admonitions themselves.
+        if !include {
+            for doc in docs.values_mut() {
+                let todos: Vec<NodeId> = doc.preorder_ids().into_iter().filter(|&id| {
+                    doc.get(id).is_ok_and(|node| {
+                        node.attrs.get_str(EXT_MARKER).ok().flatten() == Some(EXT_TODO)
+                    })
+                }).collect();
+                for id in todos {
+                    let _ = doc.remove_node(id);
+                }
+            }
+        }
+
         // Snapshot each todo into a detached document so we can clone it into
         // any target document without aliasing arena ids or borrow conflicts.
         let mut snapshots: Vec<(TodoEntry, Document, NodeId)> = Vec::new();

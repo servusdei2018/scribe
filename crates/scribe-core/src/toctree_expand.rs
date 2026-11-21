@@ -233,9 +233,10 @@ fn make_entry(
     } else {
         None
     };
+    let numbered = collection.toctrees.iter().any(|tree| tree.options.numbered != 0);
     build_list_item(
         document, &title, &refuri, "", !external, secnumber, &children, 1, maxdepth, titlesonly,
-        false, rich_children,
+        false, numbered, rich_children,
     )
 }
 
@@ -255,6 +256,7 @@ fn build_list_item(
     maxdepth: i64,
     titlesonly: bool,
     literal_title: bool,
+    numbered: bool,
     rich_children: Option<Vec<NodeId>>,
 ) -> Result<NodeId, AstError> {
     // Upstream `_toctree_add_classes()` tags each list item and compact
@@ -299,7 +301,18 @@ fn build_list_item(
     document.replace_children(para, vec![reference_id])?;
     document.append_child(item, para)?;
 
-    let pruned = titlesonly || (maxdepth > 0 && depth >= maxdepth);
+    // Domain objects are not sections: upstream's `_toctree_copy` only counts
+    // section nesting toward `maxdepth`, so a section at the maximum depth
+    // still lists its immediate objects. Nested members *inside* an object
+    // are, however, pruned once `maxdepth` is reached.
+    let objects_only = !children.is_empty() && children.iter().all(|child| child.literal_title);
+    // A numbered toctree promotes a document's sections to top-level entries,
+    // so its immediate objects sit one level below them and stay visible at
+    // `maxdepth`. Unnumbered toctrees count every nesting level.
+    let pruned = titlesonly
+        || (maxdepth > 0
+            && ((depth >= maxdepth && !(objects_only && !literal_title && numbered))
+                || literal_title));
     if !pruned && !children.is_empty() {
         let mut nested_items = Vec::with_capacity(children.len());
         let mut raw_toctrees: Vec<Node> = Vec::new();
@@ -326,6 +339,7 @@ fn build_list_item(
                 maxdepth,
                 titlesonly,
                 child.literal_title,
+                numbered,
                 None,
             )?);
         }
@@ -541,6 +555,11 @@ fn collect_desc_entries(
     if no_contents {
         return;
     }
+    // Upstream's std-domain objects (options, envvars, programs, generic
+    // `object`) carry `_toc_name=""` and are excluded from the global ToC.
+    if str_attr(desc, "domain") == Some("std") {
+        return;
+    }
     for &child in &desc.children {
         let Ok(sig) = document.get(child) else {
             continue;
@@ -565,14 +584,26 @@ fn collect_desc_entries(
             .unwrap_or_default()
             .to_owned();
         if title.is_empty() {
-            title = sig.children.iter().find_map(|&id| {
+            // C++ signatures keep their `desc_name` inside a signature line;
+            // search the whole signature subtree.
+            fn find_desc_name(document: &Document, id: NodeId) -> Option<String> {
                 let node = document.get(id).ok()?;
                 if node.kind == NodeKind::DescName {
-                    Some(node.astext(document))
-                } else {
-                    None
+                    return Some(node.astext(document));
                 }
-            }).unwrap_or_default();
+                for &child in &node.children {
+                    if let Some(name) = find_desc_name(document, child) {
+                        return Some(name);
+                    }
+                }
+                None
+            }
+            title = find_desc_name(document, child).unwrap_or_default();
+        }
+        if title.is_empty() {
+            if let Some(fullname) = str_attr(desc, "cpp:fullname") {
+                title = fullname.rsplit("::").next().unwrap_or(fullname).to_owned();
+            }
         }
         if title.is_empty() {
             continue;
@@ -594,10 +625,15 @@ fn collect_desc_entries(
             .get(docname, &anchor)
             .map(<[i64]>::to_vec)
             .unwrap_or_default();
+        // Autodoc class members are listed in the page's local ToC but are
+        // not part of the master toctree's object hierarchy.
+        let autodoc = desc.attrs.get_bool("py:autodoc").ok().flatten() == Some(true);
         let mut children = Vec::new();
-        for &content in &desc.children {
-            if document.get(content).is_ok_and(|n| n.kind == NodeKind::DescContent) {
-                collect_nested_desc(document, content, docname, collection, &mut children);
+        if !autodoc {
+            for &content in &desc.children {
+                if document.get(content).is_ok_and(|n| n.kind == NodeKind::DescContent) {
+                    collect_nested_desc(document, content, docname, collection, &mut children);
+                }
             }
         }
         out.push(ChildEntry {

@@ -400,11 +400,17 @@ fn link(document: &mut Document, note: &Note, reference: &Ref) {
 
 /// Prepends a `<label>` containing `text` to the given note.
 fn prepend_label(document: &mut Document, note: NodeId, text: &str) {
-    // Avoid duplicating a label when the note already begins with one.
-    if document.children(note).ok().and_then(|children| children.first().copied())
-        .is_some_and(|first| document.get(first).is_ok_and(|node| node.kind == NodeKind::Label))
-    {
-        return;
+    // Avoid duplicating a label when the note already begins with one; an
+    // empty parser-generated `<label>` still needs its text filled in.
+    if let Some(first) = document.children(note).ok().and_then(|children| children.first().copied()) {
+        if document.get(first).is_ok_and(|node| node.kind == NodeKind::Label) {
+            if document.children(first).is_ok_and(|children| children.is_empty()) {
+                if let Ok(text_id) = document.new_text(text, None) {
+                    let _ = document.append_child(first, text_id);
+                }
+            }
+            return;
+        }
     }
     let text_id = match document.new_text(text, None) {
         Ok(id) => id,

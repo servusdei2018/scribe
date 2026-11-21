@@ -580,16 +580,26 @@ pub fn missing_reference_diagnostic(
     let message = registry
         .missing_reference_message(ctx, domain, typ, target, node_id, document)
         .unwrap_or_else(|| format!("'{typ}' reference target not found: {target}"));
-    Some(
-        DomainDiagnostic::missing_reference(
-            message,
-            typ,
-            target,
-            Some(ctx.docname.to_owned()),
-            ctx.span_of(document, node_id),
-        )
-        .with_source(document.get(node_id).ok().and_then(|node| node.source.as_ref())),
+    let mut diagnostic = DomainDiagnostic::missing_reference(
+        message,
+        typ,
+        target,
+        Some(ctx.docname.to_owned()),
+        ctx.span_of(document, node_id),
     )
+    .with_source(document.get(node_id).ok().and_then(|node| node.source.as_ref()));
+    // Autodoc-generated signatures have no source location upstream: their
+    // warnings are logged as `<unknown>:1` rather than pointing at the source
+    // file that hosts the `auto*` directive.
+    if document.ancestors(node_id).any(|ancestor| {
+        document.get(ancestor).is_ok_and(|node| {
+            node.attrs.get_bool("py:autodoc").ok().flatten() == Some(true)
+        })
+    }) {
+        diagnostic.source_path = Some("<unknown>".to_owned());
+        diagnostic.line = Some(1);
+    }
+    Some(diagnostic)
 }
 
 /// Severity used for missing-reference diagnostics.

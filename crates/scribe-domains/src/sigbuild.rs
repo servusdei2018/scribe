@@ -29,8 +29,10 @@ pub enum SigToken {
     Space,
     /// A numeric literal — CSS `m`.
     Number(String),
-    /// A string/character literal — CSS `s`.
+    /// A string literal — CSS `s`.
     Literal(String),
+    /// A character literal (`'x'`) — CSS `sc`.
+    LiteralChar(String),
     /// An identifier that should cross-reference an object (type, name, ...).
     /// Emitted as a `pending_xref` wrapping a `desc_sig_name`.
     Ref {
@@ -148,6 +150,7 @@ impl<'a> SigBuilder<'a> {
             SigToken::Space => self.sig(NodeKind::DescSigSpace, " ", "w", parent),
             SigToken::Number(text) => self.sig(NodeKind::DescSigLiteralNumber, text, "m", parent),
             SigToken::Literal(text) => self.sig(NodeKind::DescSigLiteralString, text, "s", parent),
+            SigToken::LiteralChar(text) => self.sig(NodeKind::DescSigLiteralChar, text, "sc", parent),
             SigToken::Ref { text, reftype, target, classes } => {
                 let xref = self.add(NodeKind::PendingXref, parent)?;
                 if let Ok(node) = self.doc.get_mut(xref) {

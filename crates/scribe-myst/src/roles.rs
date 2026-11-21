@@ -161,7 +161,7 @@ fn emit_direct(
             node.attrs.set_str("page", page);
             node.attrs.set_str("section", section);
         }
-        DirectBehavior::Keyboard | DirectBehavior::Plain => {}
+        DirectBehavior::Keyboard | DirectBehavior::Plain | DirectBehavior::Sample => {}
     }
     if role == "file" || role == "samp" {
         node.attrs.set_str("role", role.to_owned());

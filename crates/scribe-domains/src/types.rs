@@ -62,6 +62,10 @@ pub struct ObjectEntry {
     pub anchor: String,
     /// Search priority (`-1`, `0`, `1`, `2`).
     pub priority: i8,
+    /// Module synopsis, used by the Python module index (`py-modindex`).
+    pub synopsis: String,
+    /// Module platform string, used by the Python module index.
+    pub platform: String,
 }
 
 impl ObjectEntry {
@@ -81,6 +85,8 @@ impl ObjectEntry {
             docname: docname.into(),
             anchor: anchor.into(),
             priority,
+            synopsis: String::new(),
+            platform: String::new(),
         }
     }
 

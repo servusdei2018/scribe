@@ -66,8 +66,13 @@ pub(crate) fn is_enumerated_list_item(content: &str, next_line: Option<&str>) ->
         // Docutils returns true on EOF (no line to contradict the list).
         return true;
     };
-    // `next_line[:1].strip()` is empty for a blank or indented line.
-    if next.chars().next().is_none_or(char::is_whitespace) {
+    // `next_line[:1].strip()` is empty for a blank or indented line. A
+    // following bullet marker also counts: directive content is re-parsed from
+    // dedented text, so a sibling bullet that was indented in the original
+    // source arrives here without its leading whitespace.
+    if next.chars().next().is_none_or(char::is_whitespace)
+        || bullet_marker(next).is_some()
+    {
         return true;
     }
     let after_prefix = &content[marker.prefix.len()..];
@@ -779,9 +784,14 @@ impl<'a> BlockParser<'a> {
             self.span_of(start, start + 1),
             self.line_number(start),
         )?;
-        // Stack of `(indent_after_bar, line_block_node_id)`.
-        let mut stack: Vec<(usize, scribe_ast::NodeId)> = Vec::new();
-        let mut first_indent: Option<usize> = None;
+        // Stack of `(indent_after_bar, line_block_node_id)` tracking the
+        // currently open nested line block for each indentation level.
+        let first_indent = {
+            let content = self.content_at(self.pos, base_indent);
+            let spaces = content[1..].bytes().take_while(|&b| b == b' ').count();
+            spaces.saturating_sub(1)
+        };
+        let mut stack: Vec<(usize, scribe_ast::NodeId)> = vec![(first_indent, block)];
 
         while self.pos < self.limit {
             let idx = self.pos;
@@ -793,11 +803,22 @@ impl<'a> BlockParser<'a> {
             let spaces = after_bar.bytes().take_while(|&b| b == b' ').count();
             let indent = spaces.saturating_sub(1); // Docutils: len(group(1)) - 1
             let text = after_bar[spaces..].to_owned();
-            if first_indent.is_none() {
-                first_indent = Some(indent);
-            }
-            while stack.last().is_some_and(|(level, _)| *level >= indent) {
-                stack.pop();
+
+            let (previous_indent, _) = *stack.last().unwrap_or(&(first_indent, block));
+            if indent > previous_indent {
+                // A deeper-indented line opens a nested line block.
+                let parent = stack.last().map_or(block, |(_, id)| *id);
+                let nested = self.add(
+                    NodeKind::LineBlock,
+                    parent,
+                    self.line_span(idx),
+                    self.line_number(idx),
+                )?;
+                stack.push((indent, nested));
+            } else if indent < previous_indent {
+                while stack.len() > 1 && stack.last().is_some_and(|(level, _)| *level > indent) {
+                    stack.pop();
+                }
             }
             let target = stack.last().map_or(block, |(_, id)| *id);
             let line = self.add(
@@ -807,7 +828,6 @@ impl<'a> BlockParser<'a> {
                 self.line_number(idx),
             )?;
             self.add_inline_slice(&text, idx, base_indent, line)?;
-            stack.push((indent, block));
             self.pos += 1;
         }
         Ok(())

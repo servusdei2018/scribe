@@ -1498,6 +1498,19 @@ fn emit_role(
         return;
     }
 
+    // The C++ domain's `cpp:expr` / `cpp:texpr` roles likewise parse their
+    // payload into a `desc_inline` token tree (`cpp::prepare_document`).
+    if role == "cpp:expr" || role == "cpp:texpr" {
+        let class = if role == "cpp:expr" { "cpp-expr" } else { "cpp-texpr" };
+        let node = InlineNode::element(NodeKind::DescInline, full_span, 0)
+            .with_attr("domain", "cpp")
+            .with_attr("classes", vec![class.to_owned(), "sig".to_owned(), "sig-inline".to_owned(), "cpp".to_owned()])
+            .with_attr("cpp:expr_text", payload.replace('\n', " "))
+            .with_attr("cpp:expr_code", role == "cpp:expr");
+        out.push(node);
+        return;
+    }
+
     // Resolve a custom role declared by `.. role:: name(base)` in document
     // order. Docutils' `roles.CustomRole` delegates node construction to the
     // base role but overrides the `classes` attribute with the custom name.
@@ -1519,6 +1532,24 @@ fn emit_role(
         return;
     }
 
+    // `:index:` registers an index entry and a target anchor, leaving the
+    // (possibly explicit) title as the visible inline text.
+    if role == "index" {
+        let explicit = split_explicit_title(payload);
+        let title = explicit.as_ref().map_or(payload, |e| e.title.as_str());
+        let entry = explicit.as_ref().map_or(payload, |e| e.target.as_str());
+        let serial = options.index_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+        let index_id = format!("index-{serial}");
+        let escaped = entry.replace('\\', "\\\\").replace('\'', "\\'");
+        let entries = format!("['single', '{escaped}', '{index_id}', '', None]");
+        out.push(InlineNode::element(NodeKind::Index, full_span, 0)
+            .with_attr("entries", entries));
+        out.push(InlineNode::element(NodeKind::Target, full_span, 0)
+            .with_attr("ids", vec![index_id]));
+        out.push(InlineNode::text_node(title.to_owned(), full_span, 0));
+        return;
+    }
+
     // `sphinx.ext.extlinks` registers roles dynamically from configuration.
     // They take precedence over the static role table and produce a plain
     // external `Reference` (never a `pending_xref`).
@@ -1531,8 +1562,7 @@ fn emit_role(
             .with_attr("refuri", uri)
             .with_attr("internal", false)
             .with_attr("classes", vec![format!("extlink-{effective_role}")]);
-        reference = reference.with_child(InlineNode::element(NodeKind::Strong, payload_span, 0)
-            .with_child(InlineNode::text_node(title, payload_span, 0)));
+        reference = reference.with_child(InlineNode::text_node(title, payload_span, 0));
         out.push(reference);
         apply_custom_class(out, out_start, custom_class);
         return;
@@ -1692,6 +1722,40 @@ fn emit_direct_role(
 ) {
     use crate::role_registry::DirectBehavior;
 
+    if behavior == DirectBehavior::Sample {
+        // `:samp:` marks `{variable}` parts with nested `<em>` elements.
+        let mut children = Vec::new();
+        let mut rest = payload;
+        while let Some(open) = rest.find('{') {
+            let (before, after) = rest.split_at(open);
+            if !before.is_empty() {
+                children.push(InlineNode::text_node(before.to_owned(), payload_span, 0));
+            }
+            let after = &after[1..];
+            if let Some(close) = after.find('}') {
+                let variable = &after[..close];
+                children.push(InlineNode::element(NodeKind::Emphasis, payload_span, 0)
+                    .with_child(InlineNode::text_node(variable.to_owned(), payload_span, 0)));
+                rest = &after[close + 1..];
+            } else {
+                children.push(InlineNode::text_node(rest.to_owned(), payload_span, 0));
+                rest = "";
+            }
+        }
+        if !rest.is_empty() {
+            children.push(InlineNode::text_node(rest.to_owned(), payload_span, 0));
+        }
+        let mut node = InlineNode::element(kind, full_span, 0);
+        if !classes.is_empty() {
+            node = node.with_attr("classes", classes);
+        }
+        for child in children {
+            node = node.with_child(child);
+        }
+        out.push(node);
+        return;
+    }
+
     if behavior == DirectBehavior::Keyboard {
         let parts = split_keyboard(payload);
         let mut index = 0usize;
@@ -1744,7 +1808,7 @@ fn emit_direct_role(
             node = node.with_attr("page", page);
             node = node.with_attr("section", section);
         }
-        DirectBehavior::Keyboard | DirectBehavior::Plain => {}
+        DirectBehavior::Keyboard | DirectBehavior::Plain | DirectBehavior::Sample => {}
     }
     if role == "file" || role == "samp" {
         node = node.with_attr("role", role.to_owned());

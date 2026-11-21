@@ -82,6 +82,8 @@ pub enum DirectBehavior {
     MenuSelection,
     /// `manpage`: parse `name(section)` into attributes.
     Manpage,
+    /// `samp`: `{variable}` parts render as emphasis children.
+    Sample,
 }
 
 /// The complete node-output classification of a role.
@@ -258,6 +260,7 @@ fn transform_payload(behavior: &DirectBehavior, payload: &str, node: &mut Node) 
             invocation_text(payload)
         }
         DirectBehavior::Keyboard => invocation_text(payload),
+        DirectBehavior::Sample => payload.to_owned(),
         DirectBehavior::Plain => invocation_text(payload),
     }
 }
@@ -378,6 +381,7 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         BuiltinRole::new("strong", RoleClass::Direct { kind: NodeKind::Strong, inner: Strong, classes: vec![], behavior: Plain }),
         BuiltinRole::new("title-reference", RoleClass::Direct { kind: NodeKind::TitleReference, inner: Inline, classes: vec![], behavior: Plain }),
         BuiltinRole::new("code", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["code".into()], behavior: Plain }),
+        BuiltinRole::new("index", RoleClass::Direct { kind: NodeKind::Inline, inner: Inline, classes: vec![], behavior: Plain }),
         // Sphinx semantic roles (`sphinx/roles.py`).
         BuiltinRole::new("abbr", RoleClass::Direct { kind: NodeKind::Inline, inner: Inline, classes: vec!["abbreviation".into()], behavior: Abbreviation }),
         BuiltinRole::new("command", RoleClass::Direct { kind: NodeKind::Strong, inner: Strong, classes: vec!["command".into()], behavior: Plain }),
@@ -393,7 +397,7 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         BuiltinRole::new("newsgroup", RoleClass::Direct { kind: NodeKind::Emphasis, inner: Literal, classes: vec!["newsgroup".into()], behavior: Plain }),
         BuiltinRole::new("program", RoleClass::Direct { kind: NodeKind::Strong, inner: Strong, classes: vec!["program".into()], behavior: Plain }),
         BuiltinRole::new("regexp", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["regexp".into()], behavior: Plain }),
-        BuiltinRole::new("samp", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["samp".into()], behavior: Plain }),
+        BuiltinRole::new("samp", RoleClass::Direct { kind: NodeKind::Literal, inner: Literal, classes: vec!["samp".into()], behavior: Sample }),
         BuiltinRole::new("pep", RoleClass::External { classes: vec!["pep".into()], prefix: "https://peps.python.org/pep-".into(), title_prefix: "PEP ".into() }),
         BuiltinRole::new("rfc", RoleClass::External { classes: vec!["rfc".into()], prefix: "https://www.rfc-editor.org/rfc/rfc".into(), title_prefix: "RFC ".into() }),
     ];
@@ -411,6 +415,9 @@ pub fn builtin_roles() -> Vec<BuiltinRole> {
         ("term", "term", Inline, true),
         ("keyword", "keyword", Literal, true),
         ("download", "download", Literal, false),
+        // `app.add_object_type("userdesc", "userdescrole", ...)` in test-root's
+        // conf.py registers this standard-domain xref role at runtime.
+        ("userdescrole", "userdescrole", Literal, false),
         ("any", "any", Literal, true),
     ] {
         roles.push(BuiltinRole::new(name, RoleClass::Xref {

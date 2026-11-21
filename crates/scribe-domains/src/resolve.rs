@@ -338,7 +338,14 @@ fn materialize(
     }
 
     if let Some(title) = &reference.title {
-        let mut inner = Node::new(NodeKind::Inline);
+        // Upstream's `:any:` role reuses its literal content node, so the
+        // inner display is a `<code>` (with `<span class="pre">`), not a span.
+        let inner_kind = if reference.classes.iter().any(|class| class == "any") {
+            NodeKind::Literal
+        } else {
+            NodeKind::Inline
+        };
+        let mut inner = Node::new(inner_kind);
         let mut classes = reference.classes.clone();
         if classes.is_empty() {
             classes.push("xref".to_owned());

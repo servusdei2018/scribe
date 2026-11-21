@@ -292,7 +292,7 @@ pub fn build_with_flavor(
         // dirs) for generated index pages so the project's selected theme is
         // never silently replaced by the bundled default.
         let fallback_manager = ThemeManager::new();
-        let theme_fallback_manager = ThemeManager::with_config_no_user_templates(config, Some(source_dir));
+        let _theme_fallback_manager = ThemeManager::with_config_no_user_templates(config, Some(source_dir));
         let theme = match manager.get_theme(&theme_name) {
             Ok(theme) => theme,
             Err(error) if theme_is_genuinely_missing(&error, &theme_name) => {
@@ -371,7 +371,9 @@ pub fn build_with_flavor(
             if custom_parser {
                 let mut document = scribe_ast::Document::new(Some(docname.clone()));
                 document.metadata.docname = Some(docname.clone());
-                let section = document.add(scribe_ast::NodeKind::Section, None).unwrap_or(document.root);
+                let section = document
+                    .add(scribe_ast::NodeKind::Section, Some(document.root))
+                    .unwrap_or(document.root);
                 if section != document.root {
                     if let Ok(node) = document.get_mut(section) {
                         node.attrs.set_list("ids", vec!["id1".to_owned()]);
@@ -552,19 +554,30 @@ pub fn build_with_flavor(
                     &toctrees.section_numbers,
                 );
                 // Mirror numfig's `fignumber` onto the working copies so the
-                // writer can render the `caption-number` span.
-                let containers: Vec<NodeId> = outcome
+                // writer can render the `caption-number` span.  Sphinx numbers
+                // figures, tables and captioned code blocks through the same
+                // `FigureNumbers` inventory, keyed by figtype.
+                let numbered: Vec<(NodeId, &'static str)> = outcome
                     .document
                     .preorder_ids()
                     .into_iter()
-                    .filter(|&id| {
-                        outcome.document.get(id).is_ok_and(|node| {
-                            node.kind == NodeKind::Container
-                                && node.attrs.get_bool("literal_block").ok().flatten().unwrap_or(false)
+                    .filter_map(|id| {
+                        outcome.document.get(id).ok().and_then(|node| {
+                            let figtype = match node.kind {
+                                NodeKind::Figure => Some("figure"),
+                                NodeKind::Table => Some("table"),
+                                NodeKind::Container
+                                    if node.attrs.get_bool("literal_block").ok().flatten().unwrap_or(false) =>
+                                {
+                                    Some("code-block")
+                                }
+                                _ => None,
+                            };
+                            figtype.map(|kind| (id, kind))
                         })
                     })
                     .collect();
-                for id in containers {
+                for (id, figtype) in numbered {
                     let first_id = outcome
                         .document
                         .get(id)
@@ -572,7 +585,7 @@ pub fn build_with_flavor(
                         .and_then(|node| node.ids().ok())
                         .and_then(|ids| ids.first().cloned());
                     if let Some(first) = first_id {
-                        if let Some(numbers) = toctrees.figure_numbers.get(docname, "code-block", &first) {
+                        if let Some(numbers) = toctrees.figure_numbers.get(docname, figtype, &first) {
                             let display = numbers.iter().map(ToString::to_string).collect::<Vec<_>>().join(".");
                             if let Ok(node) = outcome.document.get_mut(id) {
                                 node.attrs.set_str("fignumber", &display);
@@ -685,6 +698,19 @@ pub fn build_with_flavor(
                 &theme_options_checksum(config),
                 flavor,
             );
+            // Sphinx loads MathJax on pages whose doctree carries math (the
+            // master page qualifies through a math node in a toctree title).
+            if outcome.document.preorder_ids().into_iter().any(|id| {
+                matches!(
+                    outcome.document.get(id).map(|node| node.kind),
+                    Ok(NodeKind::Math | NodeKind::MathBlock)
+                )
+            }) {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("filename".to_owned(), minijinja::Value::from("https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"));
+                map.insert("defer".to_owned(), minijinja::Value::from("defer"));
+                render_ctx.script_files.push(minijinja::Value::from(map));
+            }
             if full_nav {
                 let (sidebar_toc, prev, next) =
                     build_sidebar_nav(&toctrees, env, docname, config);
@@ -769,7 +795,9 @@ pub fn build_with_flavor(
                 // Sphinx only sets `display_toc` when a document has more
                 // than one local ToC entry (`toc_num_entries > 1`). A page
                 // with a single section therefore renders no local ToC.
-                let toc = render_local_toc(document, 3, Some(&toctrees.section_numbers), docname);
+                let toc_maxdepth = scribe_core::document_tocdepth(document)
+                    .map_or(3, |depth| depth.max(0) as usize);
+                let toc = render_local_toc(document, toc_maxdepth, Some(&toctrees.section_numbers), docname);
                 ctx.toc = if toc.matches("<li>").count() > 1 { toc } else { String::new() };
                 // Alabaster injects a second viewport `<meta>` through the
                 // `html-page-context` event for regular pages only (the
@@ -780,6 +808,23 @@ pub fn build_with_flavor(
                     // newline, which the layout template renders as a blank line
                     // before `<title>`.
                     ctx.metatags = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n".to_owned();
+                }
+                // `.. meta::` directives are collected into the page head as
+                // `<meta>` elements (the frozen AST stores them as `inline`
+                // nodes carrying a `meta` class).
+                for id in document.preorder_ids() {
+                    if let Ok(node) = document.get(id) {
+                        if node.kind == NodeKind::Inline
+                            && node.classes().unwrap_or_default().iter().any(|class| class == "meta")
+                        {
+                            let name = node.get_str("name").ok().flatten().unwrap_or("");
+                            let content = node.get_str("content").ok().flatten().unwrap_or("");
+                            ctx.metatags.push_str(&format!(
+                                "<meta content=\"{}\" name=\"{}\" />\n",
+                                escape_html(content), escape_attr(name)
+                            ));
+                        }
+                    }
                 }
                 let suffix = source_paths.get(docname).map(|(_, s)| s.as_str()).unwrap_or(".rst");
                 let sourcename = if suffix == ".txt" {
@@ -849,7 +894,16 @@ pub fn build_with_flavor(
         // user template directories, so a per-page `html_sidebars` list that
         // names a user template (e.g. `customsb.html`) cannot be included there.
         // Keep the theme's default sidebar list for these special pages.
-        gen_ctx.vars.remove("sidebars");
+        // Generated pages fall under the catch-all sidebar pattern, not the
+        // master document's dedicated sidebar list.
+        if let Some(sidebars) = config.get_dict("html_sidebars") {
+            if let Some(value) = sidebars.get("**").and_then(|v| v.get_list()) {
+                let names: Vec<minijinja::Value> = value.iter()
+                    .filter_map(|v| v.get_str().map(minijinja::Value::from))
+                    .collect();
+                gen_ctx.vars.insert("sidebars".to_owned(), minijinja::Value::from(names));
+            }
+        }
         let mut gen_ctx = gen_ctx.add_doc("genindex").add_doc("search");
         // Generated index/search pages use this shared context; give them the
         // same flat sidebar global-toctree as any other page outside the tree.
@@ -863,11 +917,7 @@ pub fn build_with_flavor(
         // selected theme and its inheritance chain but skips those user dirs;
         // this preserves the custom theme instead of silently swapping in the
         // bundled default.
-        let index_manager = if config.get_strings("templates_path").is_some_and(|paths| !paths.is_empty()) {
-            &theme_fallback_manager
-        } else {
-            &manager
-        };
+        let index_manager = &manager;
         written.extend(write_index_pages(index_manager, &gen_ctx, &registry, env, outdir, flavor)?);
 
         // Phase 18: full-text search index, stemmer assets and search UI.
@@ -1424,16 +1474,9 @@ fn build_sidebar_nav(
             }))?;
             Some((anchor, display))
         }).collect();
-        if !objects.is_empty() && docname == config.master_doc() {
-            out.push_str("<ul>\n");
-            for (anchor, display) in objects {
-                out.push_str(&format!(
-                    "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"{}#{}\"><code class=\"docutils literal notranslate\"><span class=\"pre\">{}</span></code></a></li>\n",
-                    escape_attr(&uri(name)), escape_attr(&anchor), escape_html(&display)
-                ));
-            }
-            out.push_str("</ul>\n");
-        }
+        // The global ToC is a flat list of document/section entries; domain
+        // objects are only expanded in the *local* ToC (render_local_toc).
+        let _ = objects;
         let sections: Vec<_> = root_node
             .children
             .iter()
@@ -1466,11 +1509,106 @@ fn build_sidebar_nav(
         out
     };
 
+    // Sphinx's collapsed global ToC expands the current document's immediate
+    // sub-sections into a nested `<ul>` inside its `<li class="toctree-l1
+    // current">` entry (alabaster's `navigation.html` calls `toctree()` with
+    // `collapse=true`). Restore that nested list, which the flat `sections_of`
+    // rendering above does not produce.
+    let nested_sections_of = |name: &str| -> String {
+        let Some(doc) = env.documents.get(name).and_then(|snapshot| snapshot.doctree.as_ref()) else {
+            return String::new();
+        };
+        if scribe_core::document_tocdepth(doc).is_some() {
+            return String::new();
+        }
+        let Ok(root_node) = doc.get(doc.root) else { return String::new() };
+        let Some(root_section) = root_node.children.iter().copied().find(|&id| {
+            doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section)
+        }) else {
+            return String::new();
+        };
+        let Ok(section_node) = doc.get(root_section) else { return String::new() };
+        let sections: Vec<_> = section_node
+            .children
+            .iter()
+            .copied()
+            .filter(|&id| doc.get(id).is_ok_and(|node| node.kind == NodeKind::Section))
+            .collect();
+        if sections.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("<ul>\n");
+        for section in sections {
+            let Ok(node) = doc.get(section) else { continue };
+            let text = node.children.iter().find_map(|&child| {
+                let child = doc.get(child).ok()?;
+                if child.kind == NodeKind::Title { Some(child.astext(doc)) } else { None }
+            }).unwrap_or_default();
+            let anchor = node.ids().ok().and_then(|ids| ids.first().cloned()).unwrap_or_default();
+            let number = toctrees
+                .section_numbers
+                .get(name, &format!("#{anchor}"))
+                .filter(|number| !number.is_empty())
+                .map(|number| {
+                    format!("{}. ", number.iter().map(i64::to_string).collect::<Vec<_>>().join("."))
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "<li class=\"toctree-l2\"><a class=\"reference internal\" href=\"#{}\">{}{}</a></li>\n",
+                escape_attr(&anchor),
+                number,
+                escape_html(&text)
+            ));
+        }
+        out.push_str("</ul>\n");
+        out
+    };
+
+    // Renders a section/document title as safe HTML, preserving inline `math`
+    // nodes as `<span class="math notranslate nohighlight">\(…\)</span>` the
+    // way Sphinx's `toctree()` renders `env.titles`.
+    let rich_title = |name: &str, plain: &str| -> String {
+        let Some(doc) = env.documents.get(name).and_then(|snapshot| snapshot.doctree.as_ref()) else {
+            return escape_html(plain);
+        };
+        let Some(title) = doc.preorder_ids().into_iter().find(|&id| {
+            doc.get(id).is_ok_and(|node| node.kind == NodeKind::Title)
+        }) else {
+            return escape_html(plain);
+        };
+        let children = doc.get(title).map(|node| node.children.clone()).unwrap_or_default();
+        let mut out = String::new();
+        for child in children {
+            let Ok(node) = doc.get(child) else { continue };
+            if node.kind == NodeKind::Math {
+                out.push_str(&format!(
+                    "<span class=\"math notranslate nohighlight\">\\({}\\)</span>",
+                    escape_html(&node.astext(doc))
+                ));
+            } else {
+                out.push_str(&escape_html(&node.astext(doc)));
+            }
+        }
+        if out.is_empty() { escape_html(plain) } else { out }
+    };
+
     let mut out = String::new();
     if let Some(root) = toctrees
         .global_toctree_for_doc(config.master_doc(), true)
         .filter(|root| !root.children.is_empty())
     {
+        // Sphinx's `toctree()` renders the master toctree's `:caption:` above
+        // the generated `<ul>` as a heading paragraph.
+        if let Some(caption) = toctrees.toctrees.iter()
+            .find(|tree| tree.docname == config.master_doc())
+            .and_then(|tree| tree.options.caption.as_deref())
+            .filter(|caption| !caption.is_empty())
+        {
+            out.push_str(&format!(
+                "<p class=\"caption\" role=\"heading\"><span class=\"caption-text\">{}</span></p>\n",
+                escape_html(caption)
+            ));
+        }
         let has_current = root.children.iter().any(|node| node.docname == docname);
         out.push_str(if has_current { "<ul class=\"current\">\n" } else { "<ul>\n" });
         for child in &root.children {
@@ -1481,19 +1619,29 @@ fn build_sidebar_nav(
                 out.push_str(&format!(
                     "<li class=\"toctree-l1\"><a class=\"reference external\" href=\"{}\">{}</a></li>\n",
                     escape_attr(&child.docname),
-                    escape_html(&text)
+                    rich_title(&child.docname, &text)
                 ));
                 continue;
             }
             let href = if current { "#".to_owned() } else { uri(&child.docname) };
             out.push_str(&format!(
-                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}{}</a></li>\n",
+                "<li class=\"{}\"><a class=\"{}\" href=\"{}\">{}{}</a>",
                 if current { "toctree-l1 current" } else { "toctree-l1" },
                 if current { "current reference internal" } else { "reference internal" },
                 escape_attr(&href),
                 plain_number(&child.docname),
-                escape_html(&text)
+                rich_title(&child.docname, &text)
             ));
+            // A user `layout.html` that renders `toctree(collapse=False)`
+            // already emits a flat global ToC; do not add a nested current-
+            // page section list on top of it.
+            let flat_user_toc = config
+                .get_strings("templates_path")
+                .is_some_and(|paths| !paths.is_empty());
+            if current && !flat_user_toc {
+                out.push_str(&nested_sections_of(&child.docname));
+            }
+            out.push_str("</li>\n");
             out.push_str(&sections_of(&child.docname));
         }
         out.push_str("</ul>\n");
@@ -1512,7 +1660,7 @@ fn build_sidebar_nav(
                 format!("<span class=\"section-number\">{dotted}. </span>")
             })
             .unwrap_or_default();
-        format!("{number}{}", escape_html(&title_of(name)))
+        format!("{number}{}", rich_title(name, &title_of(name)))
     };
     let (prev, next) = toctrees.relation(docname).map_or((None, None), |relation| {
         (
@@ -1666,6 +1814,15 @@ fn page_context(
         script("_static/doctools.js?v=".to_owned() + &asset_hash(outdir, "_static/doctools.js", config_hash)),
         script("_static/sphinx_highlight.js?v=".to_owned() + &asset_hash(outdir, "_static/sphinx_highlight.js", config_hash)),
     ];
+    // `html_js_files` (including `app.add_js_file()` registrations from
+    // `conf.py`) are appended after the built-in scripts.
+    if let Some(extra) = config.get_strings("html_js_files") {
+        for file in extra {
+            if !file.is_empty() {
+                ctx.script_files.push(script(file));
+            }
+        }
+    }
     ctx
 }
 

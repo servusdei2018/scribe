@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use scribe_ast::{Document, NodeId, NodeKind, Span};
 
 use super::ids::cpp_ids;
-use super::parser::{mangle_input, parse_cpp_declaration, CppDecl};
+use super::parser::{mangle_input, parse_cpp_declaration, BUILTIN_TYPES, CppDecl};
 use crate::error::DomainResult;
 use crate::sigbuild::{SigBuilder, SigToken};
 
@@ -71,12 +71,42 @@ pub fn prepare_document(document: &mut Document) -> DomainResult<()> {
     prepare_children(document, document.root, &CppScope::default())
 }
 
+/// Materializes `cpp:expr` / `cpp:texpr` skeleton `desc_inline` nodes emitted by
+/// the RST layer into their `desc_sig_*` token trees (upstream `CppExprRole.run`).
+fn expand_expr_inlines(document: &mut Document, node: NodeId) -> DomainResult<()> {
+    let is_expr = document.get(node).is_ok_and(|n| {
+        n.kind == NodeKind::DescInline && n.get_str("cpp:expr_text").ok().flatten().is_some()
+    });
+    if is_expr {
+        let (text, source, span) = {
+            let n = document.get(node)?;
+            (
+                n.get_str("cpp:expr_text").ok().flatten().unwrap_or("").to_owned(),
+                n.source.clone(),
+                n.span.unwrap_or(Span::new(0, 0)),
+            )
+        };
+        let tokens = crate::c::parser::parse_expression(&text);
+        if let Ok(n) = document.get_mut(node) {
+            n.children.clear();
+        }
+        let mut builder = SigBuilder::new_with_source(document, span, "cpp", source);
+        builder.emit_all(&tokens, node)?;
+    }
+    let children = document.get(node).map(|n| n.children.clone()).unwrap_or_default();
+    for child in children {
+        expand_expr_inlines(document, child)?;
+    }
+    Ok(())
+}
+
 fn prepare_children(document: &mut Document, parent: NodeId, scope: &CppScope) -> DomainResult<()> {
     let children = document.children(parent).map(<[NodeId]>::to_vec).unwrap_or_default();
     for child in children {
         if document.get(child).is_err() {
             continue;
         }
+        expand_expr_inlines(document, child)?;
         // Upstream's `env.ref_context['cpp:parent_key']` is installed while
         // reading object directives, so xrefs in a description's content are
         // resolved relative to the enclosing namespace/class scope. Annotate
@@ -132,11 +162,17 @@ fn prepare_children(document: &mut Document, parent: NodeId, scope: &CppScope) -
         };
         let span = document.get(child).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
         let info = build_signature(document, child, &signature, &objtype, &options, scope, span)?;
+        rewrite_fields(document, child)?;
         let mut inner = scope.clone();
         // Upstream's `cpp:parent_key` for a description's content is the object
         // symbol itself, so nested xrefs resolve relative to the declared name
         // for every object type (functions included).
-        if !info.shortname.is_empty() {
+        // An unscoped `enum` does not introduce a nested scope: its
+        // enumerators live in the enclosing namespace and can collide with a
+        // same-named class there. Scoped enums (`enum-class`/`enum-struct`)
+        // do introduce a scope.
+        let unscoped_enum = objtype == "enum";
+        if !info.shortname.is_empty() && !unscoped_enum {
             inner.nested.push(info.shortname.clone());
         }
         prepare_children(document, child, &inner)?;
@@ -146,6 +182,91 @@ fn prepare_children(document: &mut Document, parent: NodeId, scope: &CppScope) -
 
 fn parse_options(json: Option<&str>) -> CppOptions {
     json.and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default()
+}
+
+/// Rewrites the typed `:throws <type>:` fields of a C++ object into upstream's
+/// single grouped `Throws` field (a bullet list of expression links). Mirrors
+/// Sphinx's `TypedField` with `typerolename='expr'`.
+fn rewrite_fields(document: &mut Document, desc: NodeId) -> DomainResult<()> {
+    let content = document.get(desc).ok().and_then(|node| {
+        node.children.iter().copied().find(|&id| {
+            document.get(id).is_ok_and(|child| child.kind == NodeKind::DescContent)
+        })
+    });
+    let Some(content) = content else { return Ok(()) };
+    let fieldlists: Vec<NodeId> = document.get(content).ok().map(|node| {
+        node.children.iter().copied().filter(|&id| {
+            document.get(id).is_ok_and(|child| child.kind == NodeKind::FieldList)
+        }).collect()
+    }).unwrap_or_default();
+    for fieldlist in fieldlists {
+        rewrite_fieldlist(document, fieldlist)?;
+    }
+    Ok(())
+}
+
+fn field_name_text(doc: &Document, field: NodeId) -> String {
+    let Ok(node) = doc.get(field) else { return String::new() };
+    for &child in &node.children {
+        if let Ok(name) = doc.get(child) {
+            if name.kind == NodeKind::FieldName {
+                return name.astext(doc).trim().to_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+fn rewrite_fieldlist(document: &mut Document, fieldlist: NodeId) -> DomainResult<()> {
+    let fields: Vec<NodeId> = document.get(fieldlist).ok().map(|n| n.children.to_vec()).unwrap_or_default();
+    let mut throws: Vec<String> = Vec::new();
+    let mut others: Vec<NodeId> = Vec::new();
+    for field in fields {
+        let label = field_name_text(document, field);
+        let head = label.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        if head == "throws" {
+            let ty = label.split_once(char::is_whitespace).map_or("", |(_, value)| value.trim());
+            throws.push(ty.to_owned());
+            let _ = document.remove_node(field);
+        } else {
+            others.push(field);
+        }
+    }
+    if throws.is_empty() {
+        return Ok(());
+    }
+    let span = document.get(fieldlist).ok().and_then(|n| n.span).unwrap_or(Span::new(0, 0));
+    let source = document.get(fieldlist).ok().and_then(|n| n.source.clone());
+    let mut rebuilt = Vec::new();
+    {
+        let mut builder = SigBuilder::new_with_source(document, span, "cpp", source);
+        let field = builder.add(NodeKind::Field, fieldlist)?;
+        let name_node = builder.add(NodeKind::FieldName, field)?;
+        builder.text("Throws", name_node)?;
+        let body = builder.add(NodeKind::FieldBody, field)?;
+        let bullets = builder.add(NodeKind::BulletList, body)?;
+        for ty in &throws {
+            let item = builder.add(NodeKind::ListItem, bullets)?;
+            let para = builder.add(NodeKind::Paragraph, item)?;
+            let inline = builder.add(NodeKind::Inline, para)?;
+            let desc_inline = builder.add(NodeKind::DescInline, inline)?;
+            if let Ok(node) = builder.doc.get_mut(desc_inline) {
+                node.attrs.set_str("domain", "cpp");
+                node.attrs.set_list("classes", vec![
+                    "cpp-expr".to_owned(), "sig".to_owned(), "sig-inline".to_owned(), "cpp".to_owned(),
+                ]);
+            }
+            let tokens = crate::c::parser::parse_expression(ty);
+            builder.emit_all(&tokens, desc_inline)?;
+            builder.text(" – ", para)?;
+        }
+        rebuilt.push(field);
+    }
+    rebuilt.extend(others);
+    if let Ok(node) = document.get_mut(fieldlist) {
+        node.children = rebuilt;
+    }
+    Ok(())
 }
 
 /// Builds the signature for one C++ declaration.
@@ -212,6 +333,14 @@ pub fn build_signature(
     let mut all_template_params = Vec::new();
     let mut all_function_params = Vec::new();
     for (index, &signature_id) in signature_ids.iter().enumerate() {
+        // Upstream attaches every C++ alias id to the `desc_signature` (the
+        // `<dt>`), which makes the HTML writer emit an empty `<span id="…">`
+        // for each extra id. Mirror that so the tag multiset matches.
+        if !options.no_index {
+            if let Ok(node) = document.get_mut(signature_id) {
+                node.attrs.set_list("ids", ids.clone());
+            }
+        }
         let text = signatures.get(index).map_or(signature, String::as_str);
         let one = parse_cpp_declaration(text, objtype, "cpp");
         for name in &one.template_params {
@@ -278,6 +407,9 @@ fn build_signature_into(
     if let Ok(node) = builder.doc.get_mut(signature_id) {
         node.children.clear();
         node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "cpp".to_owned()]);
+        // Upstream marks declaration text as un-smartquotable: a user-defined
+        // literal `operator""_lit` keeps its straight double quotes.
+        node.attrs.set_bool("support_smartquotes", false);
     }
     // Upstream renders a leading `template<...>` header as its own signature
     // line, with each introduced parameter as a `desc_name` node.
@@ -300,7 +432,7 @@ fn build_signature_into(
                     _ => false,
                 }).unwrap_or(tokens.len());
                 builder.emit_all(&tokens[..keep], tline)?;
-                if keep > 0 {
+                if keep > 0 && !matches!(tokens.get(keep - 1), Some(SigToken::Space)) {
                     builder.sig(NodeKind::DescSigSpace, " ", "w", tline)?;
                 }
             }
@@ -314,12 +446,40 @@ fn build_signature_into(
         builder.sig(NodeKind::DescSigPunctuation, ">", "p", tline)?;
     }
 
+    // A `requires` clause is rendered on its own signature line (upstream
+    // emits one `<dt>` per source line of a multi-line declaration).
+    let requires_at = decl.prefix.iter().position(
+        |token| matches!(token, SigToken::Keyword(word) if word == "requires"),
+    );
+    if let Some(at) = requires_at {
+        // Find where the clause ends: the first built-in type keyword after it
+        // begins the actual declarator (e.g. `void f()`).
+        let clause_end = decl.prefix[at..]
+            .iter()
+            .position(|token| matches!(token, SigToken::KeywordType(_)))
+            .map(|offset| at + offset)
+            .unwrap_or(decl.prefix.len());
+        let req_line = builder.add(NodeKind::DescSignatureLine, signature_id)?;
+        if let Ok(node) = builder.doc.get_mut(req_line) {
+            node.attrs.set_str("xml:space", "preserve");
+        }
+        builder.emit_all(&decl.prefix[at..clause_end], req_line)?;
+    }
+
     let line = builder.add(NodeKind::DescSignatureLine, signature_id)?;
     if let Ok(node) = builder.doc.get_mut(line) {
         node.attrs.set_bool("add_permalink", true);
         node.attrs.set_str("xml:space", "preserve");
     }
-    builder.emit_all(&decl.prefix, line)?;
+    let declarator_prefix = requires_at
+        .and_then(|at| {
+            decl.prefix[at..]
+                .iter()
+                .position(|token| matches!(token, SigToken::KeywordType(_)))
+                .map(|offset| &decl.prefix[at + offset..])
+        })
+        .unwrap_or(&decl.prefix);
+    builder.emit_all(declarator_prefix, line)?;
     if let Some(last) = decl.prefix.last() {
         let pointer = matches!(last, SigToken::Punctuation(text) if text == "*" || text == "&" || text == "&&");
         if !pointer && !matches!(last, SigToken::Space) {
@@ -337,9 +497,23 @@ fn build_signature_into(
             }
             if let Some(operator) = segment.text.strip_prefix("operator") {
                 // Upstream splits operator names into a keyword and an operator
-                // leaf (`operator` + `()` / `+` / `[]`).
+                // leaf (`operator` + `()` / `+` / `[]`). User-defined literals
+                // use a string-literal leaf plus a name, and conversion
+                // operators a keyword-type leaf after a space.
                 builder.sig(NodeKind::DescSigKeyword, "operator", "k", name_node)?;
-                if !operator.is_empty() {
+                if let Some(suffix) = operator.strip_prefix("\"\"") {
+                    builder.sig(NodeKind::DescSigLiteralString, "\"\"", "s", name_node)?;
+                    if !suffix.is_empty() {
+                        // The literal suffix is parsed as an identifier and
+                        // resolves as a `cpp:identifier` xref (unresolved here,
+                        // so upstream logs a warning for `_lit`).
+                        let token = SigToken::reference("cpp", suffix.to_owned(), "identifier", "cpp-identifier");
+                        builder.emit(&token, name_node)?;
+                    }
+                } else if BUILTIN_TYPES.contains(&operator) {
+                    builder.sig(NodeKind::DescSigSpace, " ", "w", name_node)?;
+                    builder.sig(NodeKind::DescSigKeywordType, operator, "kt", name_node)?;
+                } else if !operator.is_empty() {
                     builder.sig(NodeKind::DescSigOperator, operator, "o", name_node)?;
                 }
             } else {
@@ -375,12 +549,12 @@ fn build_signature_into(
     // Alias target (`type X = Y`).
     if let Some(alias) = &decl.alias {
         builder.sig(NodeKind::DescSigSpace, " ", "w", line)?;
-        builder.sig(NodeKind::DescSigOperator, "=", "o", line)?;
+        builder.sig(NodeKind::DescSigPunctuation, "=", "p", line)?;
         builder.sig(NodeKind::DescSigSpace, " ", "w", line)?;
         builder.emit_all(alias, line)?;
     }
 
-    if !decl.params.is_empty() && decl.is_function {
+    if decl.is_function {
         let params = builder.add(NodeKind::DescParameterlist, line)?;
         if let Ok(node) = builder.doc.get_mut(params) {
             node.attrs.set_bool("multi_line_parameter_list", false);
@@ -408,6 +582,11 @@ fn build_signature_into(
                 }
             }
         }
+    }
+    // A trailing underlying-type / base clause is separated from the declared
+    // name by a space (`enum E : int`).
+    if matches!(decl.suffix.first(), Some(SigToken::Punctuation(text)) if text == ":") {
+        builder.sig(NodeKind::DescSigSpace, " ", "w", line)?;
     }
     builder.emit_all(&decl.suffix, line)?;
 

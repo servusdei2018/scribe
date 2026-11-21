@@ -1002,12 +1002,12 @@ fn build_parameterlist(
     for token in tokenize_arglist(arglist) {
         match token {
             ParamToken::OptionalStart => {
-                let param = builder.add(NodeKind::DescParameter, list)?;
-                builder.sig(NodeKind::DescSigPunctuation, "[", "optional", param)?;
+                let optional = builder.add(NodeKind::DescOptional, list)?;
+                builder.add_text("[", optional)?;
             }
             ParamToken::OptionalEnd => {
-                let param = builder.add(NodeKind::DescParameter, list)?;
-                builder.sig(NodeKind::DescSigPunctuation, "]", "optional", param)?;
+                let optional = builder.add(NodeKind::DescOptional, list)?;
+                builder.add_text("]", optional)?;
             }
             ParamToken::PositionalOnlySeparator => {
                 let param = builder.add(NodeKind::DescParameter, list)?;

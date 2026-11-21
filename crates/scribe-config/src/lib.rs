@@ -584,6 +584,7 @@ pub fn load_config_with(request: LoadRequest) -> Result<(Config, Vec<ConfigWarni
 
             normalize_source_suffix(&mut config);
             apply_parser_extension_suffixes(&mut config);
+            apply_conf_py_js_files(&mut config, &path);
             if config.get("language").is_some_and(ConfigValue::is_none) {
                 config.add_warning(
                     ConfigWarning::new(
@@ -654,6 +655,32 @@ fn apply_parser_extension_suffixes(config: &mut Config) {
         .unwrap_or_default();
     suffix.entry(".md".to_owned()).or_insert_with(|| ConfigValue::from("markdown"));
     config.set_raw("source_suffix", ConfigValue::Dict(suffix));
+}
+
+/// Mirrors `app.add_js_file(...)` calls made from a `setup(app)` function in
+/// `conf.py` (Sphinx adds these to `html_js_files`).  Only literal string
+/// arguments are recognized; dynamic registrations are out of scope.
+fn apply_conf_py_js_files(config: &mut Config, path: &Path) {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("py") {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    let mut files: Vec<String> = config
+        .get_strings("html_js_files")
+        .unwrap_or_default();
+    for line in text.lines() {
+        let Some(rest) = line.split_once("add_js_file") else { continue };
+        let rest = rest.1.trim_start().trim_start_matches('(').trim_start();
+        let Some(quote) = rest.chars().next().filter(|ch| *ch == '\'' || *ch == '"') else { continue };
+        let Some(end) = rest[1..].find(quote) else { continue };
+        let file = &rest[1..1 + end];
+        if !file.is_empty() && !files.iter().any(|entry| entry == file) {
+            files.push(file.to_owned());
+        }
+    }
+    if !files.is_empty() {
+        config.set_raw("html_js_files", ConfigValue::List(files.into_iter().map(ConfigValue::from).collect()));
+    }
 }
 
 /// Mirror of upstream `convert_source_suffix`: strings and lists become a

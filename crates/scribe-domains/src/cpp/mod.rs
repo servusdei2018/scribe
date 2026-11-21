@@ -20,7 +20,7 @@ use crate::traits::{Domain, DomainContext, ObjectTypeAlias};
 use crate::types::{DomainData, ObjectEntry, ObjectType, ResolvedReference};
 
 pub use ids::{cpp_ids, primary_id, MangleDecl, MangleParam};
-pub use parser::{parse_cpp_declaration, parse_cpp_xref};
+pub use parser::{mangle_input, parse_cpp_declaration, parse_cpp_xref};
 pub use signature::{prepare_document, CppOptions, CppSignatureInfo};
 
 static OBJECT_TYPES: OnceLock<Vec<ObjectTypeAlias>> = OnceLock::new();
@@ -194,7 +194,18 @@ impl CppDomain {
         }
     }
 
-    /// Finds candidate declarations for a C++ target with scope awareness.
+    /// Canonical parameter-type key of a declaration carrying an explicit
+/// parameter list. Used to reject xrefs whose parameter types do not match a
+/// declared overload (e.g. `int operator+(bool, bool)`).
+fn declared_params(declaration: &str) -> Option<Vec<MangleParam>> {
+    let decl = parse_cpp_declaration(declaration, "function", "cpp");
+    if !decl.is_function {
+        return None;
+    }
+    Some(mangle_input(&decl).params)
+}
+
+/// Finds candidate declarations for a C++ target with scope awareness.
     ///
     /// When `filter_by_role` is `true` only object types addressable by `role`
     /// are returned (upstream `resolve_any_xref`). Normal `resolve_xref` uses
@@ -437,7 +448,6 @@ impl Domain for CppDomain {
             // documentation target; upstream renders them as plain signature
             // tokens rather than cross references.
             || crate::cpp::parser::BUILTIN_TYPES.contains(&bare)
-            || (typ == "type" && bare.len() == 1 && bare.chars().all(|c| c.is_ascii_uppercase()))
         {
             return Ok(Some(ResolvedReference::default().passthrough()));
         }
@@ -461,7 +471,16 @@ impl Domain for CppDomain {
         let role = if typ == "any" { "identifier" } else { typ };
         // Upstream's C++ symbol lookup is by name, not by role. A mismatched
         // role still resolves and produces a separate "targets a …" warning.
-        let matches = self.find_obj(target, role, scope, specific, false);
+        let mut matches = self.find_obj(target, role, scope, specific, false);
+        // An explicit parameter list in the target must match one of the
+        // candidate overloads (`int operator+(bool, bool)` does not resolve to
+        // a declared `int operator+(int, int)`).
+        if target.contains('(') {
+            // An empty `()` is a name decoration, not a parameter constraint.
+            if let Some(wanted) = Self::declared_params(target).filter(|params| !params.is_empty()) {
+                matches.retain(|(_, entry)| Self::declared_params(&entry.declaration).as_ref() == Some(&wanted));
+            }
+        }
         if matches.is_empty() {
             return Ok(None);
         }

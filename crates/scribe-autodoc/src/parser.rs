@@ -221,6 +221,14 @@ impl<'a> ExtractCtx<'a> {
                             .or_else(|| self.preceding_attr_comment(assign))
                             .or_else(|| self.trailing_attr_comment(assign))
                             .or_else(|| alias_docstring(value.as_deref()));
+                        // A descriptor factory such as
+                        // `_funky_classmethod('moore', ..., docstring='moore(a, e, f) -> happiness')`
+                        // is documented by upstream as a classmethod whose
+                        // signature is the docstring's first line.
+                        if let Some(func) = descriptor_function(&name, &qualname, value.as_deref(), docstring.as_deref(), self.span(assign)) {
+                            members.push(Member::Function(func));
+                            continue;
+                        }
                         members.push(Member::Attribute(AttributeInfo {
                             name: name.clone(),
                             qualname,
@@ -447,6 +455,40 @@ pub fn extract_parameters(source: &str, args: &Arguments) -> Vec<ParameterInfo> 
         out.push(plain(source, kwarg, ParameterCategory::VarKeyword));
     }
     out
+}
+
+/// Recognizes a descriptor-factory assignment as a generated classmethod,
+/// mirroring autodoc's handling of callables carrying a signature docstring.
+fn descriptor_function(
+    name: &str,
+    qualname: &str,
+    value: Option<&str>,
+    docstring: Option<&str>,
+    span: SourceSpan,
+) -> Option<FunctionInfo> {
+    let value = value?;
+    if !value.contains("classmethod(") {
+        return None;
+    }
+    let doc = docstring?;
+    let first = doc.lines().next().map(str::trim)?;
+    if !first.starts_with(&format!("{name}(")) {
+        return None;
+    }
+    Some(FunctionInfo {
+        name: name.to_owned(),
+        qualname: qualname.to_owned(),
+        signature: first.to_owned(),
+        docstring: Some(first.to_owned()),
+        decorators: vec!["classmethod".to_owned()],
+        kind: crate::model::FunctionKind::Method,
+        is_abstract: false,
+        is_final: false,
+        is_overload: false,
+        is_public: !name.starts_with('_'),
+        targets: Vec::new(),
+        span,
+    })
 }
 
 /// Upstream documents a bare alias assignment (`my_name = Foo`) as

@@ -166,6 +166,14 @@ pub fn domain_warning_line(
     if diagnostic.code == scribe_domains::diagnostics::codes::NUMFIG {
         return bare_domain_warning_line(diagnostic, docname, env);
     }
+    if diagnostic.source_path.as_deref() == Some("<unknown>") {
+        return format!(
+            "<unknown>:{}: WARNING: {} [{}]",
+            diagnostic.line.unwrap_or(1),
+            diagnostic.message,
+            diagnostic_code(diagnostic).as_str()
+        );
+    }
     let path = env
         .doc2path(docname)
         .map(absolute_source_path)

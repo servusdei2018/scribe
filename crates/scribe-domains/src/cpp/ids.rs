@@ -7,7 +7,7 @@
 //! types, templates and simple function parameter lists.
 
 /// One signature parameter reduced to its mangling components.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MangleParam {
     /// Base type spelling (e.g. `int`, `Sphinx`, `std::vector<int>`).
     pub ty: String,

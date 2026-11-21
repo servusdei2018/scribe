@@ -1669,7 +1669,9 @@ impl Transform for ContentsTransform {
             // up to the nearest section/document.
             // A non-local `.. contents::` tables the whole document; only
             // `:local:` scopes it to the containing section.
-            let is_local = details.get("local").is_some_and(|value| value == "1" || value == "True" || value == "true");
+            // `:local:` is a Docutils flag, so its raw option value is the
+            // empty string — presence of the key is the signal, not its value.
+            let is_local = details.contains_key("local");
             let mut root = if is_local {
                 document.parent(topic).ok().flatten().unwrap_or(document.root)
             } else {
@@ -1682,7 +1684,7 @@ impl Transform for ContentsTransform {
                 root = parent;
             }
             let mut used = collect_used_ids(document);
-                        let bullet = build_contents(document, root, 1, depth, &mut used);
+            let bullet = build_contents(document, root, 1, depth, &mut used);
             if let Some(bullet) = bullet {
                 let index = document.children(topic).ok().and_then(|children| {
                     children.iter().position(|&child| child == pending)

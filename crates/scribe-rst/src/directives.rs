@@ -380,21 +380,10 @@ fn centered(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn acks(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let children = ctx.parse_nested()?;
-    let bullet = children
-        .iter()
-        .copied()
-        .find(|&id| ctx.doc.get(id).is_ok_and(|node| node.kind == NodeKind::BulletList));
-    let Some(bullet) = bullet else {
-        return Ok(Vec::new());
-    };
     let id = ctx.add(NodeKind::Acks, ctx.parent)?;
-    let list = ctx.doc.get_mut(bullet)?;
-    let children = list.children.clone();
-    list.children.clear();
     for child in children {
         ctx.doc.append_child(id, child)?;
     }
-    ctx.doc.remove_node(bullet)?;
     Ok(vec![id])
 }
 
@@ -411,13 +400,20 @@ fn hlist(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let items = ctx.doc.get(bullet)?.children.clone();
     let id = ctx.add(NodeKind::Hlist, ctx.parent)?;
     ctx.doc.get_mut(id)?.attrs.set_str("ncolumns", columns.to_string());
-    let per_column = items.len().div_ceil(columns);
-    for chunk in items.chunks(per_column.max(1)) {
+    // Sphinx distributes the remainder across the leading columns
+    // (`npercol, nmore = divmod(len(fulllist), ncolumns)`), so 6 items in 4
+    // columns become 2/2/1/1 rather than three equal columns of 2.
+    let npercol = items.len() / columns;
+    let nmore = items.len() % columns;
+    let mut index = 0usize;
+    for column in 0..columns {
+        let end = index + npercol + usize::from(column < nmore);
         let col = ctx.add(NodeKind::Hlistcol, id)?;
         let list = ctx.add(NodeKind::BulletList, col)?;
-        for &item in chunk {
+        for &item in &items[index..end.min(items.len())] {
             ctx.doc.append_child(list, item)?;
         }
+        index = end.min(items.len());
     }
     ctx.doc.remove_node(bullet)?;
     Ok(vec![id])
@@ -469,8 +465,6 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        // An option's declared name is its flag; any trailing metavariable
-        // (`-D setting=value`) is documentation, not part of the lookup key.
         .map(|name| if objtype == "option" { name.split_whitespace().next().unwrap_or(name) } else { name })
         .map(str::to_owned)
         .collect();
@@ -479,6 +473,39 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
         .iter()
         .map(|name| crate::names::make_id(&format!("{objtype}-{name}")))
         .collect();
+    // Upstream's standard domain emits an `index` entry for every object so
+    // it appears in the general index. Determine the enclosing program from
+    // the most recent preceding `.. program::` marker.
+    let current_program = ctx.doc.children(ctx.parent).ok().and_then(|children| {
+        children.iter().rev().find_map(|&sibling| {
+            let node = ctx.doc.get(sibling).ok()?;
+            if node.get_str("objtype").ok().flatten() != Some("program") {
+                return None;
+            }
+            node.names().ok()?.first().map(|name| name.replace(' ', "-"))
+        })
+    });
+    let index_id = ctx.add(NodeKind::Index, ctx.parent)?;
+    {
+        let entries: Vec<String> = names.iter().map(|name| {
+            if objtype == "option" {
+                let prefix = current_program.as_deref()
+                    .map_or_else(|| "cmdoption".to_owned(), |program| format!("cmdoption-{program}"));
+                let anchor = crate::names::make_id(&format!("{prefix}-{name}"));
+                let label = current_program.as_deref()
+                    .map_or_else(|| format!("command line option; {name}"), |program| format!("{program} command line option; {name}"));
+                format!("['pair', '{label}', '{anchor}', '', None]")
+            } else if objtype == "envvar" {
+                format!("['single', 'environment variable; {name}', 'envvar-{name}', '', None]")
+            } else {
+                format!("['single', '{name}', '', '', None]")
+            }
+        }).collect();
+        if let Ok(node) = ctx.doc.get_mut(index_id) {
+            node.attrs.set_str("entries", entries.join(", "));
+            node.span = Some(ctx.span);
+        }
+    }
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
     {
         let node = ctx.doc.get_mut(desc)?;
@@ -486,6 +513,7 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
         node.attrs.set_str("objtype", objtype);
         node.attrs.set_str("domain", "std");
         node.attrs.set_list("ids", ids.clone());
+        node.attrs.set_node_id("std:index_id", index_id);
         node.attrs.set_list("names", names);
     }
     let signature_id = ctx.add(NodeKind::DescSignature, desc)?;
@@ -518,10 +546,15 @@ fn std_object(ctx: &mut DirectiveContext<'_>, objtype: &str) -> HandlerResult {
         let add = ctx.add(NodeKind::DescAddname, signature_id)?;
         ctx.doc.get_mut(add)?.attrs.set_list("classes", vec!["sig-prename".to_owned(), "descclassname".to_owned()]);
         ctx.parse_inline_into(&format!(" {qualifier}"), add, ctx.line)?;
+    } else if objtype == "option" || objtype == "cmdoption" {
+        // Upstream always emits the `sig-prename descclassname` span for an
+        // option, even when there is no program qualifier.
+        let add = ctx.add(NodeKind::DescAddname, signature_id)?;
+        ctx.doc.get_mut(add)?.attrs.set_list("classes", vec!["sig-prename".to_owned(), "descclassname".to_owned()]);
     }
     let content = ctx.add(NodeKind::DescContent, desc)?;
     ctx.parse_nested_into(content)?;
-    Ok(vec![desc])
+    Ok(vec![index_id, desc])
 }
 
 fn std_program(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -591,7 +624,7 @@ fn std_option(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         return Ok(Vec::new());
     }
     let result = std_object(ctx, "option")?;
-    if let Some(&desc) = result.first() {
+    if let Some(&desc) = result.last() {
         let names: Vec<String> = signature
             .split(',')
             .map(|part| {
@@ -659,21 +692,38 @@ fn userdesc(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     // The fixture's `userdesc_parse` returns the part before ':' as the
     // object name (e.g. `myobj:parameter` -> `myobj`).
     let original = ctx.raw_arguments.to_owned();
-    let signature = original.split(':').next().unwrap_or(&original).trim().to_owned();
-    // Temporarily override the argument via a dedicated helper instead of
-    // mutating ctx; std_object reads argument(0).
+    let (name_text, param_text) = match original.split_once(':') {
+        Some((name, parameter)) => (name.trim().to_owned(), Some(parameter.trim().to_owned())),
+        None => (original.trim().to_owned(), None),
+    };
+    let id = format!("userdesc-{name_text}");
     let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
     {
         let node = ctx.doc.get_mut(desc)?;
+        node.attrs.set_list("classes", vec!["std".to_owned(), "userdesc".to_owned()]);
         node.attrs.set_str("objtype", "userdesc");
         node.attrs.set_str("domain", "std");
         node.attrs.set_str("desctype", "userdesc");
-        node.attrs.set_list("names", vec![signature.clone()]);
-        node.attrs.set_list("ids", vec![format!("userdesc-{}", signature)]);
+        node.attrs.set_list("names", vec![name_text.clone()]);
+        node.attrs.set_list("ids", vec![id.clone()]);
         node.span = Some(ctx.span);
     }
     let sig = ctx.add(NodeKind::DescSignature, desc)?;
-    ctx.doc.get_mut(sig)?.attrs.set_str("text", &signature);
+    {
+        let node = ctx.doc.get_mut(sig)?;
+        node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "std".to_owned()]);
+        node.attrs.set_list("ids", vec![id]);
+    }
+    let name = ctx.add(NodeKind::DescName, sig)?;
+    ctx.doc.get_mut(name)?.attrs.set_list("classes", vec!["sig-name".to_owned(), "descname".to_owned()]);
+    ctx.doc.get_mut(name)?.attrs.set_str("text", &name_text);
+    let params = ctx.add(NodeKind::DescParameterlist, sig)?;
+    if let Some(parameter) = param_text {
+        if !parameter.is_empty() {
+            let param = ctx.add(NodeKind::DescParameter, params)?;
+            ctx.doc.get_mut(param)?.attrs.set_str("text", &parameter);
+        }
+    }
     let content = ctx.add(NodeKind::DescContent, desc)?;
     ctx.parse_nested_into(content)?;
     Ok(vec![desc])
@@ -685,16 +735,13 @@ fn author_directive(ctx: &mut DirectiveContext<'_>, kind: &str) -> HandlerResult
     if author.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let index = ctx.add(NodeKind::Index, ctx.parent)?;
-    if let Ok(node) = ctx.doc.get_mut(index) {
-        node.attrs.set_str("entries", format!("['single', '{}', '', '', None]", author.replace('\'', "\\'")));
-        node.span = Some(ctx.span);
-    }
+    // Upstream renders author directives as a plain italic paragraph only;
+    // it does not add them to the general index.
     let para = ctx.add(NodeKind::Paragraph, ctx.parent)?;
     let em = ctx.add(NodeKind::Emphasis, para)?;
     let text = ctx.doc.new_text(format!("{kind} author: {}", author.trim()), Some(em))?;
     ctx.doc.get_mut(em)?.children = vec![text];
-    Ok(vec![index, para])
+    Ok(vec![para])
 }
 
 fn moduleauthor(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
@@ -727,6 +774,56 @@ fn parsed_literal(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 /// not render specially (inheritance diagrams, doctest setup/code/output and
 /// the `doctest` directive itself). They preserve their parsed content so no
 /// documentation is silently lost and, crucially, do not warn as unknown.
+/// `.. object::` — a std-domain object whose multi-line argument yields one
+/// `<dt class="sig sig-object">` per signature line (docutils' `ObjectDescription`).
+/// A trailing `\\` continues the first argument onto the next body line.
+fn object_description(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
+    let raw = ctx.raw_arguments.trim();
+    let body: Vec<String> = ctx
+        .content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut signatures: Vec<String> = Vec::new();
+    if raw.is_empty() {
+        signatures.extend(body);
+    } else if let Some(head) = raw.strip_suffix('\\') {
+        let first = body.first().map_or_else(|| head.trim().to_owned(), |next| format!("{} {}", head.trim_end(), next));
+        signatures.push(first);
+        signatures.extend(body.into_iter().skip(1));
+    } else {
+        signatures.push(raw.to_owned());
+        signatures.extend(body);
+    }
+    if signatures.is_empty() {
+        return Ok(Vec::new());
+    }
+    let desc = ctx.add(NodeKind::Desc, ctx.parent)?;
+    {
+        let node = ctx.doc.get_mut(desc)?;
+        node.attrs.set_list("classes", vec!["std".to_owned(), "object".to_owned()]);
+        node.attrs.set_str("objtype", "object");
+        node.attrs.set_str("domain", "std");
+    }
+    for signature in signatures {
+        let sig = ctx.add(NodeKind::DescSignature, desc)?;
+        if let Ok(node) = ctx.doc.get_mut(sig) {
+            node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "std".to_owned()]);
+        }
+        let name = ctx.add(NodeKind::DescName, sig)?;
+        if let Ok(node) = ctx.doc.get_mut(name) {
+            node.attrs.set_list("classes", vec!["sig-name".to_owned(), "descname".to_owned()]);
+        }
+        ctx.parse_inline_into(&signature, name, ctx.line)?;
+    }
+    let _content = ctx.add(NodeKind::DescContent, desc)?;
+    // The multi-line argument is fully consumed by the signature lines above;
+    // upstream emits an empty `<dd>` (no body content).
+    Ok(vec![desc])
+}
+
 fn inert_content(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     if ctx.content.trim().is_empty() {
         return Ok(Vec::new());
@@ -1361,6 +1458,21 @@ fn title_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
 
 fn meta(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let mut ids = Vec::new();
+    // The block parser consumes `:name: value` lines after `.. meta::` as
+    // directive options, so read them from `raw_options` first and fall back
+    // to content lines (both forms occur upstream).
+    if !ctx.raw_options.is_empty() {
+        for (name, value) in ctx.raw_options.iter() {
+            let id = ctx.add(NodeKind::Inline, ctx.parent)?;
+            if let Ok(node) = ctx.doc.get_mut(id) {
+                node.attrs.set_list("classes", vec!["meta".to_owned()]);
+                node.attrs.set_str("name", name.trim().to_ascii_lowercase());
+                node.attrs.set_str("content", value.trim().to_owned());
+            }
+            ids.push(id);
+        }
+        return Ok(ids);
+    }
     for line in ctx.content.lines() {
         let Some(rest) = line.trim().strip_prefix(':') else {
             continue;
@@ -1390,28 +1502,24 @@ fn math_directive(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
             latex = format!("{argument}\n\n{latex}");
         }
     }
-    let label = ctx
-        .option_str("label")
-        .or_else(|| ctx.option_str("name"))
-        .unwrap_or("");
+    let label_option = ctx.option_str("label").or_else(|| ctx.option_str("name"));
+    // Sphinx numbers a math block whenever `:label:` is present, even when the
+    // label is empty (it then assigns an auto-generated `equation-…` id).
+    let numbered = label_option.is_some();
+    let label = label_option.unwrap_or("");
     let label = label.to_owned();
     let docname = ctx.global.source_name.clone().unwrap_or_default();
     let no_wrap = ctx.flag("no-wrap") || ctx.flag("nowrap");
     let classes = ctx.classes();
     let mut result = Vec::new();
-    if !label.is_empty() {
-        let target = ctx.add(NodeKind::Target, ctx.parent)?;
-        ctx.doc
-            .get_mut(target)?
-            .attrs
-            .set_str("refid", format!("equation-{label}"));
-        result.push(target);
-    }
+    // The label's anchor is carried by the MathBlock's `ids` below; upstream
+    // does not emit a separate standalone `<span class="target">` for it.
     let id = ctx.add(NodeKind::MathBlock, ctx.parent)?;
     {
         let node = ctx.doc.get_mut(id)?;
         node.attrs.set_str("docname", docname);
         node.attrs.set_str("label", label.clone());
+        node.attrs.set_bool("numbered", numbered);
         node.attrs.set_bool("no-wrap", no_wrap);
         node.attrs.set_bool("nowrap", no_wrap);
         node.attrs.set_str("xml:space", "preserve");
@@ -1526,6 +1634,13 @@ fn figure(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
         if ctx.doc.get(first).is_ok_and(|node| node.kind == NodeKind::Paragraph) {
             let node = ctx.doc.get_mut(first)?;
             node.kind = NodeKind::Caption;
+        }
+    }
+    // Content after the caption becomes a `<legend>` (Sphinx's Figure.run).
+    if children.len() > 1 {
+        let legend = ctx.add(NodeKind::Legend, figure_id)?;
+        for &child in &children[1..] {
+            ctx.doc.append_child(legend, child)?;
         }
     }
     Ok(vec![figure_id])
@@ -2032,7 +2147,7 @@ pub fn register_builtins(registry: &DirectiveRegistry) {
         .with("opt", OptionKind::UnchangedRequired), false, clsdir));
     registry.register(FnDirective::new("parsed-literal", 0, 0, false, OptionSpec::empty(), true, parsed_literal));
     registry.register(FnDirective::new("sectionauthor", 1, 0, true, OptionSpec::empty(), false, sectionauthor));
-    registry.register(FnDirective::new("object", 1, 0, true, common.clone(), true, inert_content));
+    registry.register(FnDirective::new("object", 1, 0, true, common.clone(), true, object_description));
     registry.register(FnDirective::new("userdesc", 1, 0, true, common.clone(), true, userdesc));
 
     registry.register(FnDirective::new("epigraph", 0, 1, true, OptionSpec::empty(), true, epigraph_body));

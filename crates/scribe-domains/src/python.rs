@@ -839,14 +839,17 @@ impl Domain for PythonDomain {
         let data = self.data.read();
         let mut entries = Vec::new();
         for (name, module) in &data.modules {
-            entries.push(ObjectEntry::new(
+            let mut entry = ObjectEntry::new(
                 name.clone(),
                 name.clone(),
                 "module",
                 module.docname.clone(),
                 module.node_id.clone(),
                 0,
-            ));
+            );
+            entry.synopsis = module.synopsis.clone();
+            entry.platform = module.platform.clone();
+            entries.push(entry);
         }
         for (name, object) in &data.objects {
             if object.objtype == "module" {

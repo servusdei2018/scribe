@@ -6,7 +6,7 @@
 //! the same shell upstream emits but no index data (the full `searchindex.js`
 //! search index is Phase 18).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -55,6 +55,49 @@ pub fn generate_modindex(
     generate_modindex_with(manager, ctx, entries, &|docname| format!("{docname}.html"))
 }
 
+/// Renders the Python module index using the theme's `domainindex.html`
+/// structure: a letter jumpbox followed by a single table with per-letter
+/// caption rows and one row per module.
+fn render_modindex_body(
+    title: &str,
+    entries: &[ObjectEntry],
+    href_for: &dyn Fn(&str) -> String,
+) -> String {
+    let mut grouped: BTreeMap<char, Vec<&ObjectEntry>> = BTreeMap::new();
+    for entry in entries {
+        let key = entry.name.chars().next().unwrap_or('#').to_ascii_lowercase();
+        grouped.entry(key).or_default().push(entry);
+    }
+    let mut out = format!("<h1>{title}</h1>\n\n   <div class=\"modindex-jumpbox\">\n   ");
+    let letters: Vec<char> = grouped.keys().copied().collect();
+    for (index, letter) in letters.iter().enumerate() {
+        if index > 0 { out.push_str(" | \n   "); }
+        out.push_str(&format!("<a href=\"#cap-{letter}\"><strong>{letter}</strong></a>"));
+    }
+    out.push_str("\n   </div>\n\n   <table class=\"indextable modindextable\">\n");
+    for (letter, mut group) in grouped {
+        group.sort_by(|a, b| a.name.cmp(&b.name));
+        out.push_str("     <tr class=\"pcap\"><td></td><td>&#160;</td><td></td></tr>\n");
+        out.push_str(&format!("     <tr class=\"cap\" id=\"cap-{letter}\"><td></td><td>\n       <strong>{letter}</strong></td><td></td></tr>\n"));
+        for entry in group {
+            let href = href_for(&entry.docname);
+            let anchor = if entry.anchor.is_empty() { format!("module-{}", entry.name) } else { entry.anchor.clone() };
+            let platform = if entry.platform.is_empty() {
+                String::new()
+            } else {
+                format!(" <em>({})</em>", html_escape(&entry.platform))
+            };
+            out.push_str(&format!(
+                "     <tr>\n       <td></td>\n       <td>\n       <a href=\"{href}#{anchor}\"><code class=\"xref\">{}</code></a>{platform}</td><td>\n       <em>{}</em></td></tr>\n",
+                html_escape(&entry.name),
+                html_escape(&entry.synopsis)
+            ));
+        }
+    }
+    out.push_str("   </table>\n");
+    out
+}
+
 /// Flavor-aware variant of [`generate_modindex`].
 pub fn generate_modindex_with(
     manager: &ThemeManager,
@@ -69,9 +112,12 @@ pub fn generate_modindex_with(
         .collect();
     let mut ctx = ctx.clone();
     ctx.title = "Python Module Index".to_owned();
-    ctx.body = render_index_body("Python Module Index", &modules, href_for);
+    ctx.body = render_modindex_body("Python Module Index", &modules, href_for);
     ctx.use_index = false;
     ctx.set_var("title", "Python Module Index");
+    // Upstream's `PythonModuleIndex.generate()` reports `collapse=True`; its
+    // domain-index template emits this inline override in the page head.
+    ctx.metatags.push_str("\n    <script>\n      DOCUMENTATION_OPTIONS.COLLAPSE_INDEX = true;\n    </script>\n");
     render_page(manager, &ctx, "modindex.html")
 }
 
@@ -107,14 +153,52 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
         entry: &'a ObjectEntry,
         program: Option<String>,
         option: Option<String>,
+        extra_links: Vec<String>,
     }
+    // A single index term can be registered at several locations; Sphinx
+    // renders those as `[n]` cross-reference links on the term's one `<li>`.
+    // Group duplicates by anchor and attach their hrefs to the primary entry.
+    let href_of = |entry: &ObjectEntry| -> String {
+        if entry.docname.is_empty() {
+            "#".to_owned()
+        } else {
+            let base = href_for(&entry.docname);
+            if entry.anchor.is_empty() { base } else { format!("{base}#{}", entry.anchor) }
+        }
+    };
+    let mut anchor_links: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut seen_anchor: BTreeSet<String> = BTreeSet::new();
+    for entry in entries {
+        if entry.anchor.is_empty() || entry.objtype.contains("option") { continue; }
+        if seen_anchor.insert(entry.anchor.clone()) {
+            anchor_links.entry(entry.anchor.clone()).or_default();
+        } else if let Some(links) = anchor_links.get_mut(&entry.anchor) {
+            if links.is_empty() { links.push(href_of(entry)); }
+        }
+    }
+    // Entries that appear at more than one location get an extra `[n]`
+    // cross-reference link (Sphinx's `indexentries` template macro).
+    let mut display_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in entries {
+        *display_counts.entry(entry.display_name.clone()).or_insert(0) += 1;
+    }
+    let mut seen_display: BTreeMap<String, usize> = BTreeMap::new();
+    let mut primary_anchors: BTreeSet<String> = BTreeSet::new();
     let mut logical: Vec<Logical<'_>> = Vec::new();
     for entry in entries {
+        let extras = anchor_links.get(&entry.anchor).cloned().unwrap_or_default();
+        // Skip anchor duplicates: their hrefs were folded into the primary
+        // entry above, so they must not create their own `<li>`.
+        if !entry.anchor.is_empty() && !entry.objtype.contains("option") && !extras.is_empty()
+            && !primary_anchors.insert(entry.anchor.clone())
+        {
+            continue;
+        }
         if entry.objtype.contains("option") {
             let (program, option) = entry.name.split_once('.').unwrap_or(("", entry.name.as_str()));
             let option = option.to_owned();
             // symbol-keyed entry
-            logical.push(Logical { key: SYMBOLS, entry, program: None, option: Some(option.clone()) });
+            logical.push(Logical { key: SYMBOLS, entry, program: None, option: Some(option.clone()), extra_links: Vec::new() });
             // program-keyed entry (only when there is a program prefix)
             if !program.is_empty() {
                 let first = program.chars().next().unwrap_or('#').to_ascii_uppercase();
@@ -123,13 +207,14 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
                     entry,
                     program: Some(program.to_owned()),
                     option: Some(option),
+                    extra_links: Vec::new(),
                 });
             }
         } else {
             let short = entry.name.rsplit('.').next().unwrap_or(&entry.name);
             let first = short.chars().next().unwrap_or('#');
             let key = if first.is_ascii_alphanumeric() { first.to_ascii_uppercase() } else { SYMBOLS };
-            logical.push(Logical { key, entry, program: None, option: None });
+            logical.push(Logical { key, entry, program: None, option: None, extra_links: extras });
         }
     }
     let mut grouped: BTreeMap<char, Vec<Logical<'_>>> = BTreeMap::new();
@@ -142,6 +227,18 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
             let href = href_for(&entry.docname);
             if entry.anchor.is_empty() { href } else { format!("{href}#{}", entry.anchor) }
         }
+    };
+    // Returns the second-and-later `[n]` link for a duplicated display name.
+    let mut crossref_for = |entry: &ObjectEntry| -> String {
+        if display_counts.get(&entry.display_name).copied().unwrap_or(0) <= 1 {
+            return String::new();
+        }
+        let seen = seen_display.entry(entry.display_name.clone()).or_insert(0);
+        *seen += 1;
+        if *seen == 1 {
+            return String::new();
+        }
+        format!(", <a href=\"{}\">[{}]</a>", html_escape(&target_for(entry)), *seen - 1)
     };
     let mut out = format!("<h1 id=\"{slug}\">{title}</h1>\n", slug = slug(title));
     if entries.is_empty() {
@@ -161,20 +258,49 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
         let text = label(key);
         out.push_str(&format!("<h2 id=\"{text}\">{text}</h2>\n"));
         group.sort_by(|a, b| a.entry.name.cmp(&b.entry.name));
+        // Sphinx's `entries|slice_index(2)` renders a letter group in a single
+        // column when it consists of one program-option family, one
+        // `single: primary; secondary` family, or a lone module-data entry.
+        // Those groups get one `<td>`; their two `<ul>` blocks are preserved.
+        let single_family = key != SYMBOLS
+            && ((!group.is_empty() && group.iter().all(|item| item.program.is_some()))
+                || (!group.is_empty() && group.iter().all(|item| item.entry.objtype == "idx_single"))
+                || (group.len() == 1 && group[0].entry.objtype == "data"));
         let midpoint = group.len().div_ceil(2);
         out.push_str("<table style=\"width: 100%\" class=\"indextable genindextable\"><tr>\n");
+        if single_family {
+            out.push_str("<td style=\"width: 33%; vertical-align: top;\">\n");
+        }
+        let mut group_crossref_used = false;
         for column in [&group[..midpoint], &group[midpoint..]] {
-            out.push_str("<td style=\"width: 33%; vertical-align: top;\"><ul>\n");
+            if single_family {
+                out.push_str("<ul>\n");
+            } else {
+                out.push_str("<td style=\"width: 33%; vertical-align: top;\"><ul>\n");
+            }
             if key == SYMBOLS {
                 for item in column {
                     let option = item.option.as_deref().unwrap_or(&item.entry.name);
-                    out.push_str(&format!("      <li>\n    {}\n\n      <ul>\n", html_escape(option)));
+                    // Sphinx folds a value-placeholder option (`--abi={TYPE}`)
+                    // into its base flag's term, keeping the link but not a
+                    // separate term. Merge its link into the surrounding list
+                    // instead of emitting a redundant top-level `<li>`.
+                    let is_placeholder = option.contains('{');
+                    if is_placeholder {
+                        out.push_str("      <ul>\n");
+                    } else {
+                        out.push_str(&format!("      <li>\n    {}\n\n      <ul>\n", html_escape(option)));
+                    }
                     out.push_str(&format!(
                         "        <li><a href=\"{}\">{}</a>\n</li>\n",
                         html_escape(&target_for(item.entry)),
                         html_escape(&item.entry.display_name)
                     ));
-                    out.push_str("      </ul></li>\n");
+                    if is_placeholder {
+                        out.push_str("      </ul>\n");
+                    } else {
+                        out.push_str("      </ul></li>\n");
+                    }
                 }
             } else {
                 // Group program-keyed options so each program has one term
@@ -182,6 +308,57 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
                 let mut index = 0usize;
                 while index < column.len() {
                     let item = &column[index];
+                    // Sphinx's `IndexEntries` splits `single: primary; secondary`
+                    // entries into a primary term with a nested `<ul>` of
+                    // sub-items.  Group them here without changing the entry
+                    // inventory (pair cmdoptions are already handled above).
+                    if item.program.is_none() && item.entry.objtype == "idx_single" {
+                        if let Some((prefix, _)) = item.entry.name.split_once(';') {
+                            let prefix = prefix.trim().to_owned();
+                            out.push_str(&format!("      <li>\n    {}\n\n      <ul>\n", html_escape(&prefix)));
+                            while index < column.len() {
+                                let sub = &column[index];
+                                let Some((sub_prefix, _)) = sub.entry.name.split_once(';') else { break };
+                                if sub_prefix.trim() != prefix { break; }
+                                let lbl = if sub.entry.objtype == "term" || sub.entry.objtype.starts_with("idx_") {
+                                    format!("<strong>{}</strong>", html_escape(&sub.entry.display_name))
+                                } else {
+                                    html_escape(&sub.entry.display_name)
+                                };
+                                // Merge repeated sub-entries (e.g. two `RFC; RFC 1`
+                                // index directives) into one `<li>` with `[n]` links.
+                                let display = sub.entry.display_name.clone();
+                                let mut links = vec![target_for(sub.entry)];
+                                index += 1;
+                                while index < column.len()
+                                    && column[index].entry.display_name == display
+                                    && column[index].entry.name.split_once(';')
+                                        .is_some_and(|(p, _)| p.trim() == prefix)
+                                {
+                                    links.push(target_for(column[index].entry));
+                                    index += 1;
+                                }
+                                let extra_cross = if !group_crossref_used
+                                    && display_counts.get(&sub.entry.display_name).copied().unwrap_or(0) > 1
+                                {
+                                    group_crossref_used = true;
+                                    crossref_for(sub.entry)
+                                } else {
+                                    String::new()
+                                };
+                                out.push_str(&format!(
+                                    "        <li><a href=\"{}\">{}</a>{}",
+                                    html_escape(&links[0]), lbl, extra_cross
+                                ));
+                                for (number, href) in links[1..].iter().enumerate() {
+                                    out.push_str(&format!(", <a href=\"{}\">[{}]</a>", html_escape(href), number + 1));
+                                }
+                                out.push_str("</li>\n");
+                            }
+                            out.push_str("      </ul></li>\n");
+                            continue;
+                        }
+                    }
                     if let Some(program) = &item.program {
                         out.push_str(&format!("      <li>\n    {} command line option\n\n      <ul>\n", html_escape(program)));
                         while index < column.len() && column[index].program.as_deref() == Some(program.as_str()) {
@@ -201,16 +378,32 @@ fn render_index_body(title: &str, entries: &[ObjectEntry], href_for: &dyn Fn(&st
                         } else {
                             html_escape(&item.entry.display_name)
                         };
+                        let mut extra = String::new();
+                        if item.extra_links.is_empty() {
+                            extra.push_str(&crossref_for(item.entry));
+                        } else {
+                            for (number, href) in item.extra_links.iter().enumerate() {
+                                extra.push_str(&format!(", <a href=\"{}\">[{}]</a>", html_escape(href), number + 1));
+                            }
+                        }
                         out.push_str(&format!(
-                            "<li><a href=\"{}\">{}</a></li>\n",
+                            "<li><a href=\"{}\">{}</a>{}</li>\n",
                             html_escape(&target_for(item.entry)),
-                            lbl
+                            lbl,
+                            extra
                         ));
                         index += 1;
                     }
                 }
             }
-            out.push_str("</ul></td>\n");
+            if single_family {
+                out.push_str("</ul>\n");
+            } else {
+                out.push_str("</ul></td>\n");
+            }
+        }
+        if single_family {
+            out.push_str("</td>\n");
         }
         out.push_str("</tr></table>\n");
     }
@@ -302,12 +495,20 @@ pub fn write_index_pages(
         .into_iter()
         .filter(|entry| entry.objtype != "label")
         .collect();
-    // Skip index nodes that merely mirror a registered domain object.
+    // Skip index nodes that merely mirror a registered domain object, except
+    // when that anchor is indexed more than once — those duplicates become
+    // `[n]` cross-reference links on the primary index term.
     let known_anchors: std::collections::BTreeSet<String> = objects.iter()
         .map(|entry| entry.anchor.clone()).collect();
-    let extra = collect_doctree_index_entries(env)
+    let doctree_entries = collect_doctree_index_entries(env);
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for entry in &doctree_entries {
+        *counts.entry(entry.anchor.clone()).or_insert(0) += 1;
+    }
+    let extra = doctree_entries
         .into_iter()
-        .filter(|entry| !known_anchors.contains(&entry.anchor))
+        .filter(|entry| !known_anchors.contains(&entry.anchor)
+            || counts.get(&entry.anchor).copied().unwrap_or(0) > 1)
         .collect::<Vec<_>>();
     objects.extend(extra);
     let mut pages: Vec<(String, String)> = Vec::new();
