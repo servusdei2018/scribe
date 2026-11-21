@@ -162,6 +162,16 @@ impl TodoCollector {
         warnings
     }
 
+    /// Merge another collector's entries into this one.
+    ///
+    /// Phase 68 parses documents in parallel; each worker records its todos in
+    /// a private collector and the results are folded back together in
+    /// docname order after the parallel pass. The entry order therefore stays
+    /// identical to the original sequential pipeline.
+    pub fn merge(&mut self, other: TodoCollector) {
+        self.todos.extend(other.todos);
+    }
+
     /// All collected todos, in document/read order.
     #[must_use]
     pub fn todos(&self) -> &[TodoEntry] {

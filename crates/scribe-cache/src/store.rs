@@ -69,13 +69,11 @@ where
         let payload = encode(value)?;
         let digest = ContentDigest::of_bytes(&payload);
 
-        let mut blob = Vec::with_capacity(HEADER_LEN + payload.len());
-        blob.extend_from_slice(&CACHE_MAGIC);
-        blob.extend_from_slice(&CACHE_FORMAT_VERSION.to_le_bytes());
-        blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        blob.extend_from_slice(digest.as_bytes());
-        blob.extend_from_slice(&payload);
-
+        // Stream the header and payload straight to the file instead of
+        // building a second `HEADER_LEN + payload.len()` buffer. The bytes on
+        // disk are identical, but the transient allocation is halved — which
+        // matters when persisting the full environment (all doctrees) at the
+        // end of a large build.
         std::fs::create_dir_all(&self.root).map_err(|source| CacheError::CreateDir {
             path: self.root.clone(),
             source,
@@ -97,7 +95,23 @@ where
                 path: temporary.clone(),
                 source,
             })?;
-            file.write_all(&blob).map_err(|source| CacheError::Io {
+            file.write_all(&CACHE_MAGIC).map_err(|source| CacheError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+            file.write_all(&CACHE_FORMAT_VERSION.to_le_bytes()).map_err(|source| CacheError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+            file.write_all(&(payload.len() as u64).to_le_bytes()).map_err(|source| CacheError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+            file.write_all(digest.as_bytes()).map_err(|source| CacheError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+            file.write_all(&payload).map_err(|source| CacheError::Io {
                 path: temporary.clone(),
                 source,
             })?;

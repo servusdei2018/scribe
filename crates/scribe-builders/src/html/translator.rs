@@ -62,9 +62,10 @@ pub struct HtmlContext {
     /// doctrees (Phase 66); empty for contexts that ship full doctrees.
     pub titles: Arc<BTreeMap<String, String>>,
     /// `docname -> target URI` mapping (e.g. `index -> index.html`).
-    pub target_uris: BTreeMap<String, String>,
-    /// All known docnames.
-    pub all_docs: BTreeSet<String>,
+    /// Shared across pages: duplicating this per page was O(pages²) memory.
+    pub target_uris: Arc<BTreeMap<String, String>>,
+    /// All known docnames. Shared across pages for the same reason.
+    pub all_docs: Arc<BTreeSet<String>>,
     /// Whether to emit `headerlink` permalinks on headings.
     pub add_permalinks: bool,
     /// Text/icon used for permalinks (upstream default `¶`).
@@ -205,10 +206,16 @@ impl<'a> HTML5Translator<'a> {
     }
 
     fn new(doc: &'a Document, ctx: &'a HtmlContext) -> Self {
+        // Phase 68: pre-size the output buffer from the AST node count. A
+        // typical node emits ~128 bytes of HTML; growing a `String` from zero
+        // would reallocate ~log₂(n) times per page (and again in every
+        // `render_children` sub-translator). The cap keeps pathological
+        // documents from reserving unbounded memory up front.
+        let capacity = doc.nodes.len().saturating_mul(128).min(1 << 20);
         Self {
             doc,
             ctx,
-            out: String::new(),
+            out: String::with_capacity(capacity),
             section_level: 0,
             stack: Vec::new(),
             skip_depth: 0,

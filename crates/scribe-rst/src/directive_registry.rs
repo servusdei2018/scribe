@@ -722,6 +722,22 @@ pub struct DirectiveRegistry {
     entries: RwLock<HashMap<String, Arc<dyn Directive>>>,
 }
 
+impl Clone for DirectiveRegistry {
+    /// Clone the registry's key → handler table. The handlers themselves are
+    /// `Arc`s, so a per-document clone shares them instead of rebuilding every
+    /// built-in directive (Phase 68).
+    fn clone(&self) -> Self {
+        let entries = self
+            .entries
+            .read()
+            .map(|entries| entries.clone())
+            .unwrap_or_default();
+        Self {
+            entries: RwLock::new(entries),
+        }
+    }
+}
+
 impl std::fmt::Debug for DirectiveRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names = self.names();

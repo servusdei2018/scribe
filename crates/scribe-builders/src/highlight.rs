@@ -32,6 +32,22 @@ use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet
 /// The default Sublime syntax set, loaded once per process.
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 
+/// Eager name → syntax index over the process-wide [`SYNTAX_SET`].
+///
+/// `SyntaxSet::find_syntax_by_name` performs a linear scan of every grammar on
+/// each call. Highlighting a large project resolves the same handful of
+/// languages hundreds of times, so build an immutable hash index once and use
+/// it for the common exact-name lookup. The values borrow from the `'static`
+/// [`SYNTAX_SET`], so nothing is cloned and the index is trivially `Sync`.
+static SYNTAX_BY_NAME: Lazy<std::collections::HashMap<String, &'static SyntaxReference>> =
+    Lazy::new(|| {
+        let mut map = std::collections::HashMap::with_capacity(SYNTAX_SET.syntaxes().len());
+        for syntax in SYNTAX_SET.syntaxes() {
+            map.insert(syntax.name.clone(), syntax);
+        }
+        map
+    });
+
 /// A single highlighted span: its verbatim source text and Pygments classes.
 ///
 /// `classes` is normally a one-element vector (Pygments emits one CSS class per
@@ -419,8 +435,10 @@ pub fn resolve_language(name: &str) -> LanguageResolution {
     // before declaring the lexer unknown, but keep the warning because the
     // pinned oracle would not recognize it either.
     let set = &*SYNTAX_SET;
-    let native = set
-        .find_syntax_by_name(&normalized)
+    let native = SYNTAX_BY_NAME
+        .get(&normalized)
+        .copied()
+        .or_else(|| set.find_syntax_by_name(&normalized))
         .or_else(|| set.find_syntax_by_token(&normalized))
         .or_else(|| set.find_syntax_by_extension(&normalized));
     if let Some(syntax) = native {
@@ -772,8 +790,10 @@ pub fn highlight_code(code: &str, language: &str, options: &HighlightOptions) ->
         warnings.push(warning.clone());
     }
 
-    let syntax = SYNTAX_SET
-        .find_syntax_by_name(&resolution.syntax)
+    let syntax = SYNTAX_BY_NAME
+        .get(&resolution.syntax)
+        .copied()
+        .or_else(|| SYNTAX_SET.find_syntax_by_name(&resolution.syntax))
         .or_else(|| SYNTAX_SET.find_syntax_by_token(&resolution.syntax))
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let is_diff = matches!(resolution.canonical.as_str(), "diff" | "udiff" | "patch")

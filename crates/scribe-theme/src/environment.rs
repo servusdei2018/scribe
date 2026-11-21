@@ -55,6 +55,12 @@ impl TemplateEnvironment {
         };
         built.register_sphinx_globals();
         built.install_loader();
+        // Phase 68: compile the primary page template eagerly, once per build.
+        // minijinja caches compiled templates in the `Environment`, so every
+        // later render (including those in the parallel render pass) reuses
+        // this compiled form with zero re-parsing. A missing template is left
+        // to `render` to report so error handling stays in one place.
+        let _ = built.env.get_template("page.html");
         Ok(built)
     }
 

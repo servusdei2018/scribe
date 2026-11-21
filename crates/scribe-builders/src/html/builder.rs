@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use scribe_ast::{Document, NodeId, NodeKind};
 use scribe_config::{Config, Tags};
 use scribe_core::{
@@ -56,6 +58,25 @@ use super::assets::{
 use super::index::write_index_pages;
 use super::translator::{escape_attr, escape_html, render_local_toc, HtmlContext, SingleFileContext, HTML5Translator};
 use super::{BuildOptions, BuildResult};
+
+/// Run a parallel phase on a small, short-lived rayon pool.
+///
+/// Two workers keep the CPU busy while bounding the per-thread allocator
+/// scratch that glibc retains after a parallel pass; a larger pool pushed peak
+/// RSS well past the build's memory budget. Dropping the pool also releases
+/// the workers' arenas before the next phase allocates. The generic closure
+/// runs sequentially if a pool cannot be created (which never happens in
+/// practice), so this remains total.
+fn with_small_pool<T, F>(f: F) -> T
+where
+    F: FnOnce() -> T + Send,
+    T: Send,
+{
+    match rayon::ThreadPoolBuilder::new().num_threads(2).build() {
+        Ok(pool) => pool.install(f),
+        Err(_) => f(),
+    }
+}
 
 /// The standalone HTML builder.
 #[derive(Debug, Default)]
@@ -400,16 +421,38 @@ pub fn build_with_flavor(
 
         // ---- pass A: parse all documents (or just the incremental set) -----
         profile::mark("preparse");
-        let mut parsed: BTreeMap<String, ParseOutcome> = BTreeMap::new();
-        let mut source_paths: BTreeMap<String, (PathBuf, String)> = BTreeMap::new();
-        for docname in &parse_docnames {
-            let Some(path) = env.found_docs.get(docname) else { continue };
+        // Phase 68: reading, parsing and directive resolution are CPU-bound
+        // per document, and syntax highlighting happens transitively inside
+        // `resolve_output`. Fold them into one small rayon work-stealing pass
+        // so the project's code blocks are highlighted across documents in
+        // parallel. A two-worker scoped pool keeps the CPU busy while
+        // bounding the per-thread allocator scratch that inflates peak RSS.
+        // Rayon preserves iteration order; results are merged in sorted
+        // docname order so output stays byte-identical to the serial loop.
+        let found_docs: std::collections::HashMap<String, PathBuf> = env.found_docs.clone();
+        // Build the directive table once per build. Each worker only clones
+        // the key → handler map (handlers are `Arc`s), instead of constructing
+        // every built-in and extension directive for all 150 documents.
+        let mut base_registry = DirectiveRegistry::builtin();
+        register_code_directives(&mut base_registry);
+        register_directives(&mut base_registry, &extensions);
+        let parse_one = |docname: &String| -> Option<ParsedDoc> {
+            let path = found_docs.get(docname)?;
             let Ok(raw) = fs::read_to_string(path) else {
-                warnings.push(format!("cannot read source for {docname}"));
-                continue;
+                return Some(ParsedDoc {
+                    docname: docname.clone(),
+                    read_error: Some(format!("cannot read source for {docname}")),
+                    warnings: Vec::new(),
+                    included: Vec::new(),
+                    source_path: None,
+                    duration_secs: 0.0,
+                    todos: TodoCollector::default(),
+                    outcome: None,
+                });
             };
             // Upstream's `source-read(docname, source)` lets extensions mutate
-            // the source text in place before RST parsing.
+            // the source text in place before RST parsing. The payload is
+            // per-document, so emitting it here is safe.
             let source = Arc::new(std::sync::Mutex::new(raw));
             let _ = events.emit("source-read", &Event::SourceRead {
                 docname: docname.clone(),
@@ -417,7 +460,7 @@ pub fn build_with_flavor(
             });
             let raw = source.lock().map(|guard| guard.clone()).unwrap_or_default();
             let suffix_by_path = suffix_for_source(config, path);
-            source_paths.insert(docname.clone(), (path.clone(), suffix_by_path.clone()));
+            let source_path = Some((path.clone(), suffix_by_path.clone()));
 
             let reading_started = Instant::now();
             // Sources whose suffix is mapped to a custom parser (e.g. the
@@ -446,8 +489,16 @@ pub fn build_with_flavor(
                     }
                     document.metadata.title = Some("Generated section".to_owned());
                 }
-                parsed.insert(docname.clone(), ParseOutcome { document, included: Vec::new() });
-                continue;
+                return Some(ParsedDoc {
+                    docname: docname.clone(),
+                    read_error: None,
+                    warnings: Vec::new(),
+                    included: Vec::new(),
+                    source_path,
+                    duration_secs: reading_started.elapsed().as_secs_f64(),
+                    todos: TodoCollector::default(),
+                    outcome: Some(ParseOutcome { document, included: Vec::new() }),
+                });
             }
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
             parse_options.extlinks = Arc::clone(&extlink_roles);
@@ -462,13 +513,12 @@ pub fn build_with_flavor(
             rst_ctx.config = Some(Arc::clone(&config_arc));
             rst_ctx.source_name = Some(docname.clone());
             rst_ctx.extlinks = Arc::clone(&extlink_roles);
-            let mut directive_registry = DirectiveRegistry::builtin();
-            register_code_directives(&mut directive_registry);
-            register_directives(&mut directive_registry, &extensions);
+            let directive_registry = base_registry.clone();
             bridge.register_directives(&directive_registry);
             let resolve_report = resolve_output(&mut output, &directive_registry, &rst_ctx);
+            let mut doc_warnings = Vec::new();
             for issue in &resolve_report.unresolved {
-                warnings.push(issue.warning_message(docname));
+                doc_warnings.push(issue.warning_message(docname));
                 let _ = events.emit_firstresult("missing-reference", &Event::MissingReference {
                     docname: docname.clone(),
                     target: issue.name.clone(),
@@ -479,21 +529,18 @@ pub fn build_with_flavor(
                     target: issue.name.clone(),
                 });
             }
-            duration.note(docname.clone(), reading_started.elapsed().as_secs_f64());
 
-            // Extension post-read hooks: upstream's `doctree-read` event.
             if extensions.contains("ifconfig") {
                 for warning in ifconfig::process(&mut output.document, config, flavor.name) {
-                    warnings.push(format!("{docname}: {warning}"));
+                    doc_warnings.push(format!("{docname}: {warning}"));
                 }
             }
+            let mut doc_todos = TodoCollector::default();
             if extensions.contains("todo") {
-                warnings.extend(todos.collect(docname, &output.document, config));
+                doc_warnings.extend(doc_todos.collect(docname, &output.document, config));
             }
 
             output.document.metadata.docname = Some(docname.clone());
-            // A `.. title::` directive already supplied the long title; only
-            // fall back to the first section title when it did not.
             if output.document.metadata.title.is_none() {
                 output.document.metadata.title = extract_title(&output.document);
             }
@@ -501,10 +548,39 @@ pub fn build_with_flavor(
                 docname: docname.clone(),
                 doctree: doctree_json(docname, &output.document),
             });
-            parsed.insert(docname.clone(), ParseOutcome {
-                document: output.document,
+            Some(ParsedDoc {
+                docname: docname.clone(),
+                read_error: None,
+                warnings: doc_warnings,
                 included: resolve_report.included,
-            });
+                source_path,
+                duration_secs: reading_started.elapsed().as_secs_f64(),
+                todos: doc_todos,
+                outcome: Some(ParseOutcome { document: output.document, included: Vec::new() }),
+            })
+        };
+        let parse_results: Vec<ParsedDoc> = with_small_pool(|| {
+            parse_docnames.par_iter().filter_map(parse_one).collect()
+        });
+
+        // Deterministic merge in sorted docname order.
+        let mut parsed: BTreeMap<String, ParseOutcome> = BTreeMap::new();
+        let mut source_paths: BTreeMap<String, (PathBuf, String)> = BTreeMap::new();
+        for result in parse_results {
+            if let Some(warning) = result.read_error {
+                warnings.push(warning);
+                continue;
+            }
+            if let Some(source_path) = result.source_path {
+                source_paths.insert(result.docname.clone(), source_path);
+            }
+            warnings.extend(result.warnings);
+            duration.note(result.docname.clone(), result.duration_secs);
+            todos.merge(result.todos);
+            if let Some(mut outcome) = result.outcome {
+                outcome.included = result.included;
+                parsed.insert(result.docname.clone(), outcome);
+            }
         }
         profile::trim_heap();
         profile::mark("parse");
@@ -810,124 +886,137 @@ pub fn build_with_flavor(
             target_uris: Arc::new(shared_uris),
             theme_options: Arc::new(theme.options.clone()),
         };
+        // Phase 68: the translator's docname/URI lookups need the exact
+        // per-flavor sets below. Share one immutable copy across every page
+        // instead of cloning ~150 entries into each `HtmlContext` (which made
+        // the prepared set O(pages²) in memory).
+        let page_shared_all_docs: Arc<BTreeSet<String>> =
+            Arc::new(docnames.iter().cloned().collect());
+        let page_shared_uris: Arc<BTreeMap<String, String>> = Arc::new(target_uris.clone());
 
-        let mut prepared: Vec<(String, Document, RenderContext, HtmlContext)> = Vec::new();
+        // Phase 68: transforms and per-page context construction are
+        // CPU-bound per document. Run them through the same small parallel
+        // pool; warnings are collected per document and merged in docname
+        // order so output stays deterministic.
         let compact = crate::i18n::compact_setting(config);
-        for docname in &parse_docnames {
-            // Take ownership of the AST: after this point the document lives
-            // only in `prepared` (one copy, not a `parsed` + `prepared` pair).
-            let Some(mut outcome) = parsed.remove(docname) else { continue };
-            let domain = crate::i18n::docname_to_domain(docname, &compact);
-            let translations = crate::i18n::load_catalog(config, source_dir, &domain);
-            let mut transform_ctx = TransformContext::new(Some(config), Some(&tags), "html", "html")
-                .with_domains(&registry)
-                .with_env(env);
-            if let Some(catalog) = &translations {
-                transform_ctx = transform_ctx.with_translations(catalog);
-            }
-            let read_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Read);
-            let resolved_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Resolved);
+        let theme_checksum = theme_options_checksum(config);
+        let docs: Vec<(String, ParseOutcome)> = parse_docnames
+            .iter()
+            .filter_map(|name| parsed.remove(name).map(|outcome| (name.clone(), outcome)))
+            .collect();
+        // (docname, document, render context, html context, warnings)
+        type TransformResult = (String, Document, RenderContext, HtmlContext, Vec<String>);
+        let transform_results: Result<Vec<TransformResult>> =
+            with_small_pool(|| {
+                docs.into_par_iter()
+                    .map(|(docname, mut outcome)| -> Result<_> {
+                        let mut doc_warnings = Vec::new();
+                        let domain = crate::i18n::docname_to_domain(&docname, &compact);
+                        let translations = crate::i18n::load_catalog(config, source_dir, &domain);
+                        let mut transform_ctx = TransformContext::new(Some(config), Some(&tags), "html", "html")
+                            .with_domains(&registry)
+                            .with_env(&*env);
+                        if let Some(catalog) = &translations {
+                            transform_ctx = transform_ctx.with_translations(catalog);
+                        }
+                        let read_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Read);
+                        let resolved_report = apply_transforms(&mut outcome.document, &transform_ctx, Phase::Resolved);
+                        for diagnostic in read_report
+                            .domain_diagnostics()
+                            .iter()
+                            .chain(resolved_report.domain_diagnostics().iter())
+                        {
+                            doc_warnings.push(domain_warning_line(diagnostic, &docname, &*env));
+                        }
+                        for diagnostic in read_report.diagnostics.iter().chain(resolved_report.diagnostics.iter()) {
+                            doc_warnings.push(format!("{docname}: {}", diagnostic.message));
+                        }
+                        let _ = events.emit("doctree-resolved", &Event::DoctreeResolved {
+                            docname: docname.clone(),
+                            doctree: doctree_json(&docname, &outcome.document),
+                        });
+
+                        // Persist this doctree now, while its AST is live.
+                        write_doctree_file(&docname, &outcome.document, &doctree_dir)?;
+
+                        let mut render_ctx = page_context(
+                            &docname,
+                            config,
+                            &theme,
+                            &theme_name,
+                            &docnames,
+                            &target_uris,
+                            &language,
+                            outdir,
+                            &theme_checksum,
+                            flavor,
+                            Some(&shared),
+                        );
+                        // Sphinx loads MathJax on pages whose doctree carries math.
+                        if outcome.document.preorder_ids().into_iter().any(|id| {
+                            matches!(
+                                outcome.document.get(id).map(|node| node.kind),
+                                Ok(NodeKind::Math | NodeKind::MathBlock)
+                            )
+                        }) {
+                            let mut map = std::collections::BTreeMap::new();
+                            map.insert("filename".to_owned(), minijinja::Value::from("https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"));
+                            map.insert("defer".to_owned(), minijinja::Value::from("defer"));
+                            render_ctx.script_files.push(minijinja::Value::from(map));
+                        }
+                        if full_nav {
+                            let (sidebar_toc, prev, next) =
+                                build_sidebar_nav(&toctrees, &*env, &docname, config);
+                            render_ctx.toctree_html = sidebar_toc;
+                            render_ctx.prev = prev;
+                            render_ctx.next = next;
+                            render_ctx.parents = build_parents(&toctrees, &*env, &docname, config);
+                        }
+                        let template_name = Arc::new(std::sync::Mutex::new("page.html".to_owned()));
+                        let context_json = Arc::new(std::sync::Mutex::new(
+                            serde_json::json!({ "title": render_ctx.title, "body": render_ctx.body }),
+                        ));
+                        let _ = events.emit("html-page-context", &Event::HtmlPageContext {
+                            pagename: docname.clone(),
+                            templatename: Arc::clone(&template_name),
+                            context: Arc::clone(&context_json),
+                        });
+                        apply_page_context(&mut render_ctx, &context_json);
+                        let page_image_uris = if flavor.directory_style {
+                            let base = flavor.target_uri(&docname);
+                            image_uris.iter().map(|(key, value)| {
+                                (key.clone(), scribe_theme::relative_uri(&base, value))
+                            }).collect()
+                        } else {
+                            image_uris.clone()
+                        };
+                        let html_ctx = HtmlContext {
+                            docname: docname.clone(),
+                            config: Arc::clone(&config_arc),
+                            env: Arc::clone(&env_arc),
+                            titles: Arc::clone(&titles),
+                            target_uris: Arc::clone(&page_shared_uris),
+                            all_docs: Arc::clone(&page_shared_all_docs),
+                            add_permalinks: !flavor.embedded && config.get_bool("html_permalinks").unwrap_or(true),
+                            permalinks_icon: config.get_str("html_permalinks_icon").unwrap_or("¶").to_owned(),
+                            image_uris: page_image_uris,
+                            language: language.clone(),
+                            singlefile: None,
+                            graphviz: graphviz_infos.get(&docname).cloned().unwrap_or_default(),
+                        };
+                        Ok((docname, outcome.document, render_ctx, html_ctx, doc_warnings))
+                    })
+                    .collect()
+            });
+        let mut prepared: Vec<(String, Document, RenderContext, HtmlContext)> = Vec::new();
+        for (docname, mut document, render_ctx, html_ctx, doc_warnings) in transform_results? {
+            warnings.extend(doc_warnings);
             // Viewcode needs the domain-enriched signatures produced by the
-            // transform pipeline, so collect/inject after both phases.
+            // transform pipeline, so collect after both phases.
             if extensions.contains("viewcode") {
-                viewcode.collect(docname, &mut outcome.document, config, source_dir);
+                viewcode.collect(&docname, &mut document, config, source_dir);
             }
-            for diagnostic in read_report
-                .domain_diagnostics()
-                .iter()
-                .chain(resolved_report.domain_diagnostics().iter())
-            {
-                warnings.push(domain_warning_line(diagnostic, docname, env));
-            }
-            for diagnostic in read_report.diagnostics.iter().chain(resolved_report.diagnostics.iter()) {
-                warnings.push(format!("{docname}: {}", diagnostic.message));
-            }
-            let _ = events.emit("doctree-resolved", &Event::DoctreeResolved {
-                docname: docname.clone(),
-                doctree: doctree_json(docname, &outcome.document),
-            });
-
-            // Persist this doctree now, while its AST is live, then let the
-            // arena-scoped AST travel into `prepared` for HTML/JSON emission.
-            write_doctree_file(docname, &outcome.document, &doctree_dir)?;
-
-            let mut render_ctx = page_context(
-                docname,
-                config,
-                &theme,
-                &theme_name,
-                &docnames,
-                &target_uris,
-                &language,
-                outdir,
-                &theme_options_checksum(config),
-                flavor,
-                Some(&shared),
-            );
-            // Sphinx loads MathJax on pages whose doctree carries math (the
-            // master page qualifies through a math node in a toctree title).
-            if outcome.document.preorder_ids().into_iter().any(|id| {
-                matches!(
-                    outcome.document.get(id).map(|node| node.kind),
-                    Ok(NodeKind::Math | NodeKind::MathBlock)
-                )
-            }) {
-                let mut map = std::collections::BTreeMap::new();
-                map.insert("filename".to_owned(), minijinja::Value::from("https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"));
-                map.insert("defer".to_owned(), minijinja::Value::from("defer"));
-                render_ctx.script_files.push(minijinja::Value::from(map));
-            }
-            if full_nav {
-                let (sidebar_toc, prev, next) =
-                    build_sidebar_nav(&toctrees, env, docname, config);
-                render_ctx.toctree_html = sidebar_toc;
-                render_ctx.prev = prev;
-                render_ctx.next = next;
-                // The relations template renders `parents` as breadcrumb links
-                // for *intermediate* toctree ancestors only (the master doc is
-                // already the "Documentation overview" link).
-                render_ctx.parents = build_parents(&toctrees, env, docname, config);
-            }
-            // Upstream's `html-page-context(pagename, templatename, context,
-            // doctree)` lets extensions tweak the Jinja context. Mutations to
-            // `context` are applied back to the render context; `templatename`
-            // updates are recorded as a diagnostic because all bundled themes
-            // render through the single `page.html` template.
-            let template_name = Arc::new(std::sync::Mutex::new("page.html".to_owned()));
-            let context_json = Arc::new(std::sync::Mutex::new(
-                serde_json::json!({ "title": render_ctx.title, "body": render_ctx.body }),
-            ));
-            let _ = events.emit("html-page-context", &Event::HtmlPageContext {
-                pagename: docname.clone(),
-                templatename: Arc::clone(&template_name),
-                context: Arc::clone(&context_json),
-            });
-            apply_page_context(&mut render_ctx, &context_json);
-            // Directory-style pages live one or more subdirectories deep, so
-            // resource URIs must be made relative to the current page's base.
-            let page_image_uris = if flavor.directory_style {
-                let base = flavor.target_uri(docname);
-                image_uris.iter().map(|(key, value)| {
-                    (key.clone(), scribe_theme::relative_uri(&base, value))
-                }).collect()
-            } else {
-                image_uris.clone()
-            };
-            let html_ctx = HtmlContext {
-                docname: docname.clone(),
-                config: Arc::clone(&config_arc),
-                env: Arc::clone(&env_arc),
-                titles: Arc::clone(&titles),
-                target_uris: target_uris.clone(),
-                all_docs: docnames.iter().cloned().collect(),
-                add_permalinks: !flavor.embedded && config.get_bool("html_permalinks").unwrap_or(true),
-                permalinks_icon: config.get_str("html_permalinks_icon").unwrap_or("¶").to_owned(),
-                image_uris: page_image_uris,
-                language: language.clone(),
-                singlefile: None,
-                graphviz: graphviz_infos.get(docname).cloned().unwrap_or_default(),
-            };
-            prepared.push((docname.clone(), outcome.document, render_ctx, html_ctx));
+            prepared.push((docname, document, render_ctx, html_ctx));
         }
         profile::trim_heap();
         profile::mark("transform-resolve");
@@ -951,13 +1040,13 @@ pub fn build_with_flavor(
             );
         }
 
-        // Phase 66: render each page and write it to disk immediately, instead
-        // of collecting every rendered HTML string into a Vec first. Rendering
-        // is CPU-light next to parsing, so a sequential pass keeps the output
-        // deterministic while avoiding both the O(pages) HTML retention and
-        // the per-thread allocator contention that parallel rendering caused.
-        let rendered: Vec<(std::path::PathBuf, String)> = prepared
-            .iter()
+        // Phase 68: render and write pages in the same small parallel pool.
+        // Each page's HTML is written as soon as it is rendered (no O(pages)
+        // HTML retention), and rayon preserves iteration order so the result
+        // list stays deterministic.
+        let rendered: Vec<(std::path::PathBuf, String)> = with_small_pool(|| {
+            prepared
+            .par_iter()
             .map(|(docname, document, render_ctx, html_ctx)| {
                 let body = HTML5Translator::translate(document, html_ctx);
                 let mut ctx = render_ctx.clone();
@@ -1022,7 +1111,8 @@ pub fn build_with_flavor(
                 fs::write(&path, &html).map_err(|e| HtmlError::io(&path, e))?;
                 Ok((relative, docname.clone()))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+        })?;
         // Phase 66: return the transient parse/render buffers to the OS before
         // the remaining stages allocate their own working memory.
         profile::trim_heap();
@@ -1225,6 +1315,29 @@ struct ParseOutcome {
     /// Include targets read while parsing this document (nested ones
     /// included), forwarded to `BuildEnvironment::note_included`.
     included: Vec<std::path::PathBuf>,
+}
+
+/// One document's result from the Phase 68 parallel parse pass.
+///
+/// Workers own every field, so no shared mutable state is touched. Rayon
+/// preserves iteration order for indexed iterators; results are folded back in
+/// sorted docname order, keeping warnings and doctrees byte-identical.
+struct ParsedDoc {
+    docname: String,
+    /// Set when the source path was unreadable; the document is skipped.
+    read_error: Option<String>,
+    /// Warnings produced while parsing this document (issues + extension hooks).
+    warnings: Vec<String>,
+    /// Include targets read while parsing.
+    included: Vec<PathBuf>,
+    /// Source path and resolved suffix.
+    source_path: Option<(PathBuf, String)>,
+    /// Per-document reading duration.
+    duration_secs: f64,
+    /// Todos recorded while parsing this document.
+    todos: TodoCollector,
+    /// The parsed document, when parsing succeeded.
+    outcome: Option<ParseOutcome>,
 }
 
 /// Serializable snapshot of the effective configuration for `config-inited`.
