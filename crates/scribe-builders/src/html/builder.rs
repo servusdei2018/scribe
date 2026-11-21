@@ -13,8 +13,8 @@
 //!    `py-modindex.html`, a placeholder `search.html`, `objects.inv` and
 //!    `.buildinfo`.
 //!
-//! Pages are rendered in parallel with `rayon`; all outputs are collected,
-//! sorted by docname and written sequentially so bytes are deterministic.
+//! Pages are rendered sequentially and written as each one finishes, so output
+//! is deterministic without retaining every rendered HTML buffer at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use scribe_ast::{Document, NodeId, NodeKind};
 use scribe_config::{Config, Tags};
 use scribe_core::{
@@ -444,6 +443,7 @@ pub fn build_with_flavor(
                 included: resolve_report.included,
             });
         }
+        profile::trim_heap();
         profile::mark("parse");
 
         // Mirror `env.note_included`: an edit to an included file must
@@ -615,6 +615,7 @@ pub fn build_with_flavor(
             ToctreeCollection::default()
         };
 
+        profile::trim_heap();
         profile::mark("domain");
 
         // ---- pass B: transforms + render ----------------------------------
@@ -653,14 +654,92 @@ pub fn build_with_flavor(
         }
         let image_uris = copy_images(images.iter().cloned().collect::<Vec<_>>().as_slice(), source_dir, outdir)?;
 
-        // The translator only reads immutable title metadata from the
-        // environment and config. Share one snapshot across every page instead
-        // of cloning the whole environment/config O(pages) times (Phase 32).
-        let env_arc = Arc::new((*env).clone());
+        // Phase 66: the translator only reads document *titles* from the
+        // environment, never the full doctrees. Precompute the exact title the
+        // translator would derive from each doctree, then ship a doctree-free
+        // environment view. This avoids a deep O(pages) clone of every AST into
+        // a second environment (tens of MB at 150 pages) while keeping
+        // navigation captions byte-for-byte identical.
+        let titles: Arc<BTreeMap<String, String>> = Arc::new(
+            env.documents
+                .iter()
+                .filter_map(|(docname, snapshot)| {
+                    let doc = snapshot.doctree.as_ref()?;
+                    let title = doc
+                        .preorder_ids()
+                        .into_iter()
+                        .find_map(|id| {
+                            let node = doc.get(id).ok()?;
+                            if node.kind == NodeKind::Title {
+                                Some(node.astext(doc))
+                            } else {
+                                None
+                            }
+                        })
+                        .or_else(|| doc.metadata.title.clone())?;
+                    Some((docname.clone(), title))
+                })
+                .collect(),
+        );
+        // Build the doctree-free view field by field: `env.clone()` would first
+        // allocate a full second copy of every AST and then immediately free it,
+        // spiking the high-water mark. Copying only the cheap fields keeps the
+        // transient cost at zero.
+        let mut env_view = scribe_core::BuildEnvironment::new(env.source_dir());
+        env_view.set_relevant_config(env.relevant_config().clone());
+        env_view.set_parser_version(env.parser_version());
+        env_view.found_docs = env.found_docs.clone();
+        env_view.all_docs = env.all_docs.clone();
+        env_view.dependencies = env.dependencies.clone();
+        env_view.included = env.included.clone();
+        env_view.files_to_rebuild = env.files_to_rebuild.clone();
+        env_view.toctree_includes = env.toctree_includes.clone();
+        env_view.reread_always = env.reread_always.clone();
+        env_view.glob_toctrees = env.glob_toctrees.clone();
+        env_view.numbered_toctrees = env.numbered_toctrees.clone();
+        env_view.outdated_docs = env.outdated_docs.clone();
+        env_view.extra_outdated = env.extra_outdated.clone();
+        env_view.documents = env
+            .documents
+            .iter()
+            .map(|(name, snapshot)| {
+                (
+                    name.clone(),
+                    scribe_core::DocumentSnapshot {
+                        docname: snapshot.docname.clone(),
+                        doctree: None,
+                        sections: snapshot.sections.clone(),
+                        toctree_targets: snapshot.toctree_targets.clone(),
+                        xrefs: snapshot.xrefs.clone(),
+                        anchors: snapshot.anchors.clone(),
+                    },
+                )
+            })
+            .collect();
+        let env_arc = Arc::new(env_view);
         // Doctrees are serialized as soon as a document's transforms finish;
         // `parsed` therefore no longer has to keep every AST resident until the
         // very end of the build (Phase 32 arena-scoped lifecycle).
         let doctree_dir = options.doctree_dir.clone().unwrap_or_else(|| outdir.join(".doctrees"));
+
+        // Phase 66: build the project-wide render data once. Every per-page
+        // context then clones only these `Arc`s instead of rebuilding ~150
+        // docname strings and ~150 URI pairs per page.
+        let mut shared_all_docs = docnames.iter().cloned().collect::<BTreeSet<_>>();
+        shared_all_docs.insert("genindex".to_owned());
+        shared_all_docs.insert("search".to_owned());
+        let mut shared_uris = target_uris.clone();
+        for special in ["genindex", "py-modindex", "search"] {
+            shared_uris
+                .entry(special.to_owned())
+                .or_insert_with(|| flavor.target_uri(special));
+        }
+        let shared = PageShared {
+            config: Arc::new(config.clone()),
+            all_docs: Arc::new(shared_all_docs),
+            target_uris: Arc::new(shared_uris),
+            theme_options: Arc::new(theme.options.clone()),
+        };
 
         let mut prepared: Vec<(String, Document, RenderContext, HtmlContext)> = Vec::new();
         let compact = crate::i18n::compact_setting(config);
@@ -713,6 +792,7 @@ pub fn build_with_flavor(
                 outdir,
                 &theme_options_checksum(config),
                 flavor,
+                Some(&shared),
             );
             // Sphinx loads MathJax on pages whose doctree carries math (the
             // master page qualifies through a math node in a toctree title).
@@ -767,7 +847,7 @@ pub fn build_with_flavor(
                 docname: docname.clone(),
                 config: Arc::clone(&config_arc),
                 env: Arc::clone(&env_arc),
-                theme_ctx: render_ctx.clone(),
+                titles: Arc::clone(&titles),
                 target_uris: target_uris.clone(),
                 all_docs: docnames.iter().cloned().collect(),
                 add_permalinks: !flavor.embedded && config.get_bool("html_permalinks").unwrap_or(true),
@@ -779,6 +859,7 @@ pub fn build_with_flavor(
             };
             prepared.push((docname.clone(), outcome.document, render_ctx, html_ctx));
         }
+        profile::trim_heap();
         profile::mark("transform-resolve");
 
         warnings.extend(viewcode.warnings.iter().cloned());
@@ -800,9 +881,13 @@ pub fn build_with_flavor(
             );
         }
 
-        // Render pages in parallel; collect and write in deterministic order.
-        let rendered: Vec<(String, String)> = prepared
-            .par_iter()
+        // Phase 66: render each page and write it to disk immediately, instead
+        // of collecting every rendered HTML string into a Vec first. Rendering
+        // is CPU-light next to parsing, so a sequential pass keeps the output
+        // deterministic while avoiding both the O(pages) HTML retention and
+        // the per-thread allocator contention that parallel rendering caused.
+        let rendered: Vec<(std::path::PathBuf, String)> = prepared
+            .iter()
             .map(|(docname, document, render_ctx, html_ctx)| {
                 let body = HTML5Translator::translate(document, html_ctx);
                 let mut ctx = render_ctx.clone();
@@ -849,32 +934,43 @@ pub fn build_with_flavor(
                     format!("{docname}{suffix}.txt")
                 };
                 ctx.set_var("sourcename", sourcename);
-                if flavor.serializing {
+                let html = if flavor.serializing {
                     // The serializinghtml builder dumps the page context instead
                     // of rendering a template (upstream `handle_page`).
-                    return Ok((docname.clone(), serialize_page_context(&ctx, flavor)));
+                    serialize_page_context(&ctx, flavor)
+                } else {
+                    manager
+                        .render_template("page.html", &ctx)
+                        .or_else(|_| fallback_manager.render_template("page.html", &ctx))
+                        .map_err(HtmlError::theme)?
+                };
+                let relative = flavor.output_path(docname);
+                let path = outdir.join(&relative);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| HtmlError::io(parent, e))?;
                 }
-                let html = manager
-                    .render_template("page.html", &ctx)
-                    .or_else(|_| fallback_manager.render_template("page.html", &ctx))
-                    .map_err(HtmlError::theme)?;
-                Ok((docname.clone(), html))
+                fs::write(&path, &html).map_err(|e| HtmlError::io(&path, e))?;
+                Ok((relative, docname.clone()))
             })
             .collect::<Result<Vec<_>>>()?;
+        // Phase 66: return the transient parse/render buffers to the OS before
+        // the remaining stages allocate their own working memory.
+        profile::trim_heap();
         profile::mark("render");
 
         let mut written = Vec::new();
         let mut built_docnames = Vec::new();
-        for (docname, html) in &rendered {
-            let relative = flavor.output_path(docname);
-            let path = outdir.join(&relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|e| HtmlError::io(parent, e))?;
-            }
-            fs::write(&path, html).map_err(|e| HtmlError::io(&path, e))?;
-            written.push(relative);
+        for (relative, docname) in &rendered {
+            written.push(relative.clone());
             built_docnames.push(docname.clone());
         }
+        // Phase 66: release the per-page contexts before the final stages. Only
+        // the documents are still needed (by the search index).
+        drop(rendered);
+        let search_docs: Vec<(String, Document)> = prepared
+            .drain(..)
+            .map(|(name, document, _, _)| (name, document))
+            .collect();
 
         // ---- assets / source dumps ----------------------------------------
         written.extend(copy_theme_assets(&theme, outdir)?);
@@ -906,6 +1002,7 @@ pub fn build_with_flavor(
             outdir,
             &theme_options_checksum(config),
             flavor,
+            None,
         );
         // The generated index/search pages render through a manager that skips
         // user template directories, so a per-page `html_sidebars` list that
@@ -940,7 +1037,7 @@ pub fn build_with_flavor(
         // Phase 18: full-text search index, stemmer assets and search UI.
         if flavor.search {
             written.extend(write_search_index(
-                &prepared,
+                &search_docs,
                 &source_paths,
                 &registry,
                 config,
@@ -949,6 +1046,10 @@ pub fn build_with_flavor(
                 flavor,
             )?);
         }
+        // Phase 66: the search index is built; release the working documents
+        // before the environment cache is serialized so the two large live sets
+        // never overlap at the high-water mark.
+        drop(search_docs);
 
         // Serializing builders emit JSON instead of a binary inventory + pickle.
         if flavor.serializing {
@@ -985,6 +1086,7 @@ pub fn build_with_flavor(
 
         // Per-document doctrees were serialized in the pass-B loop as soon as
         // each AST finished its transforms; no whole-project AST map is kept.
+        profile::trim_heap();
         profile::mark("write-assets");
         write_buildinfo(outdir, &theme_options_checksum(config))?;
 
@@ -1765,6 +1867,17 @@ fn sidebars_for_doc(config: &Config, docname: &str) -> Option<Vec<String>> {
     None
 }
 
+/// Project-wide data shared by every per-page [`RenderContext`] (Phase 66).
+///
+/// Building these maps once and cloning only the `Arc`s per page avoids
+/// allocating ~150 docname strings and ~150 URI pairs for every page.
+struct PageShared {
+    config: Arc<Config>,
+    all_docs: Arc<BTreeSet<String>>,
+    target_uris: Arc<BTreeMap<String, String>>,
+    theme_options: Arc<BTreeMap<String, String>>,
+}
+
 /// Build the Phase 16 render context for one page (before the body is set).
 #[allow(clippy::too_many_arguments)]
 fn page_context(
@@ -1778,23 +1891,36 @@ fn page_context(
     outdir: &Path,
     config_hash: &str,
     flavor: &BuildFlavor,
+    shared: Option<&PageShared>,
 ) -> RenderContext {
     let mut ctx = RenderContext::for_builder(flavor.name, docname, config.clone()).with_theme(theme_name);
-    ctx.all_docs = docnames.iter().cloned().collect::<BTreeSet<_>>();
-    ctx.all_docs.insert("genindex".to_owned());
-    ctx.all_docs.insert("search".to_owned());
-    // Special pages share the flavor's URI convention (`genindex/` for
-    // dirhtml/json, `genindex.html` for the standalone family).
-    let mut target_uris = target_uris.clone();
-    for special in ["genindex", "py-modindex", "search"] {
-        target_uris.entry(special.to_owned()).or_insert_with(|| flavor.target_uri(special));
+    match shared {
+        Some(s) => {
+            // Phase 66: reuse the single project-wide copy of each map.
+            ctx.config = Arc::clone(&s.config);
+            ctx.all_docs = Arc::clone(&s.all_docs);
+            ctx.target_uris = Arc::clone(&s.target_uris);
+            ctx.theme_options = Arc::clone(&s.theme_options);
+        }
+        None => {
+            let mut all_docs = docnames.iter().cloned().collect::<BTreeSet<_>>();
+            all_docs.insert("genindex".to_owned());
+            all_docs.insert("search".to_owned());
+            ctx.all_docs = Arc::new(all_docs);
+            // Special pages share the flavor's URI convention (`genindex/` for
+            // dirhtml/json, `genindex.html` for the standalone family).
+            let mut uris = target_uris.clone();
+            for special in ["genindex", "py-modindex", "search"] {
+                uris.entry(special.to_owned()).or_insert_with(|| flavor.target_uri(special));
+            }
+            ctx.target_uris = Arc::new(uris);
+            ctx.theme_options = Arc::new(theme.options.clone());
+        }
     }
-    ctx.target_uris = target_uris.clone();
     ctx.link_suffix = if flavor.directory_style { "/".to_owned() } else { flavor.out_suffix.to_owned() };
     ctx.file_suffix = flavor.out_suffix.to_owned();
     ctx.search_enabled = flavor.search;
     ctx.use_index = true;
-    ctx.theme_options = theme.options.clone();
     ctx.language = language.to_owned();
     // Sphinx's `html_sidebars` maps docname patterns to an ordered list of
     // sidebar templates.  When set it overrides the theme's default sidebar
@@ -1812,7 +1938,7 @@ fn page_context(
     ];
     ctx.set_var("link", "");
     if !flavor.embedded && docname != master {
-        let master_uri = target_uris.get(master).cloned().unwrap_or_else(|| flavor.target_uri(master));
+        let master_uri = ctx.target_uris.get(master).cloned().unwrap_or_else(|| flavor.target_uri(master));
         ctx.parents.push((format!("{master_uri}#{master}"), root_title));
     }
     let mut css = vec![
@@ -1944,7 +2070,7 @@ fn asset_hash(_outdir: &Path, relative: &str, fallback: &str) -> String {
 /// every registered domain. The emitted JavaScript is the same
 /// `Search.setIndex({...})` payload the stock `searchtools.js` expects.
 fn write_search_index(
-    prepared: &[(String, Document, RenderContext, HtmlContext)],
+    prepared: &[(String, Document)],
     source_paths: &BTreeMap<String, (PathBuf, String)>,
     registry: &DomainRegistry,
     config: &Config,
@@ -2102,7 +2228,7 @@ fn build_single_file(
     let toc = global_toc(prepared, &order);
     let master_index = prepared.iter().position(|(name, ..)| name == master).unwrap_or(0);
     let mut page_ctx = prepared.get(master_index).map(|(_, _, ctx, _)| ctx.clone())
-        .unwrap_or_else(|| page_context(master, config, theme, theme_name, &order, &BTreeMap::new(), language, outdir, &theme_options_checksum(config), &BuildFlavor::singlefile()));
+        .unwrap_or_else(|| page_context(master, config, theme, theme_name, &order, &BTreeMap::new(), language, outdir, &theme_options_checksum(config), &BuildFlavor::singlefile(), None));
     page_ctx.body = body;
     page_ctx.toc = toc.clone();
     // Alabaster/sidebar templates render `toctree()` rather than `toc`; both

@@ -464,7 +464,7 @@ fn pipeline_resolves_pending_xrefs_in_place() {
     assert_eq!(doc.nodes[xref_index].kind, NodeKind::Reference);
     assert_eq!(
         doc.nodes[xref_index].attrs.get("refid"),
-        Some(&AttributeValue::Str("target-id".to_owned()))
+        Some(&AttributeValue::Str("target-id".into()))
     );
     let pseudo = doc.to_pseudoxml().expect("pseudoxml");
     assert!(pseudo.contains("<reference"), "{pseudo}");

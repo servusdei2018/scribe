@@ -831,7 +831,7 @@ fn list_attr(node: &Node, key: &str) -> Vec<String> {
 
 fn str_attr(node: &Node, key: &str) -> Option<String> {
     match node.attrs.get(key) {
-        Some(AttributeValue::Str(value)) => Some(value.clone()),
+        Some(AttributeValue::Str(value)) => Some(value.to_string()),
         _ => None,
     }
 }
@@ -1349,7 +1349,7 @@ fn collect_toc_children(
                     .attrs
                     .get("parent")
                     .and_then(|value| match value {
-                        AttributeValue::Str(name) => Some(name.clone()),
+                        AttributeValue::Str(name) => Some(name.to_string()),
                         _ => None,
                     })
                     .unwrap_or_default(),
@@ -1686,7 +1686,7 @@ fn collect_number_updates(
                     // they appear in, so Phase 10/writers can render it.
                     if !matches!(
                         node.attrs.get("__directive"),
-                        Some(AttributeValue::Str(marker)) if marker == "sectnum"
+                        Some(AttributeValue::Str(marker)) if marker.as_ref() == "sectnum"
                     ) {
                         continue;
                     }

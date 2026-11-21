@@ -94,7 +94,7 @@ impl<'a> PendingDirective<'a> {
     /// option values, it only preserves what was on the source lines.
     pub fn options(&self) -> BTreeMap<String, String> {
         let raw = self.node.attrs.get(KEY_OPTIONS).and_then(|v| match v {
-            AttributeValue::Str(s) => Some(s.as_str()),
+            AttributeValue::Str(s) => Some(s.as_ref()),
             _ => None,
         });
         let Some(raw) = raw else {

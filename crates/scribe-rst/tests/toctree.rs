@@ -115,5 +115,5 @@ fn toctree_directive_emits_structured_entries_with_exact_spans() {
         .collect();
     assert_eq!(references.len(), 2);
     assert_eq!(references[0].attrs.get("refuri"), Some(&AttributeValue::Str("https://example.org/docs".into())));
-    assert_eq!(references[1].attrs.get("refuri"), Some(&AttributeValue::Str(String::new())));
+    assert_eq!(references[1].attrs.get("refuri"), Some(&AttributeValue::Str(Arc::from(""))));
 }

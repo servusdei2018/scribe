@@ -1656,7 +1656,7 @@ fn apply_custom_role_options(
             continue;
         }
         if let Some(lang) = language {
-            node.attrs.push(("language".to_owned(), AttributeValue::Str(lang.to_owned())));
+            node.attrs.push(("language".to_owned(), AttributeValue::Str(lang.into())));
         }
         if !classes.is_empty() {
             let mut merged = node

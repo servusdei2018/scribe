@@ -387,7 +387,7 @@ fn is_internal(value: &AttributeValue) -> bool {
 
 fn format_attribute_value(value: &AttributeValue) -> String {
     match value {
-        AttributeValue::Str(s) => s.clone(),
+        AttributeValue::Str(s) => s.to_string(),
         AttributeValue::Bool(b) => if *b { "1" } else { "0" }.to_owned(),
         AttributeValue::Int(i) => i.to_string(),
         AttributeValue::Float(f) => f.to_string(),

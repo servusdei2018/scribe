@@ -113,7 +113,7 @@ fn infer_value(name: &str, raw: &str) -> AttributeValue {
     ) {
         return AttributeValue::Bool(raw == "1");
     }
-    AttributeValue::Str(raw.to_owned())
+    AttributeValue::Str(raw.into())
 }
 
 fn unescape_list(raw: &str) -> Vec<String> {

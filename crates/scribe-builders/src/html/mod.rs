@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use scribe_config::Config;
 use scribe_core::{BuildEnvironment, InteropBridge};
-use scribe_theme::RenderContext;
 
 /// Re-exported alias mirroring upstream's `StandaloneHTMLBuilder` class name.
 pub type StandaloneHTMLBuilder = StandaloneHtmlBuilder;
@@ -123,7 +122,7 @@ pub fn test_context(docname: &str, config: &Config, env: &BuildEnvironment) -> H
         docname: docname.to_owned(),
         config: Arc::new(config.clone()),
         env: Arc::new(env.clone()),
-        theme_ctx: RenderContext::for_builder(BUILDER_NAME, docname, config.clone()),
+        titles: Arc::new(BTreeMap::new()),
         target_uris,
         all_docs,
         add_permalinks: true,

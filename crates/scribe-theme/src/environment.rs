@@ -261,7 +261,7 @@ impl TemplateEnvironment {
         for (key, value) in &self.theme.options {
             put(&mut values, format!("theme_{key}"), value.clone());
         }
-        for (key, value) in &ctx.theme_options {
+        for (key, value) in ctx.theme_options.iter() {
             put(&mut values, format!("theme_{key}"), value.clone());
         }
         put(&mut values, "sidebars", self.theme.sidebars.clone());

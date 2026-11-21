@@ -169,7 +169,7 @@ pub struct ExtractedMessage {
 pub fn is_translatable(node: &Node) -> bool {
     let explicit = match node.attrs.get("translatable") {
         Some(AttributeValue::Bool(value)) => Some(*value),
-        Some(AttributeValue::Str(value)) => Some(value == "1" || value.eq_ignore_ascii_case("true")),
+        Some(AttributeValue::Str(value)) => Some(value.as_ref() == "1" || value.eq_ignore_ascii_case("true")),
         _ => None,
     };
     if explicit == Some(false) {
@@ -293,7 +293,7 @@ pub fn extract_messages(document: &Document) -> Vec<ExtractedMessage> {
         } else if node.kind == NodeKind::Image {
             node.attrs
                 .get("alt")
-                .and_then(|v| match v { AttributeValue::Str(s) => Some(s.as_str()), _ => None })
+                .and_then(|v| match v { AttributeValue::Str(s) => Some(s.as_ref()), _ => None })
                 .unwrap_or("")
                 .to_owned()
         } else {

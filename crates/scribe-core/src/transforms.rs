@@ -776,7 +776,7 @@ pub(crate) fn list_attr(node: &Node, key: &str) -> Vec<String> {
 
 pub(crate) fn str_attr<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
     match node.attrs.get(key) {
-        Some(AttributeValue::Str(value)) => Some(value.as_str()),
+        Some(AttributeValue::Str(value)) => Some(value.as_ref()),
         _ => None,
     }
 }

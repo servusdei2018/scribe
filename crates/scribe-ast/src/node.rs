@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -83,7 +84,13 @@ impl Span {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AttributeValue {
     /// A string attribute (the common case).
-    Str(String),
+    ///
+    /// Stored as `Arc<str>` so cloning a [`Document`](crate::Document) shares
+    /// the string heap instead of duplicating every text node (Phase 66).
+    /// Serde serialises it identically to `String`; typed accessors still
+    /// yield `&str`, so this is an internal storage change with no output
+    /// impact.
+    Str(Arc<str>),
     /// A boolean attribute. Pseudo-XML renders this as `"1"`/`"0"`.
     Bool(bool),
     /// A signed integer attribute.
@@ -118,13 +125,13 @@ impl AttributeValue {
 
 impl From<&str> for AttributeValue {
     fn from(v: &str) -> Self {
-        AttributeValue::Str(v.to_owned())
+        AttributeValue::Str(Arc::from(v))
     }
 }
 
 impl From<String> for AttributeValue {
     fn from(v: String) -> Self {
-        AttributeValue::Str(v)
+        AttributeValue::Str(Arc::from(v))
     }
 }
 
@@ -201,7 +208,7 @@ impl Attributes {
     pub fn get_str(&self, key: &str) -> AstResult<Option<&str>> {
         match self.0.get(key) {
             None => Ok(None),
-            Some(AttributeValue::Str(s)) => Ok(Some(s.as_str())),
+            Some(AttributeValue::Str(s)) => Ok(Some(s.as_ref())),
             Some(v) => Err(Self::type_error(key, "string", v)),
         }
     }
@@ -253,7 +260,7 @@ impl Attributes {
 
     /// Sets a string attribute.
     pub fn set_str(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.insert(key, AttributeValue::Str(value.into()));
+        self.insert(key, AttributeValue::Str(Arc::from(value.into())));
     }
 
     /// Sets a boolean attribute.
@@ -845,7 +852,7 @@ impl<'a> PendingXref<'a> {
     fn strval(&self, key: &str) -> Option<&'a str> {
         // The lifetime is sound because the Attributes outlive this view.
         match self.0.get(key) {
-            Some(AttributeValue::Str(s)) => Some(s.as_str()),
+            Some(AttributeValue::Str(s)) => Some(s.as_ref()),
             _ => None,
         }
     }

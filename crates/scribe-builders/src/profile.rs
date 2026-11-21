@@ -46,6 +46,23 @@ struct State {
 
 static STATE: OnceLock<State> = OnceLock::new();
 
+/// Return free heap pages to the OS after a build phase that allocates and
+/// releases many short-lived buffers (parsing, rendering, serialization).
+/// glibc's allocator otherwise keeps those pages resident, inflating peak RSS.
+/// No-op on non-glibc targets; a failed trim is harmless.
+pub fn trim_heap() {
+    #[cfg(target_env = "gnu")]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: `malloc_trim(0)` is documented by glibc as always safe to
+        // call; it only releases free heap pages and reports success/failure,
+        // both of which are ignored here.
+        let _ = unsafe { malloc_trim(0) };
+    }
+}
+
 /// Print a stage boundary mark when `SCRIBE_PROFILE` is set; otherwise a no-op.
 pub fn mark(label: &str) {
     if !enabled() {

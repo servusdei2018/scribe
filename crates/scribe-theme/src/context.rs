@@ -14,15 +14,18 @@ use scribe_config::Config;
 /// Immutable state shared by every template/global during one render.
 #[derive(Debug)]
 pub(crate) struct RenderStateData {
-    pub all_docs: BTreeSet<String>,
-    pub target_uris: BTreeMap<String, String>,
+    // Phase 66: share project-wide immutable maps across page renders
+    // instead of cloning them O(pages) times. `Arc` derefs to the same
+    // collections, so all access sites remain unchanged.
+    pub all_docs: Arc<BTreeSet<String>>,
+    pub target_uris: Arc<BTreeMap<String, String>>,
     pub link_suffix: String,
     pub baseuri: String,
     pub allow_sharp_as_current_path: bool,
     pub search_enabled: bool,
     pub use_index: bool,
-    pub theme_options: BTreeMap<String, String>,
-    pub translations: BTreeMap<String, String>,
+    pub theme_options: Arc<BTreeMap<String, String>>,
+    pub translations: Arc<BTreeMap<String, String>>,
     pub sidebar_html: String,
     pub relbar_html: String,
     pub toctree_html: String,
@@ -47,22 +50,22 @@ pub struct RenderContext {
     pub theme_name: String,
     /// Suffix-free document name of the page being rendered.
     pub docname: String,
-    /// Resolved scribe configuration.
-    pub config: Config,
-    /// All known document names (upstream `env.all_docs`).
-    pub all_docs: BTreeSet<String>,
-    /// Explicit docname → target URI overrides.
-    pub target_uris: BTreeMap<String, String>,
-    /// Merged theme options; mirrored as `theme_*` template variables.
-    pub theme_options: BTreeMap<String, String>,
+    /// Resolved scribe configuration, shared across pages (Phase 66).
+    pub config: Arc<Config>,
+    /// All known document names (upstream `env.all_docs`), shared (Phase 66).
+    pub all_docs: Arc<BTreeSet<String>>,
+    /// Explicit docname → target URI overrides, shared (Phase 66).
+    pub target_uris: Arc<BTreeMap<String, String>>,
+    /// Merged theme options; mirrored as `theme_*` template variables, shared.
+    pub theme_options: Arc<BTreeMap<String, String>>,
     /// Output file suffix (normally `.html`).
     pub file_suffix: String,
     /// Link suffix used by `pathto` (normally `.html`).
     pub link_suffix: String,
     /// Document language tag.
     pub language: String,
-    /// Message-id → translation overrides for `_()` / `gettext`.
-    pub translations: BTreeMap<String, String>,
+    /// Message-id → translation overrides for `_()` / `gettext`, shared.
+    pub translations: Arc<BTreeMap<String, String>>,
     /// Rendered HTML body (treated as safe markup, not escaped).
     pub body: String,
     /// Rendered local table of contents (safe markup).
@@ -117,14 +120,14 @@ impl RenderContext {
             builder_name: builder_name.into(),
             theme_name,
             docname: docname.into(),
-            config,
-            all_docs: BTreeSet::new(),
-            target_uris: BTreeMap::new(),
-            theme_options: BTreeMap::new(),
+            config: Arc::new(config),
+            all_docs: Arc::new(BTreeSet::new()),
+            target_uris: Arc::new(BTreeMap::new()),
+            theme_options: Arc::new(BTreeMap::new()),
             file_suffix: ".html".to_owned(),
             link_suffix: ".html".to_owned(),
             language: "en".to_owned(),
-            translations: BTreeMap::new(),
+            translations: Arc::new(BTreeMap::new()),
             body: String::new(),
             toc: String::new(),
             title: String::new(),
@@ -153,13 +156,13 @@ impl RenderContext {
 
     /// Replace the theme options map.
     pub fn with_theme_options(mut self, options: BTreeMap<String, String>) -> Self {
-        self.theme_options = options;
+        self.theme_options = Arc::new(options);
         self
     }
 
     /// Add a known document.
     pub fn add_doc(mut self, docname: impl Into<String>) -> Self {
-        self.all_docs.insert(docname.into());
+        Arc::make_mut(&mut self.all_docs).insert(docname.into());
         self
     }
 

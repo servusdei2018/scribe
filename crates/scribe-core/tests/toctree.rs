@@ -552,7 +552,7 @@ Two
                 node.kind == scribe_ast::NodeKind::Pending
                     && matches!(
                         node.attrs.get("__directive"),
-                        Some(scribe_ast::AttributeValue::Str(marker)) if marker == "sectnum"
+                        Some(scribe_ast::AttributeValue::Str(marker)) if marker.as_ref() == "sectnum"
                     )
             })
         })
@@ -564,7 +564,7 @@ Two
         .attrs
         .get("secnumber")
         .and_then(|value| match value {
-            scribe_ast::AttributeValue::Str(text) => Some(text.as_str()),
+            scribe_ast::AttributeValue::Str(text) => Some(text.as_ref()),
             _ => None,
         });
     assert_eq!(number, Some("1.1"));

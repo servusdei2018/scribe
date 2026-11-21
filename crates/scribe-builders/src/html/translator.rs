@@ -22,7 +22,6 @@ use std::sync::Arc;
 use scribe_ast::{Document, Node, NodeId, NodeKind, Visitor};
 use scribe_config::Config;
 use scribe_core::BuildEnvironment;
-use scribe_theme::RenderContext;
 
 use crate::highlight::HighlightedCode;
 
@@ -54,12 +53,14 @@ pub struct HtmlContext {
     /// Resolved configuration. Shared across pages so rendering a large tree
     /// does not clone the whole registry once per document (Phase 32).
     pub config: Arc<Config>,
-    /// Build environment, shared across pages. The translator only reads
-    /// document titles from it, so an immutable `Arc` is sufficient and avoids
-    /// an O(pages²) retention of the environment (Phase 32).
+    /// Build environment view, shared across pages. The translator only reads
+    /// document titles from it, so a doctree-free immutable `Arc` is sufficient
+    /// and avoids an O(pages²) retention of the environment (Phase 32/66).
     pub env: Arc<BuildEnvironment>,
-    /// Phase 16 theme render context (navigation/relations already filled).
-    pub theme_ctx: RenderContext,
+    /// Precomputed `docname -> navigation title`, shared by every page.
+    /// The builder derives these once so the per-page env view can drop the
+    /// doctrees (Phase 66); empty for contexts that ship full doctrees.
+    pub titles: Arc<BTreeMap<String, String>>,
     /// `docname -> target URI` mapping (e.g. `index -> index.html`).
     pub target_uris: BTreeMap<String, String>,
     /// All known docnames.
@@ -383,20 +384,20 @@ impl<'a> HTML5Translator<'a> {
     }
 
     fn doc_title(&self, docname: &str) -> Option<String> {
-        self.ctx.env.documents.get(docname)
-            .and_then(|snapshot| snapshot.doctree.as_ref())
-            .and_then(|doc| {
-                // Upstream toctree captions use `env.titles` (the *short*
-                // title: first section heading), while HTML `<title>` uses
-                // `env.longtitles` (the `.. title::` override). Prefer the
-                // section heading here so an explicit title does not leak
-                // into navigation links.
-                doc.preorder_ids().into_iter().find_map(|id| {
-                    let node = doc.get(id).ok()?;
-                    if node.kind == NodeKind::Title { Some(node.astext(doc)) } else { None }
-                }).or_else(|| doc.metadata.title.clone())
-            })
-            .or_else(|| self.ctx.env.all_docs.get(docname).and_then(|meta| meta.title.clone()))
+        // Phase 66: prefer the builder's precomputed title (the exact value the
+        // doctree traversal below produces). Keep the original traversal as a
+        // fallback so contexts that ship full doctrees stay byte-identical.
+        self.ctx.titles.get(docname).cloned().or_else(|| {
+            self.ctx.env.documents.get(docname)
+                .and_then(|snapshot| snapshot.doctree.as_ref())
+                .and_then(|doc| {
+                    doc.preorder_ids().into_iter().find_map(|id| {
+                        let node = doc.get(id).ok()?;
+                        if node.kind == NodeKind::Title { Some(node.astext(doc)) } else { None }
+                    }).or_else(|| doc.metadata.title.clone())
+                })
+                .or_else(|| self.ctx.env.all_docs.get(docname).and_then(|meta| meta.title.clone()))
+        })
     }
 
     fn render_literal_block(&self, node: &Node) -> Option<String> {

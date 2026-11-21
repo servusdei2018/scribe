@@ -140,7 +140,7 @@ fn get_theme_option_and_translation() {
     let mut options = BTreeMap::new();
     options.insert("sidebarwidth".to_owned(), "260".to_owned());
     let mut ctx = context().with_theme_options(options);
-    ctx.translations.insert("Hello".to_owned(), "Bonjour".to_owned());
+    std::sync::Arc::make_mut(&mut ctx.translations).insert("Hello".to_owned(), "Bonjour".to_owned());
 
     assert_eq!(render("{{ get_theme_option('sidebarwidth') }}", &ctx), "260");
     assert_eq!(render("{{ get_theme_option('missing', 'fallback') }}", &ctx), "fallback");

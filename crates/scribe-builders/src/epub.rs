@@ -22,7 +22,6 @@ use std::io::Write;
 use std::sync::Arc;
 
 use scribe_config::Config;
-use scribe_theme::RenderContext;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
@@ -398,7 +397,7 @@ fn html_context(docname: &str, config: &Config, env: &scribe_core::BuildEnvironm
         docname: docname.to_owned(),
         config: Arc::new(config.clone()),
         env: Arc::new(env.clone()),
-        theme_ctx: RenderContext::for_builder(BUILDER_NAME, docname, config.clone()),
+        titles: Arc::new(BTreeMap::new()),
         target_uris,
         all_docs: all_docs.iter().cloned().collect(),
         add_permalinks: false,

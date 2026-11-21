@@ -272,7 +272,7 @@ fn find_descname(document: &Document, id: NodeId) -> Option<String> {
             for (key, value) in node.attrs.iter() {
                 if let Some(signature) = key.strip_suffix(":signature") {
                     if let scribe_ast::AttributeValue::Str(sig) = value {
-                        let normalized = if signature == "c" { normalize_c_signature(sig) } else { sig.clone() };
+                        let normalized = if signature == "c" { normalize_c_signature(sig) } else { sig.to_string() };
                         return Some(normalized);
                     }
                 }

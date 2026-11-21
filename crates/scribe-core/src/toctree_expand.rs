@@ -279,10 +279,10 @@ fn build_list_item(
     )?;
     let mut reference = Node::new(NodeKind::Reference)
         .with_attr("internal", AttributeValue::Bool(internal))
-        .with_attr("refuri", AttributeValue::Str(refuri.to_owned()))
-        .with_attr("anchorname", AttributeValue::Str(anchorname.to_owned()));
+        .with_attr("refuri", AttributeValue::Str(refuri.into()))
+        .with_attr("anchorname", AttributeValue::Str(anchorname.into()));
     if let Some(number) = secnumber {
-        reference.attrs.insert("secnumber", AttributeValue::Str(number));
+        reference.attrs.insert("secnumber", AttributeValue::Str(number.into()));
     }
     let reference_id = document.add_node(reference, None)?;
     if let Some(children) = rich_children {
@@ -813,7 +813,7 @@ fn bool_attr(node: &Node, key: &str, default: bool) -> bool {
     match node.attrs.get(key) {
         Some(AttributeValue::Bool(value)) => *value,
         Some(AttributeValue::Int(value)) => *value != 0,
-        Some(AttributeValue::Str(value)) => matches!(value.as_str(), "1" | "True" | "true" | "yes"),
+        Some(AttributeValue::Str(value)) => matches!(value.as_ref(), "1" | "True" | "true" | "yes"),
         _ => default,
     }
 }
@@ -826,7 +826,7 @@ mod tests {
     fn bool_and_int_attr_helpers_handle_docutils_spellings() {
         let node = Node::new(NodeKind::Toctree)
             .with_attr("hidden", AttributeValue::Bool(true))
-            .with_attr("off", AttributeValue::Str("0".to_owned()))
+            .with_attr("off", AttributeValue::Str("0".into()))
             .with_attr("maxdepth", AttributeValue::Int(3));
         assert!(bool_attr(&node, "hidden", false));
         assert!(bool_attr(&node, "maxdepth", false));
