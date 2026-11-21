@@ -411,6 +411,42 @@ fn adversarial_rst_never_panics() {
 }
 
 #[test]
+fn cpp_alias_qualifiers_do_not_create_namespace_xrefs() {
+    // A `cpp:alias` argument re-renders the declaration it points at; its
+    // qualifier segments must not become bare `cpp:identifier` references to
+    // a namespace (namespaces are not registered as symbols upstream either).
+    let source = "\
+.. cpp:namespace:: ns\n\n\
+.. cpp:class:: C\n\n\
+.. cpp:alias:: void ns::C::f(double d) const\n";
+    let (doc, sink, _) = pipeline(source, "index", true);
+    let messages: Vec<String> = sink.snapshot().into_iter().map(|entry| entry.message).collect();
+    assert!(
+        !messages.iter().any(|message| message.contains("reference target not found")),
+        "alias qualifiers produced xrefs: {messages:?}"
+    );
+    // The qualifier is still rendered in the signature.
+    assert!(signature_texts(&doc).iter().any(|text| text.contains("ns::C::f")));
+}
+
+#[test]
+fn cpp_template_pointer_argument_resolves_to_template_param() {
+    // `Outer<T*>` must render `T` as an identifier/type reference (resolved to
+    // the registered template parameter) and `*` as punctuation — never a
+    // single xref with the literal target `T*`.
+    let source = "\
+.. cpp:class:: template<typename T> Outer<T*>\n\n\
+.. cpp:type:: X = Outer<int>\n";
+    let (doc, sink, _) = pipeline(source, "index", true);
+    let messages: Vec<String> = sink.snapshot().into_iter().map(|entry| entry.message).collect();
+    assert!(
+        !messages.iter().any(|message| message.contains("T*")),
+        "template argument xref was not tokenized: {messages:?}"
+    );
+    assert!(signature_texts(&doc).iter().any(|text| text.contains("Outer<T*>")));
+}
+
+#[test]
 fn clear_doc_removes_domain_objects() {
     let registry = DomainRegistry::builtin();
     let source = ".. c:function:: void f(void)\n\n.. cpp:function:: void g()\n\n.. js:class:: C\n";

@@ -699,14 +699,30 @@ fn parse_theme_conf(path: &Path) -> ThemeResult<ThemeConfig> {
 
     let mut sections: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut current: Option<String> = None;
+    let mut last_key: Option<(String, String)> = None;
     for (index, line) in raw.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
         }
+        // INI continuation: an indented line extends the previous key's
+        // value. Themes such as furo split `sidebars` over many lines.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some((section, key)) = &last_key {
+                let entry = sections.entry(section.clone()).or_default();
+                if let Some(value) = entry.get_mut(key) {
+                    if !value.is_empty() && !value.ends_with(',') {
+                        value.push(',');
+                    }
+                    value.push_str(trimmed);
+                    continue;
+                }
+            }
+        }
         if let Some(section) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             current = Some(section.trim().to_owned());
             sections.entry(current.clone().unwrap_or_default()).or_default();
+            last_key = None;
             continue;
         }
         let separator = trimmed
@@ -722,7 +738,8 @@ fn parse_theme_conf(path: &Path) -> ThemeResult<ThemeConfig> {
             path: path.to_path_buf(),
             detail: format!("line {} appears before any [section]", index + 1),
         })?;
-        sections.entry(section).or_default().insert(key, value);
+        sections.entry(section.clone()).or_default().insert(key.clone(), value);
+        last_key = Some((section, key));
     }
 
     let theme = sections.get("theme").ok_or_else(|| ThemeError::InvalidMetadata {

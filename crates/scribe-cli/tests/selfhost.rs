@@ -265,3 +265,55 @@ fn selfhost_build_uses_unmodified_sphinx13_theme() {
     let _ = std::fs::remove_file(&stdout_path);
     let _ = std::fs::remove_file(&stderr_path);
 }
+
+/// The full self-host build of `sphinx/doc` must complete with **zero**
+/// warnings. This locks in the autodoc cross-reference, C++ domain and
+/// toctree fixes that took the v2.0.0 baseline from 24 warnings to 0.
+#[test]
+fn selfhost_build_emits_no_warnings() {
+    let root = workspace_root();
+    let source = root.join("sphinx/doc");
+    if !source.join("conf.py").is_file() {
+        eprintln!("sphinx/doc not present; skipping zero-warning self-host test");
+        return;
+    }
+    let scribe = PathBuf::from(env!("CARGO_BIN_EXE_scribe"));
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let output = std::env::temp_dir().join(format!(
+        "scribe-selfhost-clean-{}-{sequence}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&output);
+
+    let mut command = Command::new(&scribe);
+    command
+        .current_dir(&root)
+        .arg("build")
+        .arg("-b")
+        .arg("html")
+        .arg("-E")
+        .arg("-q")
+        .arg("-c")
+        .arg(&source)
+        .arg(&source)
+        .arg(&output);
+    let stdout_path = output.with_extension("stdout.log");
+    let stderr_path = output.with_extension("stderr.log");
+    let result = run_with_timeout(command, &stdout_path, &stderr_path);
+    assert!(result.is_ok(), "self-host build timed out: {:?}", result.err());
+    let (status, stdout, stderr) = result.expect("checked above");
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(status.success(), "self-host build exited non-zero:\n{combined}");
+
+    let warnings: Vec<&str> = combined.lines().filter(|line| line.contains("WARNING:")).collect();
+    assert!(
+        warnings.is_empty(),
+        "self-host emitted {} warning(s):\n{}",
+        warnings.len(),
+        warnings.join("\n")
+    );
+
+    let _ = std::fs::remove_dir_all(&output);
+    let _ = std::fs::remove_file(&stdout_path);
+    let _ = std::fs::remove_file(&stderr_path);
+}

@@ -257,24 +257,48 @@ impl<'a> ExtractCtx<'a> {
             let Stmt::FunctionDef(func) = stmt else { continue };
             if func.name.as_str() != "__init__" { continue; }
             for (index, stmt) in func.body.iter().enumerate() {
-                let Stmt::Assign(assign) = stmt else { continue };
-                for target in &assign.targets {
+                // Plain assignments accept a following string literal as an
+                // attribute docstring. Annotated assignments (`self.x: T = …`)
+                // are documented from `#:` comments only — upstream skips
+                // their bare following docstrings, which otherwise duplicate
+                // hand-written `.. attribute::` entries.
+                let (targets, annotation, following): (Vec<&Expr>, Option<&Expr>, bool) = match stmt {
+                    Stmt::Assign(assign) => (assign.targets.iter().collect(), None, true),
+                    Stmt::AnnAssign(assign) => (
+                        vec![assign.target.as_ref()],
+                        Some(assign.annotation.as_ref()),
+                        false,
+                    ),
+                    _ => continue,
+                };
+                for target in targets {
                     let Expr::Attribute(attr) = target else { continue };
                     let Expr::Name(base) = attr.value.as_ref() else { continue };
                     if base.id.as_str() != "self" { continue; }
                     let name = attr.attr.to_string();
                     if name.starts_with('_') || existing.contains(&name) { continue; }
-                    let docstring = following_docstring(&func.body, index + 1, self.source)
-                        .or_else(|| self.preceding_attr_comment(assign))
-                        .or_else(|| self.trailing_attr_comment(assign));
+                    let docstring = if following {
+                        following_docstring(&func.body, index + 1, self.source)
+                    } else {
+                        None
+                    }
+                    .or_else(|| self.preceding_attr_comment(stmt))
+                    .or_else(|| self.trailing_attr_comment(stmt));
+                    // Upstream only documents instance attributes that carry
+                    // documentation; a bare annotated assignment is not shown.
+                    if docstring.as_deref().is_none_or(|doc| doc.trim().is_empty()) {
+                        continue;
+                    }
                     result.push(Member::Attribute(AttributeInfo {
                         qualname: qualify(prefix, &name),
                         name,
-                        annotation: None,
+                        annotation: annotation.and_then(|expr| self.slice(expr)),
+                        // Instance attributes are documented without values
+                        // upstream (`inst_attr_comment`, not `= None`).
                         value: None,
                         docstring,
                         is_public: true,
-                        span: self.span(assign),
+                        span: self.span(stmt),
                     }));
                 }
             }

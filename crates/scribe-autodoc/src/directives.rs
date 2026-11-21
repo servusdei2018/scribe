@@ -87,7 +87,7 @@ fn auto_option_spec() -> OptionSpec {
 pub(crate) fn resolve_target(
     argument: &str,
     roots: &[PathBuf],
-) -> Option<(ModuleInfo, String)> {
+) -> Option<(ModuleInfo, String, Option<String>)> {
     let segments: Vec<&str> = argument.split('.').filter(|part| !part.is_empty()).collect();
     if segments.is_empty() {
         return None;
@@ -98,7 +98,7 @@ pub(crate) fn resolve_target(
         let Some(module) = load_cached(&module_name, &path) else { continue };
         let object_path = segments[count..].join(".");
         if object_path.is_empty() || module.find(&object_path).is_some() {
-            return Some((module, object_path));
+            return Some((module, object_path, None));
         }
         // Follow re-exports: `sphinx.domains.__init__` does
         // `from sphinx.domains._index import Index`, so `.. autoclass:: Index`
@@ -123,13 +123,67 @@ pub(crate) fn resolve_target(
                 if let Some(target_module) = load_cached(&import.module, &target_path) {
                     let remaining = rest.map_or_else(|| first.to_owned(), |rest| format!("{first}.{rest}"));
                     if target_module.find(&remaining).is_some() {
-                        return Some((target_module, remaining));
+                        // The object is re-exported from another module. Keep
+                        // the *requested* name as the canonical alias so xrefs
+                        // written against the public import path resolve
+                        // (upstream registers both names).
+                        return Some((target_module, remaining, Some(argument.to_owned())));
                     }
                 }
             }
         }
     }
     None
+}
+
+/// Builds the fully qualified name of an autodoc target whose Python source
+/// cannot be found. Returns `(signature, module)` where `signature` keeps the
+/// `Class.member` suffix used by the domain's registration pass.
+///
+/// Only fully qualified targets whose *module* is absent qualify: a bare name
+/// (or one inside a module that does exist) is a genuine import failure and
+/// must keep emitting autodoc's diagnostic.
+fn unresolved_object_name(
+    argument: &str,
+    current_module: Option<&str>,
+    class_context: Option<&(Option<String>, String)>,
+    roots: &[PathBuf],
+) -> Option<(String, String)> {
+    let mut segments: Vec<String> = argument
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if segments.is_empty() {
+        return None;
+    }
+    // A bare member name needs the enclosing class and module context to form
+    // an unambiguous target. Do not double-qualify an already fully qualified
+    // argument (`sphinxcontrib.websupport.WebSupport.build`).
+    if segments.len() < 3 {
+        if let Some((class_module, class)) = class_context {
+            let mut qualified = Vec::new();
+            if let Some(module) = class_module.as_deref().or(current_module) {
+                qualified.push(module.to_owned());
+            }
+            qualified.push(class.clone());
+            qualified.extend(segments);
+            segments = qualified;
+        } else if let Some(module) = current_module {
+            let mut qualified = vec![module.to_owned()];
+            qualified.extend(segments);
+            segments = qualified;
+        }
+    }
+    if segments.len() < 3 {
+        return None;
+    }
+    let module = segments[..segments.len() - 2].join(".");
+    if module.is_empty() || resolve_module(&module, roots).is_some() {
+        return None;
+    }
+    let signature = format!("{}.{}", segments[segments.len() - 2], segments[segments.len() - 1]);
+    Some((signature, module))
 }
 
 fn roots_and_config(ctx: &DirectiveContext<'_>) -> (Vec<PathBuf>, Option<Config>) {
@@ -156,13 +210,14 @@ fn import_map(module: &crate::model::ModuleInfo) -> std::collections::BTreeMap<S
 /// Serializes the options for the `py:*` skeleton seam.
 fn options_json(
     module: Option<&str>,
+    canonical: Option<&str>,
     options: &AutoOptions,
     extra: &ExtraOptions,
     imports: &std::collections::BTreeMap<String, String>,
 ) -> String {
     let value = serde_json::json!({
         "module": module,
-        "canonical": null,
+        "canonical": canonical,
         "annotation": null,
         "type": extra.type_annotation,
         "value": extra.value,
@@ -214,6 +269,7 @@ fn emit_object(
     options: &AutoOptions,
     extra: &ExtraOptions,
     imports: &std::collections::BTreeMap<String, String>,
+    canonical: Option<&str>,
     docstring_rst: Option<&str>,
     content: impl FnOnce(&mut DirectiveContext<'_>, NodeId) -> HandlerResult,
 ) -> HandlerResult {
@@ -233,7 +289,7 @@ fn emit_object(
         if signatures.len() > 1 {
             node.attrs.set_str("py:signatures", serde_json::to_string(signatures).unwrap_or_default());
         }
-        node.attrs.set_str("py:options", options_json(Some(module), options, extra, imports));
+        node.attrs.set_str("py:options", options_json(Some(module), canonical, options, extra, imports));
         node.attrs.set_str("py:sig_base", (ctx.span.start as u64).to_string());
         node.attrs.set_bool("py:autodoc", true);
         // Honour `:no-index:` at the node level so the domain registration
@@ -298,7 +354,13 @@ pub fn select_members<'a>(
     options: &AutoOptions,
     all: Option<&[String]>,
 ) -> Vec<&'a Member> {
-    let explicit = options.members.as_ref().filter(|list| !list.is_empty());
+    // Upstream documents members only when the directive opts in with
+    // `:members:` (or `autodoc_default_options`). Without it an
+    // `autoclass`/`automodule` emits just the object itself.
+    let Some(member_filter) = options.members.as_ref() else {
+        return Vec::new();
+    };
+    let explicit = (!member_filter.is_empty()).then_some(member_filter);
     let mut selected: Vec<&Member> = members
         .iter()
         .filter(|member| {
@@ -317,9 +379,6 @@ pub fn select_members<'a>(
             if !allowed {
                 return false;
             }
-            // Upstream documents data/attributes without a docstring (showing
-            // their value or an "alias of ..." sentence) even without
-            // `:undoc-members:`; functions/classes still require a docstring.
             let requires_doc = true;
             if !options.undoc_members
                 && requires_doc
@@ -370,7 +429,7 @@ fn emit_member(
     let docstring = member_docstring(member, options);
     let rst = convert(docstring, config);
     let objtype = member.objtype();
-    emit_object(ctx, objtype, &[signature], module, options, &extra, imports, rst.as_deref(), |ctx, content| {
+    emit_object(ctx, objtype, &[signature], module, options, &extra, imports, None, rst.as_deref(), |ctx, content| {
         if let Member::Class(class) = member {
             // An explicit `:members: Inner` selects which members of the
             // *outer* class to document. Once `Inner` is being documented its
@@ -656,15 +715,75 @@ impl Directive for AutoDirective {
         // `.. automethod:: Sphinx.add_js_file`). Try the argument as written
         // first, then the module-qualified spelling.
         let current_module = ctx.global.current_module.read().ok().and_then(|guard| guard.clone());
-        let direct = resolve_target(argument, &roots);
-        let resolved = direct.or_else(|| {
-            current_module
-                .as_deref()
-                .and_then(|module| resolve_target(&format!("{module}.{argument}"), &roots))
+        // A hand-written `.. class::` ancestor supplies the class context for
+        // standalone `automethod`/`autoattribute` directives in its body.
+        // Nested directives are resolved in a later pass (after the class
+        // handler returns), so read the context from the document tree rather
+        // than from mutable global state.
+        let class_context = ctx.doc.ancestors(ctx.parent).find_map(|id| {
+            let node = ctx.doc.get(id).ok()?;
+            if node.kind != NodeKind::Desc {
+                return None;
+            }
+            let objtype = node.get_str("objtype").ok().flatten()?;
+            if objtype != "class" && objtype != "exception" {
+                return None;
+            }
+            let name = node.get_str("py:signature").ok().flatten()?.to_owned();
+            let module = node
+                .get_str("py:options")
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.get("module").and_then(|m| m.as_str()).map(str::to_owned));
+            Some((module, name))
         });
-        let (module, object_path) = match resolved {
+        // Try the argument as written, then qualify it with the active module,
+        // class, and module+class. Upstream keeps all three in the build
+        // environment; a standalone `.. automethod:: write` inside a
+        // hand-written `.. class:: Builder` must resolve to `Builder.write`.
+        let mut candidates = vec![argument.to_owned()];
+        if let Some(module) = &current_module {
+            candidates.push(format!("{module}.{argument}"));
+        }
+        if let Some((class_module, class)) = &class_context {
+            candidates.push(format!("{class}.{argument}"));
+            let module = class_module.clone().or_else(|| current_module.clone());
+            if let Some(module) = module {
+                candidates.push(format!("{module}.{class}.{argument}"));
+            }
+        }
+        let resolved = candidates.iter().find_map(|name| resolve_target(name, &roots));
+        let (module, object_path, canonical) = match resolved {
             Some(target) => target,
             None => {
+                // When the documented object is fully qualified but its
+                // Python source is genuinely absent (a separately installed
+                // extension package), still register the object named by the
+                // directive. Upstream does the same for hand-written
+                // `py:method::` directives; a bare name whose module *does*
+                // exist remains a genuine import failure and keeps warning.
+                if let Some((name, module)) = unresolved_object_name(
+                    argument,
+                    current_module.as_deref(),
+                    class_context.as_ref(),
+                    &roots,
+                ) {
+                    let extras = ExtraOptions::default();
+                    let imports = std::collections::BTreeMap::new();
+                    return emit_object(
+                        ctx,
+                        self.objtype,
+                        &[name],
+                        &module,
+                        &options,
+                        &extras,
+                        &imports,
+                        None,
+                        None,
+                        |_, _| Ok(Vec::new()),
+                    );
+                }
                 return ctx.parse_block_text(
                     &format!(".. warning:: autodoc: failed to import {argument:?}"),
                     ctx.parent,
@@ -690,10 +809,28 @@ impl Directive for AutoDirective {
             Member::Function(_) | Member::Attribute(_) => object_path.rsplit_once('.').map(|(class, _)| class.to_owned()),
             Member::Class(_) => None,
         };
-        let signatures: Vec<String> = matches
-            .iter()
-            .map(|member| member_signature(member, class_name.as_deref()))
-            .collect();
+        let signatures: Vec<String> = if self.objtype == "attribute" {
+            // `.. autoattribute::` documents a property as a plain attribute:
+            // upstream shows only its name, never the getter's full signature
+            // (including its return annotation).
+            matches
+                .iter()
+                .map(|member| {
+                    // A property documented at document level with a qualified
+                    // argument (`.. autoattribute:: Sphinx.fresh_env_used`)
+                    // keeps its class prefix so the object is registered under
+                    // its full public name. Plain attributes keep their bare
+                    // name, matching upstream's index entries.
+                    if matches!(member, Member::Function(_)) && object_path.contains('.') {
+                        object_path.clone()
+                    } else {
+                        member.name().to_owned()
+                    }
+                })
+                .collect()
+        } else {
+            matches.iter().map(|member| member_signature(member, class_name.as_deref())).collect()
+        };
         let extra = member_extra(primary, &options);
         let docstring: Option<String> = match primary {
             Member::Class(class) if options.class_doc_from == ClassDocFrom::Both => {
@@ -724,7 +861,7 @@ impl Directive for AutoDirective {
         };
         let imports = import_map(&module);
         let directive_content = ctx.content.to_owned();
-        emit_object(ctx, objtype, &signatures, &module.name, &options, &extra, &imports, rst.as_deref(), |ctx, content_node| {
+        emit_object(ctx, objtype, &signatures, &module.name, &options, &extra, &imports, canonical.as_deref(), rst.as_deref(), |ctx, content_node| {
             if !directive_content.trim().is_empty() {
                 ctx.parse_block_text(&directive_content, content_node, ctx.line)?;
             }

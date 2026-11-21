@@ -209,6 +209,10 @@ pub fn auto_options(ctx: &DirectiveContext<'_>, config: Option<&Config>) -> Auto
     }
     if flag(ctx, "inherited-members") {
         options.inherited_members = true;
+        // Upstream's `:inherited-members:` implies `:members:` (want_all).
+        if options.members.is_none() {
+            options.members = Some(Vec::new());
+        }
     }
     if flag(ctx, "show-inheritance") {
         options.show_inheritance = true;

@@ -527,8 +527,18 @@ fn build_signature_into(
                         builder.sig(NodeKind::DescSigPunctuation, ",", "p", line)?;
                         builder.sig(NodeKind::DescSigSpace, " ", "w", line)?;
                     }
-                    let token = SigToken::reference("cpp", arg.clone(), "type", "cpp-type");
+                    // Upstream renders a template argument through its AST:
+                    // the base name becomes a `type` reference while pointer /
+                    // reference decorations are plain punctuation. Keeping
+                    // the whole string (`T*`) as a target creates an
+                    // unresolvable xref in nitpicky mode.
+                    let base = arg.trim_end_matches(|ch: char| ch == '*' || ch == '&' || ch.is_whitespace());
+                    let decorations = &arg[base.len()..];
+                    let token = SigToken::reference("cpp", base.to_owned(), "type", "cpp-type");
                     builder.emit(&token, line)?;
+                    if !decorations.is_empty() {
+                        builder.sig(NodeKind::DescSigPunctuation, decorations, "p", line)?;
+                    }
                 }
                 builder.sig(NodeKind::DescSigPunctuation, ">", "p", line)?;
             }
@@ -538,8 +548,16 @@ fn build_signature_into(
             if let Ok(node) = builder.doc.get_mut(addname) {
                 node.attrs.set_str("xml:space", "preserve");
             }
-            let token = SigToken::reference("cpp", segment.text.clone(), "identifier", "cpp-identifier");
-            builder.emit(&token, addname)?;
+            if objtype == "alias" {
+                // Upstream's `cpp:alias` renders the *found declaration's*
+                // signature; the argument's qualifier segments never become
+                // new link targets. Emitting bare `cpp:identifier` refs here
+                // would point at namespaces, which are not objects.
+                builder.sig(NodeKind::DescSigName, &segment.text, "n", addname)?;
+            } else {
+                let token = SigToken::reference("cpp", segment.text.clone(), "identifier", "cpp-identifier");
+                builder.emit(&token, addname)?;
+            }
             if !segment.sep_after.is_empty() {
                 builder.sig(NodeKind::DescSigPunctuation, &segment.sep_after, "p", addname)?;
             }
@@ -593,7 +611,6 @@ fn build_signature_into(
     // Annotate signature xrefs with the read scope (namespace + nested scope).
     let scope_text = scope.qualified("");
     annotate_scope(builder.doc, signature_id, &scope_text);
-    let _ = objtype;
     Ok(())
 }
 

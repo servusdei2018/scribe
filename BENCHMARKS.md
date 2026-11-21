@@ -12,8 +12,9 @@
 > with the authoritative commands (`RUNS=5 PAGES=40 ./scripts/bench.sh`,
 > `RUNS=3 PAGES=150 ./scripts/bench.sh`). Final audited numbers: **11.00× @150p
 > (53,520 KB peak RSS)**, clearing the ≥10.0× speedup and <55,000 KB RSS gates,
-> and **13.20× @40p (32,372 KB)**. The full `sphinx/doc` self-host exits 0 with
-> **24 warnings** and 159 HTML files on this checkout. An independent Phase 70
+> and **13.20× @40p (32,372 KB)**. The v2.0.1 self-host exits 0 with
+> **0 warnings** and 158 HTML files on this checkout (the 24-warning figure
+> below is the historical v2.0.0 audit). An independent Phase 70
 > re-measurement (recorded in §"Phase 66–70 final audited measurements" below)
 > obtained 11.36× @150p / 53,016 KB, corroborating the audited figures. All
 > Phase 32/36/40 figures below remain historical measurements taken on this
@@ -190,9 +191,10 @@ source pages plus `search.html`, `genindex.html`, `py-modindex.html`).
 
 The Phase 40 self-host emitted **419 warnings** in both modes — dominated by
 unresolved cross-references, i.e. tracked conformance gaps, not parser/writer
-crashes. Phases 41–65 closed those gaps: the **final Phase 70 audit records
-24 warnings** with exit 0 (see §"Phase 66–70 final audited measurements"
-below). The older "443 warnings" figure in earlier phase notes was stale for
+crashes. Phases 41–65 closed those gaps: the **Phase 70 audit recorded 24
+warnings** with exit 0 (see §"Phase 66–70 final audited measurements" below),
+and the v2.0.1 autodoc/domain fixes brought the self-host to **0 warnings**.
+The older "443 warnings" figure in earlier phase notes was stale for
 its `HEAD`; the 419 figure is the historical Phase 40 measurement. Phase 32
 reduced peak memory on the real upstream tree by ~32%; the unmodified exit-0
 build is now the norm.
@@ -288,11 +290,12 @@ using the unmodified `sphinx13` theme:
 
 | Build | Exit | Warnings | HTML files |
 |---|---:|---:|---:|
-| unmodified `sphinx13` theme (`-E -q -c sphinx/doc`) | 0 | **24** (≤ 25 gate) | 159 |
+| unmodified `sphinx13` theme (`-E -q -c sphinx/doc`) | 0 | **24** (≤ 25 gate, v2.0.0) | 159 |
 
-The 159 HTML files comprise 156 `.rst` source pages in this checkout plus
-`search.html`, `genindex.html` and `py-modindex.html`; earlier docs quoted 158
-from a checkout with 155 source pages. `cargo test -p scribe-cli --test selfhost`
-passes (2 tests: terminates without panicking; unmodified `sphinx13` theme
-actually used). The 24 warnings are unresolved cross-references/toctree
-notices — tracked semantic gaps, not parser/writer failures.
+The v2.0.0 audit counted 156 `.rst` source pages (a stale, untracked
+`install.rst` scratch page was present) plus `search.html`, `genindex.html`
+and `py-modindex.html`. v2.0.1 removed that scratch page and resolved all 23
+remaining reference warnings, so the self-host now builds **155 source pages /
+158 HTML files with 0 warnings**. `cargo test -p scribe-cli --test selfhost`
+passes 3 tests: terminates without panicking, unmodified `sphinx13` theme
+actually used, and the zero-warning gate.

@@ -5,11 +5,12 @@ documentation engine. scribe reads the same reStructuredText / MyST sources
 and `conf.py`, and exposes a `sphinx-build`-compatible command line — without
 requiring Python at runtime for the common path.
 
-> **Status:** v2.0.0 (final release). 11 crates, 1,154 tests, 15+ builders,
-> ten domains/parser families, a live-reload dev server and a conformance
-> harness. See `STATUS.md` for the full phase ledger and `CONFORMANCE.md` for
-> the measured **100.0%** upstream semantic-parity metric (39 applicable
-> fixtures: 39 pass / 0 partial / 0 fail / 0 skip, every fixture at 1.000).
+> **Status:** v2.0.1 (post-release polish). 11 crates, 1,161 tests, 15+
+> builders, ten domains/parser families, a live-reload dev server and a
+> conformance harness. See `STATUS.md` for the full phase ledger and
+> `CONFORMANCE.md` for the measured **100.0%** upstream semantic-parity metric
+> (39 applicable fixtures: 39 pass / 0 partial / 0 fail / 0 skip, every fixture
+> at 1.000).
 
 > **Phase 41–70 close-out:** Phases 41–60 closed every conformance divergence
 > (BOM/title/docinfo, prolog, default-role, glossary, nested lists/tables,
@@ -24,6 +25,12 @@ requiring Python at runtime for the common path.
 > the full `sphinx/doc` self-host exiting 0 with 24 warnings. All
 > check/clippy/debug/release gates are green. Version `2.0.0` is inherited by
 > all 11 crates from the workspace manifest.
+
+> **v2.0.1 polish:** the `sphinx/doc` self-host now completes with **zero
+> warnings** (autodoc class context, re-export canonical names, missing-source
+> member registration, C++ alias/template xrefs, and a stale scratch page were
+> resolved). A five-repository real-world corpus benchmark is published in
+> `CORPUS_BENCHMARKS.md`; the workspace version is now `2.0.1`.
 
 ## Quickstart
 

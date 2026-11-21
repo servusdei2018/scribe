@@ -120,6 +120,20 @@ fn alabaster_legacy_theme_conf_is_parsed() {
 }
 
 #[test]
+fn legacy_theme_conf_supports_indented_continuations() {
+    // furo's theme.conf splits `sidebars` across indented lines.
+    let temp = TempThemes::new();
+    temp.write_conf(
+        "cont",
+        "[theme]\ninherit = basic\nstylesheet = cont.css\nsidebars =\n  brand.html,\n  search.html,\n  nav.html\n[options]\nfoo = bar\n",
+    );
+    let theme = temp.manager().get_theme("cont").expect("cont theme");
+    assert_eq!(theme.stylesheets, vec!["cont.css"]);
+    assert_eq!(theme.sidebars, vec!["brand.html", "search.html", "nav.html"]);
+    assert_eq!(theme.option("foo"), Some("bar"));
+}
+
+#[test]
 fn multi_level_inheritance_flattens_root_first() {
     let temp = TempThemes::new();
     temp.write(

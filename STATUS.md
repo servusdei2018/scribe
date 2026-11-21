@@ -2674,3 +2674,47 @@ with `cargo check`. All six top-level docs were updated for the v2.0.0 release;
 by the conformance test and already reports the correct audited figures.
 **This phase creates no commit and no tag** — the orchestrator audits, commits
 `phase-70: ...` and creates the annotated `v2.0.0` tag.
+
+## v2.0.1 — zero-warning self-host and real-world corpus benchmark
+
+The v2.0.1 polish pass closed the remaining `sphinx/doc` self-host warnings
+and validated scribe against five real-world documentation trees.
+
+### Part A — 24 → 0 self-host warnings
+
+- Removed a stale, untracked, 0-byte `sphinx/doc/install.rst` scratch page
+  (upstream renamed it to `usage/installation.rst`): eliminates
+  `toc.not_included` and restores 155 source pages.
+- Autodoc now derives class context from the document tree for standalone
+  `automethod`/`autoattribute` directives nested inside hand-written classes,
+  fixes public canonical names for re-exported objects, and registers
+  fully-qualified members whose Python source is not available offline.
+  Autodoc member selection, property rendering and instance-attribute
+  docstrings were aligned with upstream, removing all 20 `py:*` warnings.
+- C++ alias qualifiers are no longer emitted as bare `cpp:identifier` xrefs,
+  and template arguments are tokenized so `T*` references the `T`
+  template parameter and renders `*` as punctuation.
+- Added regression tests for autodoc, the C++ domain, theme metadata and a
+  zero-warning self-host assertion.
+
+### Part B — 5-repo corpus benchmark
+
+`scripts/corpus_bench.sh` shallow-clones flask, requests, pytest, sqlalchemy
+and django, builds each with both engines (unmodified `conf.py`, 1 warmup +
+3 measured cold runs), and records exit status, warnings, HTML pages, median
+wall time and peak RSS. The oracle venv was bootstrapped with the third-party
+extensions each project needs; Django was installed from its `main` branch and
+`zzzeeksphinx` from Git to satisfy version requirements. Results are published
+in `CORPUS_BENCHMARKS.md`: all 10 builds exited 0, with cold speedups of
+6.40× (flask), 7.33× (requests), 15.11× (pytest), 55.90× (sqlalchemy) and
+5.82× (django). Real-world gaps (third-party directives scribe does not
+execute, page-count differences, higher RSS on django) are documented there.
+
+### Gate status (v2.0.1)
+
+| Gate | Requirement | Measured | Status |
+|---|---|---:|---|
+| Self-host warnings | 0 | **0** (155 pages / 158 HTML) | **PASS** |
+| Aggregate conformance parity | 100% | 100.0% (39/39 at 1.000) | **PASS** |
+| Check / clippy / debug / release tests | 100% green | see final gate run | **PASS** |
+| CLI version | `scribe 2.0.1` | `scribe 2.0.1` | **PASS** |

@@ -26,16 +26,20 @@ fn names(members: Vec<&Member>) -> Vec<String> {
 }
 
 #[test]
-fn default_filters_private_special_and_undocumented() {
+fn default_documents_no_members_unless_opted_in() {
+    // Upstream's `autoclass`/`automodule` document only the object itself
+    // unless `:members:` (or `autodoc_default_options`) opts in.
     let module = fixture_module();
-    let selected = select_members(&module.members, &AutoOptions::default(), None);
-    assert_eq!(names(selected), vec!["Beta", "alpha", "zebra"]);
+    assert!(select_members(&module.members, &AutoOptions::default(), None).is_empty());
+    let options = AutoOptions { members: Some(Vec::new()), ..AutoOptions::default() };
+    assert_eq!(names(select_members(&module.members, &options, None)), vec!["Beta", "alpha", "zebra"]);
 }
 
 #[test]
 fn all_members_and_private_toggles() {
     let module = fixture_module();
     let options = AutoOptions {
+        members: Some(Vec::new()),
         undoc_members: true,
         private_members: true,
         special_members: true,
@@ -63,8 +67,12 @@ fn explicit_members_and_exclusion() {
 fn all_list_filters_when_present() {
     let module = fixture_module();
     let all = module.all.as_deref();
-    assert_eq!(names(select_members(&module.members, &AutoOptions::default(), all)), vec!["alpha", "zebra"]);
+    // `__all__` only filters members that were opted in with `:members:`.
+    assert!(select_members(&module.members, &AutoOptions::default(), all).is_empty());
+    let options = AutoOptions { members: Some(Vec::new()), ..AutoOptions::default() };
+    assert_eq!(names(select_members(&module.members, &options, all)), vec!["alpha", "zebra"]);
     let options = AutoOptions {
+        members: Some(Vec::new()),
         ignore_module_all: true,
         ..AutoOptions::default()
     };
@@ -75,6 +83,7 @@ fn all_list_filters_when_present() {
 fn alphabetical_and_groupwise_orders() {
     let module = fixture_module();
     let mut options = AutoOptions {
+        members: Some(Vec::new()),
         undoc_members: true,
         member_order: MemberOrder::Alphabetical,
         ..AutoOptions::default()
