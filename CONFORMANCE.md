@@ -28,7 +28,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 100.0% over 35 applicable fixtures (35 pass, 0 partial, 0 fail, 4 skip)
+## Aggregate semantic parity: 100.0% over 36 applicable fixtures (36 pass, 0 partial, 0 fail, 3 skip)
 
 ## Per-fixture results
 
@@ -40,7 +40,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-default_role | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
 | test-directive-code | html | directive | pass | 1.000 | 1.000 | 1.000 | 26/26 | 0/0 | — |
 | test-directive-csv-table | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
-| test-directive-include | pseudoxml | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
+| test-directive-include | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-directive-only | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 10/10 | 0/0 | — |
 | test-directives-admonition-collapse | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 7/7 | 0/0 | — |
 | test-directives-raw | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
@@ -76,7 +76,6 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 ## Skipped fixtures
 
-- `test-directive-include` (pseudoxml): include paths assume Sphinx's temp testroot layout, not a bare roots/ directory
 - `test-ext-autodoc` (pseudoxml): import-heavy third-party Python extension fixture
 - `test-ext-graphviz` (html): requires the external `dot`/graphviz binary
 - `test-linkcheck` (html): requires outbound network access for URL checks

@@ -62,7 +62,7 @@ const FIXTURES: &[Fixture] = &[
     Fixture { name: "test-prolog", builder: "pseudoxml", category: "parser", skip: None },
     Fixture { name: "test-default_role", builder: "pseudoxml", category: "parser", skip: None },
     Fixture { name: "test-directive-csv-table", builder: "pseudoxml", category: "directive", skip: None },
-    Fixture { name: "test-directive-include", builder: "pseudoxml", category: "directive", skip: Some("include paths assume Sphinx's temp testroot layout, not a bare roots/ directory") },
+    Fixture { name: "test-directive-include", builder: "pseudoxml", category: "directive", skip: None },
     Fixture { name: "test-directive-only", builder: "pseudoxml", category: "directive", skip: None },
     Fixture { name: "test-directives-raw", builder: "pseudoxml", category: "directive", skip: None },
     Fixture { name: "test-directives-admonition-collapse", builder: "pseudoxml", category: "directive", skip: None },
@@ -201,6 +201,11 @@ enum Scaffold {
     /// Copy `test-directive-csv-table` and write an `index.rst` that drives
     /// every `csv-table` option, plus a minimal `conf.py`.
     CsvTable,
+    /// Copy `test-directive-include` and write an `index.rst` that drives
+    /// relative, rooted, nested, literal and line-ranged includes (plus a
+    /// missing-file diagnostic). The auxiliary `.rst` sources are excluded
+    /// from standalone discovery, matching upstream's direct-string parse.
+    Include,
 }
 
 /// Returns the scaffold (if any) upstream's pytest harness supplies for a
@@ -208,6 +213,7 @@ enum Scaffold {
 fn scaffold_for(fixture: &Fixture) -> Option<Scaffold> {
     match fixture.name {
         "test-directive-csv-table" => Some(Scaffold::CsvTable),
+        "test-directive-include" => Some(Scaffold::Include),
         _ => None,
     }
 }
@@ -267,6 +273,34 @@ fn prepare_scaffold(scaffold: Scaffold, fixture_root: &Path, tag: &str) -> PathB
             index.push_str(".. csv-table::\n   :widths: 10, 20, 30\n   :stub-columns: 1\n\n   a,b,c\n   d,e,f\n\n");
             index.push_str("Delimiter, quote, escape\n------------------------\n\n");
             index.push_str(".. csv-table::\n   :delim: ;\n   :quote: '\n   :escape: \\\n\n   'a;b';'c'\n");
+            fs::write(workspace.join("index.rst"), index)
+                .unwrap_or_else(|error| panic!("cannot write scaffold index.rst: {error}"));
+        }
+        Scaffold::Include => {
+            // Upstream's test parses an RST string directly with the testroot
+            // supplying foo.rst / bar.txt / text.txt / baz/baz.rst. Drive the
+            // same include directives through a real build. Excluding the
+            // auxiliary `.rst` sources keeps them from being parsed as
+            // standalone documents, exactly as in upstream's direct parse.
+            fs::write(
+                workspace.join("conf.py"),
+                "project = 'test-directive-include'\nexclude_patterns = ['_build', 'baz/baz.rst', 'foo.rst']\n",
+            )
+            .unwrap_or_else(|error| panic!("cannot write scaffold conf.py: {error}"));
+            let mut index = String::new();
+            index.push_str("Include conformance\n===================\n\n");
+            index.push_str("Nested relative include\n-----------------------\n\n");
+            index.push_str(".. include:: baz/baz.rst\n\n");
+            index.push_str("Rooted include\n--------------\n\n");
+            index.push_str(".. include:: /foo.rst\n\n");
+            index.push_str("Line range include\n------------------\n\n");
+            index.push_str(".. include:: baz/baz.rst\n   :start-line: 4\n\n");
+            index.push_str("Literal include\n---------------\n\n");
+            index.push_str(".. include:: text.txt\n   :literal:\n\n");
+            index.push_str("Relative include with roles\n---------------------------\n\n");
+            index.push_str(".. include:: bar.txt\n\n");
+            index.push_str("Missing include\n---------------\n\n");
+            index.push_str(".. include:: missing-file.rst\n");
             fs::write(workspace.join("index.rst"), index)
                 .unwrap_or_else(|error| panic!("cannot write scaffold index.rst: {error}"));
         }

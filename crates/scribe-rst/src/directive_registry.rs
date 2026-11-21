@@ -65,6 +65,12 @@ pub struct Context {
     pub current_module: Arc<RwLock<Option<String>>>,
     /// Dynamic external-link roles installed by `sphinx.ext.extlinks`.
     pub extlinks: crate::extlinks::ExtLinkRoles,
+    /// Files successfully read by the `include` directive during a resolve
+    /// pass. Shared through clones so nested includes accumulate here; the
+    /// builder copies this into `BuildEnvironment::included` for rebuild
+    /// tracking. Paths are absolute (or source-root relative when no source
+    /// directory is configured), mirroring `env.note_included`.
+    pub included_paths: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl Default for Context {
@@ -84,6 +90,7 @@ impl Default for Context {
             default_domain: Arc::new(RwLock::new(None)),
             current_module: Arc::new(RwLock::new(None)),
             extlinks: crate::extlinks::empty_roles(),
+            included_paths: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -97,6 +104,7 @@ impl std::fmt::Debug for Context {
             .field("source_name", &self.source_name)
             .field("tab_width", &self.tab_width)
             .field("substitution_directives", &self.substitution_directives)
+            .field("included_paths", &self.included_paths.read().map_or(0, |paths| paths.len()))
             .finish_non_exhaustive()
     }
 }
@@ -125,12 +133,22 @@ impl Context {
     /// (only `utf-8` and the latin-1 family are distinguished; docutils' other
     /// aliases map to UTF-8).
     pub fn read_include_encoded(&self, path: &str, encoding: &str) -> Result<String, DirectiveError> {
-        self.include_resolver.resolve_encoded(
+        let text = self.include_resolver.resolve_encoded(
             self.source_dir.as_deref(),
             self.source_name.as_deref(),
             path,
             encoding,
-        )
+        )?;
+        // Record the filesystem path the default resolver would use. Nested
+        // includes are resolved by the same outer fixpoint pass with a cloned
+        // context, so the shared collector captures the whole dependency chain.
+        let resolved = resolve_include_path(self.source_dir.as_deref(), self.source_name.as_deref(), path);
+        if let Ok(mut paths) = self.included_paths.write() {
+            if !paths.contains(&resolved) {
+                paths.push(resolved);
+            }
+        }
+        Ok(text)
     }
 }
 
@@ -161,42 +179,37 @@ pub trait IncludeResolver: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Default [`IncludeResolver`]: reads UTF-8 files relative to the *including
-/// document* (Sphinx/docutils semantics), falling back to the source dir.
+/// Default [`IncludeResolver`]: reads UTF-8 files using Sphinx's path rules.
 #[derive(Debug, Clone, Copy)]
 pub struct FsIncludeResolver;
 
+/// Resolve an `include`/`literalinclude`/`raw.file` argument the way
+/// `sphinx.environment.BuildEnvironment.relfn2path` does:
+///
+/// * a leading `/` (or `\\`) is a *rooted* path, interpreted relative to the
+///   source directory — never to the filesystem root;
+/// * every other path is relative to the directory of the document currently
+///   being parsed. Sphinx keeps `env.docname` unchanged while docutils splices
+///   included text, so a nested `.. include:: foo.rst` inside `baz/baz.rst`
+///   also resolves against the *including document's* directory, not `baz/`;
+/// * without a configured source directory the path is used as-is (relative
+///   callers still anchor at the current document's parent when one is known).
 fn resolve_include_path(source_dir: Option<&Path>, source_name: Option<&str>, path: &str) -> PathBuf {
-    // Sphinx treats a leading `/` in `include`/`literalinclude` paths as
-    // relative to the source directory (confdir), not the filesystem root.
-    let normalized = path.strip_prefix('/').unwrap_or(path);
-    let candidate = Path::new(normalized);
-    let full = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        // Docutils anchors relative includes at the document containing the
-        // directive, not the project root. When a docname is known, try
-        // `<source_dir>/<doc-parent>/<path>` first, then fall back to
-        // `<source_dir>/<path>` for callers passing root-relative paths.
-        let doc_relative = source_dir.zip(source_name).and_then(|(dir, name)| {
-            Path::new(name).parent().map(|parent| dir.join(parent).join(normalized))
-        });
-        doc_relative
-            .or_else(|| source_dir.map(|dir| dir.join(normalized)))
-            .or_else(|| {
-                source_name
-                    .and_then(|name| Path::new(name).parent())
-                    .map(|parent| parent.join(normalized))
-            })
-            .unwrap_or_else(|| candidate.to_path_buf())
-    };
-    if full.is_file() {
-        full
-    } else if let Some(dir) = source_dir {
-        let root_relative = dir.join(normalized);
-        if root_relative.is_file() { root_relative } else { full }
-    } else {
-        full
+    let rooted = path.starts_with('/') || path.starts_with('\\');
+    let stripped = if rooted { &path[1..] } else { path };
+    if rooted {
+        return match source_dir {
+            Some(dir) => dir.join(stripped),
+            None => PathBuf::from(stripped),
+        };
+    }
+    let candidate = Path::new(stripped);
+    let parent = source_name.and_then(|name| Path::new(name).parent()).filter(|p| !p.as_os_str().is_empty());
+    match (source_dir, parent) {
+        (Some(dir), Some(parent)) => dir.join(parent).join(candidate),
+        (Some(dir), None) => dir.join(candidate),
+        (None, Some(parent)) => parent.join(candidate),
+        (None, None) => candidate.to_path_buf(),
     }
 }
 
@@ -836,5 +849,20 @@ mod tests {
         let resolver = FsIncludeResolver;
         let result = resolver.resolve(None, None, "/definitely/not/a/file");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn include_paths_follow_sphinx_relfn2path_rules() {
+        let root = Path::new("/project/src");
+        // A leading slash is source-root relative, never filesystem-absolute.
+        assert_eq!(resolve_include_path(Some(root), Some("index"), "/shared/foo.rst"), root.join("shared/foo.rst"));
+        // Relative paths anchor at the containing document's directory.
+        assert_eq!(resolve_include_path(Some(root), Some("docs/index"), "inc.txt"), root.join("docs/inc.txt"));
+        // A document at the root resolves relative paths at the source root.
+        assert_eq!(resolve_include_path(Some(root), Some("index"), "inc.txt"), root.join("inc.txt"));
+        // Nested includes keep the original document as the anchor.
+        assert_eq!(resolve_include_path(Some(root), Some("index"), "baz/baz.rst"), root.join("baz/baz.rst"));
+        // Without a source directory, fall back to the document's parent.
+        assert_eq!(resolve_include_path(None, Some("docs/index"), "inc.txt"), Path::new("docs").join("inc.txt"));
     }
 }

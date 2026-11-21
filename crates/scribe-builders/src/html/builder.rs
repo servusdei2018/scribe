@@ -384,7 +384,7 @@ pub fn build_with_flavor(
                     }
                     document.metadata.title = Some("Generated section".to_owned());
                 }
-                parsed.insert(docname.clone(), ParseOutcome { document });
+                parsed.insert(docname.clone(), ParseOutcome { document, included: Vec::new() });
                 continue;
             }
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
@@ -439,9 +439,20 @@ pub fn build_with_flavor(
                 docname: docname.clone(),
                 doctree: doctree_json(docname, &output.document),
             });
-            parsed.insert(docname.clone(), ParseOutcome { document: output.document });
+            parsed.insert(docname.clone(), ParseOutcome {
+                document: output.document,
+                included: resolve_report.included,
+            });
         }
         profile::mark("parse");
+
+        // Mirror `env.note_included`: an edit to an included file must
+        // invalidate every document that read it.
+        for (docname, outcome) in &parsed {
+            for path in &outcome.included {
+                env.note_included(docname, path);
+            }
+        }
 
         if extensions.contains("extlinks") {
             let docs: BTreeMap<String, scribe_ast::Document> = parsed
@@ -516,7 +527,12 @@ pub fn build_with_flavor(
             // snapshot the HTML builder emits spurious "undefined label"
             // warnings for named code blocks.
             for (docname, outcome) in &parsed {
-                env.record_document(docname, &outcome.document, BTreeMap::new());
+                let included_digests = env
+                    .all_docs
+                    .get(docname)
+                    .map(|meta| meta.included_digests.clone())
+                    .unwrap_or_default();
+                env.record_document(docname, &outcome.document, included_digests);
             }
             // Populate the environment's resolved toctree/figure-number state.
             let toctrees = collect_toctrees_with_sources(env, config, &BTreeMap::new());
@@ -1019,6 +1035,9 @@ pub fn build_with_flavor(
 
 struct ParseOutcome {
     document: Document,
+    /// Include targets read while parsing this document (nested ones
+    /// included), forwarded to `BuildEnvironment::note_included`.
+    included: Vec<std::path::PathBuf>,
 }
 
 /// Serializable snapshot of the effective configuration for `config-inited`.

@@ -75,6 +75,7 @@ impl LatexBuilder {
 /// One parsed document awaiting rendering.
 struct ParsedDoc {
     document: Document,
+    included: Vec<PathBuf>,
 }
 
 /// A `latex_documents` entry.
@@ -186,7 +187,15 @@ fn build_impl(
         if output.document.metadata.title.is_none() {
             output.document.metadata.title = extract_title(&output.document);
         }
-        parsed.insert(docname.clone(), ParsedDoc { document: output.document });
+        parsed.insert(docname.clone(), ParsedDoc {
+            document: output.document,
+            included: resolve_report.included,
+        });
+    }
+    for (docname, outcome) in &parsed {
+        for path in &outcome.included {
+            env.note_included(docname, path);
+        }
     }
 
     // ---- domain registration + transforms --------------------------------

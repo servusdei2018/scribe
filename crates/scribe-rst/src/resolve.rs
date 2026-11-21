@@ -92,6 +92,10 @@ pub struct ResolveReport {
     pub nested_parses: usize,
     /// Recoverable problems (unknown directive, bad options, ...).
     pub unresolved: Vec<ResolveIssue>,
+    /// Files read by `include` directives (including nested includes). The
+    /// builder forwards these to `BuildEnvironment::note_included` so editing
+    /// an included file invalidates every document that pulled it in.
+    pub included: Vec<std::path::PathBuf>,
 }
 
 impl ResolveReport {
@@ -222,7 +226,12 @@ pub fn resolve_output(
         .iter()
         .map(|(id, info)| (id.0, info.clone()))
         .collect();
-    let report = resolve_pending(&mut output.document, registry, &local);
+    let mut report = resolve_pending(&mut output.document, registry, &local);
+    report.included = local
+        .included_paths
+        .write()
+        .map(|mut paths| std::mem::take(&mut *paths))
+        .unwrap_or_default();
     let live: Vec<bool> = output
         .inline_xrefs()
         .iter()
@@ -535,6 +544,17 @@ fn resolve_one(
     let produced = match directive.run(&mut ctx) {
         Ok(produced) => produced,
         Err(error) => {
+            // Sphinx's `Include` reports unreadable files as a docutils system
+            // message and leaves no directive node in the doctree. Mirror both
+            // the exact two-line diagnostic and the node removal so the
+            // pseudoxml tag multiset stays identical to the oracle's.
+            let include_error = name.eq_ignore_ascii_case("include")
+                && matches!(error, crate::DirectiveError::IncludeIo { .. });
+            let raw = if include_error {
+                docutils_include_error(&name, line, &error, context)
+            } else {
+                None
+            };
             push_issue(
                 report,
                 &name,
@@ -544,6 +564,12 @@ fn resolve_one(
                 error.code(),
                 context,
             );
+            if raw.is_some() {
+                if let Some(issue) = report.unresolved.last_mut() {
+                    issue.raw_message = raw;
+                }
+                let _ = document.remove_node(id);
+            }
             return false;
         }
     };
@@ -818,6 +844,38 @@ fn docutils_option_error(
         raw_value,
         choices,
         block.join("\n"),
+    ))
+}
+
+/// Reconstruct docutils' two-line diagnostic for an unreadable
+/// `.. include::` target. Sphinx's `Include` resolves the argument to an
+/// absolute path first, then hands the failure to docutils, which reports it
+/// as a system message with the `[docutils]` suffix.
+fn docutils_include_error(
+    name: &str,
+    line: u32,
+    error: &crate::DirectiveError,
+    context: &Context,
+) -> Option<String> {
+    let crate::DirectiveError::IncludeIo { path, detail } = error else {
+        return None;
+    };
+    let source_name = context.source_name.as_deref().unwrap_or("index");
+    let candidate = context.source_dir.as_ref()?.join(format!("{source_name}.rst"));
+    let source = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+    // Rust's OS error strings end in ` (os error N)`; docutils prints the
+    // Python-style `[Errno N] <message>` form instead.
+    let python_detail = if let Some((message, tail)) = detail.rsplit_once(" (os error ") {
+        format!("[Errno {}] {message}", tail.trim_end_matches(')'))
+    } else {
+        detail.clone()
+    };
+    Some(format!(
+        "{}:{}: ERROR: Problems with \"{}\" directive path:\n\
+         InputError: {python_detail}: '{path}'. [docutils]",
+        source.display(),
+        line,
+        name,
     ))
 }
 

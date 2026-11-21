@@ -220,6 +220,22 @@ fn include_without_literal_parses_nested_blocks() {
 }
 
 #[test]
+fn include_reports_nested_dependencies() {
+    let root = std::env::temp_dir().join(format!("scribe-include-deps-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create temp dir");
+    std::fs::write(root.join("outer.rst"), "Outer\n=====\n\n.. include:: inner.inc\n")
+        .expect("write outer include");
+    std::fs::write(root.join("inner.inc"), "Inner text.\n").expect("write inner include");
+    let mut output = parse(".. include:: outer.rst\n");
+    let context = Context::new(&root, Tags::new());
+    let report = resolve_output(&mut output, &DirectiveRegistry::builtin(), &context);
+    assert!(report.is_clean(), "{:?}", report.unresolved);
+    assert!(report.included.iter().any(|path| path.ends_with("outer.rst")), "{:?}", report.included);
+    assert!(report.included.iter().any(|path| path.ends_with("inner.inc")), "{:?}", report.included);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn include_error_is_recoverable_and_reported() {
     let (_, report, _) = resolve(".. include:: definitely-missing-file.rst\n");
     assert_eq!(report.issue_count(), 1);

@@ -341,7 +341,7 @@ pub fn prepare(
     // Parsing is CPU-bound per document; `rayon` keeps the read phase parallel.
     // Results are collected into a BTreeMap so downstream output is
     // deterministic regardless of completion order.
-    let parsed_entries: Vec<(String, Document, Vec<String>)> = docnames
+    let parsed_entries: Vec<(String, Document, Vec<String>, Vec<std::path::PathBuf>)> = docnames
         .par_iter()
         .filter_map(|docname| {
             let path = env.found_docs.get(docname)?;
@@ -352,6 +352,7 @@ pub fn prepare(
                         docname.clone(),
                         Document::new(Some(docname.clone())),
                         vec![format!("cannot read source for {docname}: {error}")],
+                        Vec::new(),
                     ))
                 }
             };
@@ -380,7 +381,7 @@ pub fn prepare(
                 // Other custom parsers produce no portable doctree content.
                 let mut document = Document::new(Some(docname.clone()));
                 document.metadata.docname = Some(docname.clone());
-                return Some((docname.clone(), document, Vec::new()));
+                return Some((docname.clone(), document, Vec::new(), Vec::new()));
             }
             if parser_name == "foo" {
                 // Custom source parsers (e.g. `parsermod.Parser` registered
@@ -402,7 +403,7 @@ pub fn prepare(
                     let _ = document.append_child(document.root, section);
                     document.metadata.title = Some("Generated section".to_owned());
                 }
-                return Some((docname.clone(), document, Vec::new()));
+                return Some((docname.clone(), document, Vec::new(), Vec::new()));
             }
 
             let mut parse_options = ParseOptions::new(Some(docname.clone()));
@@ -436,12 +437,19 @@ pub fn prepare(
             if output.document.metadata.title.is_none() {
                 output.document.metadata.title = extract_title(&output.document);
             }
-            Some((docname.clone(), output.document, doc_warnings))
+            Some((docname.clone(), output.document, doc_warnings, resolve_report.included))
         })
         .collect();
 
     let mut parsed = BTreeMap::new();
-    for (name, document, doc_warnings) in parsed_entries {
+    // Record include edges (including nested ones) before snapshotting each
+    // doctree, so `included_digests` participates in the rebuild hash.
+    for (docname, _, _, included) in &parsed_entries {
+        for path in included {
+            env.note_included(docname, path);
+        }
+    }
+    for (name, document, doc_warnings, _) in parsed_entries {
         warnings.extend(doc_warnings);
         parsed.insert(name, document);
     }
@@ -496,7 +504,12 @@ pub fn prepare(
     // collector writes onto it) through `env.get_doctree()`. Recording here
     // makes that state available during the read/resolved transform passes.
     for (docname, document) in &parsed {
-        env.record_document(docname, document, BTreeMap::new());
+        let included_digests = env
+            .all_docs
+            .get(docname)
+            .map(|meta| meta.included_digests.clone())
+            .unwrap_or_default();
+        env.record_document(docname, document, included_digests);
     }
     let sources: BTreeMap<String, Arc<String>> = BTreeMap::new();
     let toctrees = collect_toctrees_with_sources(env, config, &sources);

@@ -126,6 +126,7 @@ impl DoctestBuilder {
         let rst_prolog = relevant.rst_prolog.clone();
         let rst_epilog = relevant.rst_epilog.clone();
         let mut documents = Vec::new();
+        let mut included_by_doc: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
         for docname in &docnames {
             let Some(path) = env.found_docs.get(docname) else { continue };
             let raw = match fs::read_to_string(path) {
@@ -149,6 +150,9 @@ impl DoctestBuilder {
             let registry = DirectiveRegistry::builtin();
             register_directives(&registry);
             let resolve_report = resolve_output(&mut output, &registry, &ctx);
+            if !resolve_report.included.is_empty() {
+                included_by_doc.push((docname.clone(), resolve_report.included));
+            }
             for issue in &resolve_report.unresolved {
                 warnings.push(issue.warning_message(docname));
             }
@@ -161,6 +165,11 @@ impl DoctestBuilder {
             let groups = group_codes(codes);
             if !groups.is_empty() {
                 documents.push(DoctestDocument { docname: docname.clone(), groups: groups.into_values().collect() });
+            }
+        }
+        for (docname, included) in included_by_doc {
+            for path in included {
+                env.note_included(&docname, &path);
             }
         }
 
