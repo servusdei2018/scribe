@@ -657,7 +657,7 @@ fn resolve_substitutions(
             &info.name,
             &info.arguments,
             &info.options,
-            "",
+            &info.content,
             line,
         );
         payload.span = Some(span);

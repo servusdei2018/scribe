@@ -30,7 +30,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 100.0% over 37 applicable fixtures (37 pass, 0 partial, 0 fail, 2 skip)
+## Aggregate semantic parity: 100.0% over 38 applicable fixtures (38 pass, 0 partial, 0 fail, 1 skip)
 
 ## Per-fixture results
 
@@ -54,7 +54,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-domain-py-xref-type-alias | pseudoxml | domain | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
 | test-domain-py-xref-warning | pseudoxml | domain | pass | 1.000 | 1.000 | 1.000 | 6/6 | 0/0 | — |
 | test-ext-autodoc | pseudoxml | domain | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
-| test-ext-graphviz | html | directive | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
+| test-ext-graphviz | html | directive | pass | 1.000 | 1.000 | 1.000 | 26/26 | 0/0 | — |
 | test-footnotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 41/41 | 0/0 | — |
 | test-glossary | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-highlight_options | html | directive | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
@@ -79,7 +79,6 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 ## Skipped fixtures
 
 - `test-ext-autodoc` (pseudoxml): import-heavy third-party Python extension fixture
-- `test-ext-graphviz` (html): requires the external `dot`/graphviz binary
 
 ## Divergences by category
 

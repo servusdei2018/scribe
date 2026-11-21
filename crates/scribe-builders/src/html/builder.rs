@@ -888,6 +888,7 @@ pub fn build_with_flavor(
         fs::write(&pygments_path, pygments).map_err(|e| HtmlError::io(&pygments_path, e))?;
         written.push(PathBuf::from("_static/pygments.css"));
         write_dark_pygments_css(&theme, outdir, &mut written)?;
+        write_graphviz_css(config, outdir, &mut written)?;
 
         if flavor.copy_source && config.get_bool("html_copy_source").unwrap_or(true) {
             written.extend(write_source_dumps(&source_paths, outdir)?);
@@ -1827,6 +1828,14 @@ fn page_context(
     for name in &theme.stylesheets {
         css.push(stylesheet(format!("_static/{name}?v={}", asset_hash(outdir, &format!("_static/{name}"), config_hash))));
     }
+    // `sphinx.ext.graphviz` calls `app.add_css_file('graphviz.css')` and copies
+    // its packaged stylesheet into `html_static_path` on config-inited.
+    if graphviz_enabled(config) {
+        css.push(stylesheet(format!(
+            "_static/graphviz.css?v={}",
+            asset_hash(outdir, "_static/graphviz.css", config_hash)
+        )));
+    }
     ctx.css_files = css;
     ctx.script_files = vec![
         script("_static/documentation_options.js?v=".to_owned() + &asset_hash(outdir, "_static/documentation_options.js", config_hash)),
@@ -1843,6 +1852,33 @@ fn page_context(
         }
     }
     ctx
+}
+
+/// Whether the graphviz extension is configured (short or qualified name).
+fn graphviz_enabled(config: &Config) -> bool {
+    config
+        .get_strings("extensions")
+        .unwrap_or_default()
+        .iter()
+        .any(|name| name.rsplit('.').next().is_some_and(|short| short == "graphviz"))
+}
+
+/// Ship the stylesheet that `sphinx.ext.graphviz` adds via `add_css_file` and
+/// `config-inited`. Its contents mirror Sphinx's packaged `graphviz.css`.
+fn write_graphviz_css(config: &Config, outdir: &Path, written: &mut Vec<PathBuf>) -> Result<()> {
+    if !graphviz_enabled(config) {
+        return Ok(());
+    }
+    const CSS: &str = "/*\n * Sphinx stylesheet -- graphviz extension.\n */\n\n\
+        img.graphviz {\n    border: 0;\n    max-width: 100%;\n}\n\n\
+        object.graphviz {\n    max-width: 100%;\n}\n";
+    let path = outdir.join("_static/graphviz.css");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| HtmlError::io(parent, e))?;
+    }
+    fs::write(&path, CSS).map_err(|e| HtmlError::io(&path, e))?;
+    written.push(PathBuf::from("_static/graphviz.css"));
+    Ok(())
 }
 
 fn stylesheet(filename: String) -> minijinja::Value {
@@ -2104,6 +2140,7 @@ fn build_single_file(
     fs::write(&pygments_path, pygments).map_err(|e| HtmlError::io(&pygments_path, e))?;
     written.push(PathBuf::from("_static/pygments.css"));
     write_dark_pygments_css(theme, outdir, &mut written)?;
+    write_graphviz_css(config, outdir, &mut written)?;
 
     // Single-file builds still ship an inventory but no search page/index.
     let mut target_uris: BTreeMap<String, String> = order.iter()

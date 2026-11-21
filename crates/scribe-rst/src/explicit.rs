@@ -309,12 +309,26 @@ impl<'a> BlockParser<'a> {
                 argument_lines.push(trimmed.to_owned());
             }
         }
-        let replacement_arguments = argument_lines.join(" ").trim().to_owned();
+        // Docutils' `SubstitutionDef` state passes the substitution name as an
+        // `alt` preset to an embedded directive and treats the first non-option
+        // line as the directive argument, with the remaining lines as its body.
+        // Graphviz directives use that block form (`.. |g| digraph:: foo`
+        // followed by an indented dot source); inline-style replacements keep
+        // the historical "all lines joined" behaviour.
+        let embedded_block = matches!(replacement_directive, "digraph" | "graph" | "graphviz");
+        let (replacement_arguments, replacement_content) = if embedded_block {
+            let mut lines = argument_lines.iter();
+            let arguments = lines.next().map_or("", |line| line.trim()).to_owned();
+            let content = lines.map(|line| line.trim_end()).collect::<Vec<_>>().join("\n");
+            (arguments, content)
+        } else {
+            (argument_lines.join(" ").trim().to_owned(), String::new())
+        };
 
         let span = self.span_of(index, self.pos.max(index + 1));
         let line_no = self.line_number(index);
         let node = self.add(NodeKind::SubstitutionDefinition, parent, span, line_no)?;
-        self.set_list(node, "names", vec![name])?;
+        self.set_list(node, "names", vec![name.clone()])?;
         if replacement_directive == "raw" {
             // Docutils builds a `raw` node directly inside the substitution
             // definition (the format is the first argument, the dedented body
@@ -336,21 +350,34 @@ impl<'a> BlockParser<'a> {
         }
         if matches!(
             replacement_directive,
-            "replace" | "unicode" | "image" | "date"
+            "replace" | "unicode" | "image" | "date" | "digraph" | "graph" | "graphviz"
         ) {
+            if embedded_block {
+                // Mirror docutils' `alt=self.parent['names'][0]` preset.
+                sub_options.entry("alt".to_owned()).or_insert_with(|| name.clone());
+            }
             self.substitution_directives.push((
                 node,
                 crate::parser::SubstitutionDirective {
                     name: replacement_directive.to_ascii_lowercase(),
                     arguments: replacement_arguments.clone(),
                     options: sub_options,
+                    content: replacement_content,
                 },
             ));
         }
         // The replacement is parsed for inline markup (Docutils nests a parse
         // of the replacement text); nested substitution references remain as
-        // `SubstitutionReference` nodes for a later transform to expand.
-        self.add_inline_slice(&replacement_arguments, index, base_indent, node)?;
+        // `SubstitutionReference` nodes for a later transform to expand. A
+        // block directive is resolved later by its registered directive; seed
+        // the definition with the substitution name as a tracking placeholder
+        // so Phase 05 can expand `|name|` and Phase 06 can swap that placeholder
+        // for the rendered directive node at the reference position.
+        if embedded_block {
+            self.add_text(name, node, span, line_no)?;
+        } else {
+            self.add_inline_slice(&replacement_arguments, index, base_indent, node)?;
+        }
         Ok(())
     }
 

@@ -32,12 +32,15 @@ use crate::{InlineContext, ParseOptions};
 /// pseudo-XML attribute so byte-exact differential tests remain unaffected.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubstitutionDirective {
-    /// Directive name (`replace`, `image`, `unicode`, `date`, ...).
+    /// Directive name (`replace`, `image`, `unicode`, `date`, `digraph`, ...).
     pub name: String,
     /// Text following the directive's `::` marker (after option lines).
     pub arguments: String,
     /// Option lines that followed the directive marker.
     pub options: std::collections::BTreeMap<String, String>,
+    /// Body lines of an embedded block directive (e.g. the dot source of a
+    /// `digraph` substitution). Empty for inline-style replacements.
+    pub content: String,
 }
 
 /// Result of a successful parse, including recoverable diagnostics.

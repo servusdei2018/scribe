@@ -21,7 +21,7 @@ test-domain-py-python_use_unqualified_type_names	pseudoxml	1.000000	pass
 test-domain-py-xref-type-alias	pseudoxml	1.000000	pass
 test-domain-py-xref-warning	pseudoxml	1.000000	pass
 test-ext-autodoc	pseudoxml	0.000000	skip
-test-ext-graphviz	html	0.000000	skip
+test-ext-graphviz	html	1.000000	pass
 test-footnotes	pseudoxml	1.000000	pass
 test-glossary	pseudoxml	1.000000	pass
 test-highlight_options	html	1.000000	pass

@@ -359,6 +359,41 @@ fn graphviz_directives_are_registered_and_produce_typed_nodes() {
 }
 
 #[test]
+fn graphviz_embedded_in_substitution_resolves_inline() {
+    let config = config_with(&["sphinx.ext.graphviz"]);
+    let doc = parse(
+        "G\n=\n\n.. |graph| digraph:: foo\n\n   a -> b\n\nHello |graph| world\n",
+        &config,
+        std::path::Path::new("."),
+    );
+    let markers: Vec<_> = doc
+        .preorder_ids()
+        .into_iter()
+        .filter(|&id| {
+            doc.get(id).is_ok_and(|node| {
+                node.attrs.get_str(EXT_MARKER).ok().flatten() == Some(EXT_GRAPHVIZ)
+            })
+        })
+        .collect();
+    // The definition retains its copy (the HTML writer skips definition
+    // children); the reference site gets a second, inline copy.
+    assert_eq!(markers.len(), 2, "the substitution must render one graph per site");
+    let inline = markers
+        .iter()
+        .copied()
+        .find(|&id| {
+            doc.parent(id).ok().flatten().is_some_and(|parent| {
+                doc.get(parent).is_ok_and(|p| p.kind == scribe_ast::NodeKind::Paragraph)
+            })
+        })
+        .expect("graphviz substitution must stay inline within the paragraph");
+    let node = doc.get(inline).unwrap();
+    assert_eq!(node.attrs.get_str("gv_code").unwrap().unwrap(), "digraph foo {\na -> b\n}\n");
+    // Docutils passes the substitution name as the `alt` preset.
+    assert_eq!(node.attrs.get_str("gv_alt").unwrap().unwrap(), "graph");
+}
+
+#[test]
 fn graphviz_degrades_gracefully_when_dot_is_missing() {
     let dir = std::env::temp_dir().join(format!("scribe-graphviz-missing-{}", std::process::id()));
     let out = dir.join("out");

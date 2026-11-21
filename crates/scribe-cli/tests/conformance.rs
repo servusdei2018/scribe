@@ -96,7 +96,7 @@ const FIXTURES: &[Fixture] = &[
     Fixture { name: "test-root", builder: "html", category: "builder", skip: None },
     // --- explicitly skipped (unavailable features) --------------------------
     Fixture { name: "test-linkcheck", builder: "linkcheck", category: "builder", skip: None },
-    Fixture { name: "test-ext-graphviz", builder: "html", category: "directive", skip: Some("requires the external `dot`/graphviz binary") },
+    Fixture { name: "test-ext-graphviz", builder: "html", category: "directive", skip: None },
     Fixture { name: "test-ext-autodoc", builder: "pseudoxml", category: "domain", skip: Some("import-heavy third-party Python extension fixture") },
 ];
 

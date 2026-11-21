@@ -394,7 +394,11 @@ fn create_graphviz_node(
         target.attrs.set_str(super::EXT_MARKER, EXT_GRAPHVIZ);
         target.attrs.set_str("gv_code", code);
         if let Some(alt) = alt { target.attrs.set_str("gv_alt", alt); }
-        if let Some(align) = &align { target.attrs.set_str("gv_align", align); }
+        // With a caption Sphinx's `figure_wrapper` moves `align` onto the
+        // figure, so the graphviz node itself must not emit an alignment div.
+        if caption.is_none() {
+            if let Some(align) = &align { target.attrs.set_str("gv_align", align); }
+        }
         if let Some(layout) = layout { target.attrs.set_str("gv_dot", layout); }
         if let Some(format) = format { target.attrs.set_str("gv_format", format); }
         if let Some(name) = filename.filter(|value| !value.is_empty()) {
@@ -415,13 +419,13 @@ fn create_graphviz_node(
             );
         }
         let _ = ctx.doc.append_child(figure, node);
+        // Sphinx parses the caption's inline markup (`parse_inline`) and places
+        // the resulting nodes directly inside the `caption` element. The HTML
+        // writer then supplies the single `<p><span class="caption-text">`
+        // wrapper, so adding another paragraph/inline layer here would emit
+        // duplicate wrappers (and lose emphasis such as `:caption: on *right*`).
         let caption_node = ctx.add(NodeKind::Caption, figure)?;
-        let paragraph = ctx.doc.add(NodeKind::Paragraph, Some(caption_node))?;
-        let inner = ctx.doc.add(NodeKind::Inline, Some(paragraph))?;
-        if let Ok(text_node) = ctx.doc.get_mut(inner) {
-            text_node.attrs.set_list("classes", vec!["caption-text".to_owned()]);
-        }
-        ctx.add_text(caption, inner, ctx.line)?;
+        ctx.parse_inline_into(&caption, caption_node, ctx.line)?;
         Ok(vec![figure])
     } else {
         Ok(vec![node])

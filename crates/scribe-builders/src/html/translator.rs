@@ -1845,7 +1845,14 @@ impl HTML5Translator<'_> {
                 Some(Frame::new("</div>\n", NodeKind::SystemMessage))
             }
 
-            NodeKind::SubstitutionDefinition | NodeKind::SubstitutionReference => None,
+            // Substitution definitions are resolved away before publishing:
+            // their replacement nodes live only at the reference sites. Rendering
+            // them here would duplicate every expanded substitution inline.
+            NodeKind::SubstitutionDefinition => {
+                self.skip_children = true;
+                None
+            }
+            NodeKind::SubstitutionReference => None,
 
             NodeKind::Toctree => {
                 if self.ctx.singlefile.as_ref().is_some_and(|single| single.skip_toctrees) {
