@@ -1966,6 +1966,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "scribe-ast"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
@@ -1978,6 +1979,7 @@ dependencies = [
  "blake3",
  "miette",
  "minijinja",
+ "proptest",
  "rayon",
  "rustpython-ast",
  "rustpython-parser",
@@ -2003,6 +2005,7 @@ dependencies = [
  "miette",
  "minijinja",
  "once_cell",
+ "proptest",
  "rayon",
  "regex",
  "reqwest",
@@ -2032,6 +2035,7 @@ dependencies = [
  "bincode",
  "blake3",
  "parking_lot",
+ "proptest",
  "serde",
  "thiserror",
 ]
@@ -2157,6 +2161,7 @@ dependencies = [
  "miette",
  "minijinja",
  "once_cell",
+ "proptest",
  "scribe-config",
  "serde",
  "serde_json",

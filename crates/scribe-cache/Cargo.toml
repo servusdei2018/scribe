@@ -15,5 +15,8 @@ bincode.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

@@ -26,6 +26,7 @@ scribe-theme.workspace = true
 minijinja.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 scribe-core.workspace = true
 
 [lints]

@@ -23,6 +23,7 @@ indexmap.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 similar.workspace = true
 
 [lints]

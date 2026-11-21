@@ -38,6 +38,7 @@ reqwest.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 
 [dev-dependencies]
+proptest.workspace = true
 roxmltree.workspace = true
 
 [lints]
