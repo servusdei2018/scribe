@@ -9,6 +9,7 @@
 //! owned by later build phases.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use scribe_ast::{NodeId, NodeKind};
 
@@ -1820,6 +1821,59 @@ fn column_widths(ctx: &DirectiveContext<'_>, cols: usize) -> Vec<String> {
     vec![(100 / cols).to_string(); cols]
 }
 
+/// Decode a `file:` URL into a local filesystem path.
+///
+/// Docutils resolves the `csv-table` `:url:` option through `urllib`, which
+/// understands `file://` URLs as local paths. Scribe has no network stack, so
+/// only the local `file:` scheme is supported; other schemes yield a typed
+/// failure rather than a panic. Percent-escaped octets in the path are decoded
+/// so URL-encoded paths remain readable.
+fn csv_local_url_path(url: &str) -> Option<String> {
+    let path = url.strip_prefix("file://")?;
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    let bytes = path.as_bytes();
+    let mut decoded = String::with_capacity(path.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let hi = (bytes[index + 1] as char).to_digit(16)?;
+            let lo = (bytes[index + 2] as char).to_digit(16)?;
+            if let Some(ch) = char::from_u32(hi * 16 + lo) {
+                decoded.push(ch);
+            }
+            index += 3;
+        } else {
+            // Non-ASCII path bytes are already valid UTF-8 in the source URL.
+            let ch = path[index..].chars().next()?;
+            decoded.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    Some(decoded)
+}
+
+/// Read a local `file:` URL for `csv-table`, mirroring the UTF-8/latin-1
+/// decoding of the default include resolver without treating the absolute URL
+/// path as source-root-relative.
+fn read_local_csv_url(path: &Path, encoding: &str) -> Result<String, DirectiveError> {
+    let bytes = std::fs::read(path).map_err(|source| DirectiveError::IncludeIo {
+        path: path.display().to_string(),
+        detail: source.to_string(),
+    })?;
+    let lower = encoding.to_ascii_lowercase();
+    if matches!(lower.as_str(), "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1") {
+        return Ok(bytes.iter().map(|&byte| byte as char).collect());
+    }
+    String::from_utf8(bytes).map_err(|source| DirectiveError::IncludeIo {
+        path: path.display().to_string(),
+        detail: source.to_string(),
+    })
+}
+
 fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let delim = ctx.option_str("delim").and_then(|s| s.chars().next()).unwrap_or(',');
     let quote = ctx.option_str("quote").and_then(|s| s.chars().next()).unwrap_or('"');
@@ -1827,8 +1881,16 @@ fn csv_table(ctx: &mut DirectiveContext<'_>) -> HandlerResult {
     let keepspace = ctx.flag("keepspace");
     let mut text = ctx.content.to_owned();
     if text.trim().is_empty() {
+        let encoding = ctx.option_str("encoding").unwrap_or("utf-8");
         if let Some(path) = ctx.option_str("file") {
-            text = ctx.global.read_include_encoded(path, ctx.option_str("encoding").unwrap_or("utf-8"))?;
+            text = ctx.global.read_include_encoded(path, encoding)?;
+        } else if let Some(url) = ctx.option_str("url") {
+            let path = csv_local_url_path(url).ok_or_else(|| DirectiveError::Failed {
+                name: "csv-table".to_owned(),
+                detail: format!("unsupported url scheme in {url:?}; only local file: URLs are available"),
+                span: miette::SourceSpan::new((ctx.span.start as usize).into(), ctx.span.len() as usize),
+            })?;
+            text = read_local_csv_url(Path::new(&path), encoding)?;
         }
     }
     let mut rows = parse_csv(&text, delim, quote, escape, keepspace);

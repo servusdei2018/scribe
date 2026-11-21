@@ -8,7 +8,7 @@ test-basic	pseudoxml	1.000000	pass
 test-changes	pseudoxml	1.000000	pass
 test-default_role	pseudoxml	1.000000	pass
 test-directive-code	html	1.000000	pass
-test-directive-csv-table	pseudoxml	0.000000	skip
+test-directive-csv-table	pseudoxml	1.000000	pass
 test-directive-include	pseudoxml	0.000000	skip
 test-directive-only	pseudoxml	1.000000	pass
 test-directives-admonition-collapse	pseudoxml	1.000000	pass

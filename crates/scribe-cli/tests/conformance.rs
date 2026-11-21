@@ -61,7 +61,7 @@ const FIXTURES: &[Fixture] = &[
     Fixture { name: "test-maxlistdepth", builder: "pseudoxml", category: "parser", skip: None },
     Fixture { name: "test-prolog", builder: "pseudoxml", category: "parser", skip: None },
     Fixture { name: "test-default_role", builder: "pseudoxml", category: "parser", skip: None },
-    Fixture { name: "test-directive-csv-table", builder: "pseudoxml", category: "directive", skip: Some("root has no index.rst; upstream supplies one via its testroot copy step") },
+    Fixture { name: "test-directive-csv-table", builder: "pseudoxml", category: "directive", skip: None },
     Fixture { name: "test-directive-include", builder: "pseudoxml", category: "directive", skip: Some("include paths assume Sphinx's temp testroot layout, not a bare roots/ directory") },
     Fixture { name: "test-directive-only", builder: "pseudoxml", category: "directive", skip: None },
     Fixture { name: "test-directives-raw", builder: "pseudoxml", category: "directive", skip: None },
@@ -182,6 +182,96 @@ fn collect_files(directory: &Path, extension: &str, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+// --- testroot copy layout ---------------------------------------------------
+//
+// Upstream's pytest `testroot` fixture copies each root into a temporary
+// workspace before building it (`sphinx/testing/fixtures.py`). Some roots rely
+// on that copy step because they contain no `index.rst`: the test parses a
+// string directly, and pytest supplies the surrounding source tree. The
+// conformance harness mirrors this by copying those roots into an isolated
+// temp workspace and writing the missing scaffolding. Crucially, both the
+// oracle and scribe builds consume the **same** copied source tree, so the
+// comparison stays fair.
+
+/// Scaffolding applied to a copied fixture root.
+#[derive(Clone, Copy)]
+enum Scaffold {
+    /// Copy `test-directive-csv-table` and write an `index.rst` that drives
+    /// every `csv-table` option, plus a minimal `conf.py`.
+    CsvTable,
+}
+
+/// Returns the scaffold (if any) upstream's pytest harness supplies for a
+/// fixture. Extend this match when unskipping further testroot-based fixtures.
+fn scaffold_for(fixture: &Fixture) -> Option<Scaffold> {
+    match fixture.name {
+        "test-directive-csv-table" => Some(Scaffold::CsvTable),
+        _ => None,
+    }
+}
+
+/// Recursively copy a fixture root into a fresh temp workspace.
+fn copy_test_root(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap_or_else(|error| {
+        panic!("cannot create testroot workspace {}: {error}", destination.display())
+    });
+    for entry in fs::read_dir(source).unwrap_or_else(|error| {
+        panic!("cannot read fixture root {}: {error}", source.display())
+    }) {
+        let entry = entry.expect("readable directory entry");
+        let target = destination.join(entry.file_name());
+        let path = entry.path();
+        if path.is_dir() {
+            copy_test_root(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap_or_else(|error| {
+                panic!("cannot copy {} to {}: {error}", path.display(), target.display())
+            });
+        }
+    }
+}
+
+/// Materialize the copied workspace for a scaffolded fixture and return its
+/// path. The caller removes it once the fixture has been evaluated.
+fn prepare_scaffold(scaffold: Scaffold, fixture_root: &Path, tag: &str) -> PathBuf {
+    let workspace = std::env::temp_dir().join(format!("scribe-conf-src-{tag}"));
+    let _ = fs::remove_dir_all(&workspace);
+    copy_test_root(fixture_root, &workspace);
+    match scaffold {
+        Scaffold::CsvTable => {
+            // Upstream's root carries an empty `conf.py`; write an explicit,
+            // minimal configuration so both engines see identical settings.
+            fs::write(
+                workspace.join("conf.py"),
+                "extensions = []\nmaster_doc = \"index\"\n",
+            )
+            .unwrap_or_else(|error| panic!("cannot write scaffold conf.py: {error}"));
+            // The upstream test parses csv-table snippets directly via
+            // `restructuredtext.parse`. Drive the same directive options
+            // through a real build so pseudoxml structure can be compared.
+            // `file://` keeps the :url: case offline and local to this copy.
+            let url = format!("file://{}", workspace.join("example.csv").display());
+            // Build with explicit newlines rather than Rust line continuations:
+            // a trailing `\` would strip the three-space RST indentation.
+            let mut index = String::new();
+            index.push_str("CSV table conformance\n=====================\n\n");
+            index.push_str("From file\n---------\n\n");
+            index.push_str(".. csv-table:: From file\n   :file: example.csv\n\n");
+            index.push_str("From URL\n--------\n\n");
+            index.push_str(&format!(".. csv-table:: From URL\n   :url: {url}\n\n"));
+            index.push_str("Header and header rows\n----------------------\n\n");
+            index.push_str(".. csv-table::\n   :header: \"col1\", \"col2\", \"col3\"\n   :header-rows: 1\n\n   a,b,c\n   d,e,f\n\n");
+            index.push_str("Widths and stub columns\n-----------------------\n\n");
+            index.push_str(".. csv-table::\n   :widths: 10, 20, 30\n   :stub-columns: 1\n\n   a,b,c\n   d,e,f\n\n");
+            index.push_str("Delimiter, quote, escape\n------------------------\n\n");
+            index.push_str(".. csv-table::\n   :delim: ;\n   :quote: '\n   :escape: \\\n\n   'a;b';'c'\n");
+            fs::write(workspace.join("index.rst"), index)
+                .unwrap_or_else(|error| panic!("cannot write scaffold index.rst: {error}"));
+        }
+    }
+    workspace
 }
 
 /// Extract a multiset of element tag names from generated pseudoxml/HTML.
@@ -389,15 +479,24 @@ fn evaluate(fixture: &Fixture, oracle: &Path, scribe: &Path, root: &Path, slot: 
         };
     }
 
-    let source = root.join(FIXTURES_RELATIVE).join(fixture.name);
+    let fixture_root = root.join(FIXTURES_RELATIVE).join(fixture.name);
     let tag = format!("{}-{}", std::process::id(), slot);
+    // Copy scaffolded roots into an isolated workspace and build *both* engines
+    // from that same tree; unscaffolded fixtures build straight from the root.
+    let workspace = scaffold_for(fixture).map(|s| prepare_scaffold(s, &fixture_root, &tag));
+    let source = workspace.as_deref().unwrap_or(&fixture_root);
     let oracle_out = std::env::temp_dir().join(format!("scribe-conf-oracle-{tag}"));
     let scribe_out = std::env::temp_dir().join(format!("scribe-conf-scribe-{tag}"));
 
-    let oracle_capture = build_capture(oracle, fixture.builder, &source, &oracle_out);
-    let scribe_capture = build_capture(scribe, fixture.builder, &source, &scribe_out);
+    let oracle_capture = build_capture(oracle, fixture.builder, source, &oracle_out);
+    let scribe_capture = build_capture(scribe, fixture.builder, source, &scribe_out);
 
     if oracle_capture.exit != 0 || oracle_capture.timed_out {
+        if let Some(workspace) = workspace.as_deref() {
+            let _ = fs::remove_dir_all(workspace);
+        }
+        let _ = fs::remove_dir_all(&oracle_out);
+        let _ = fs::remove_dir_all(&scribe_out);
         // The fixture itself could not be built by the reference engine:
         // record it as a skip with the captured reason rather than counting a
         // false divergence against scribe.
@@ -443,7 +542,10 @@ fn evaluate(fixture: &Fixture, oracle: &Path, scribe: &Path, root: &Path, slot: 
         oracle_warnings != scribe_warnings,
     );
 
-    // Clean up this slot's output directories.
+    // Clean up this slot's copied workspace and output directories.
+    if let Some(workspace) = workspace.as_deref() {
+        let _ = fs::remove_dir_all(workspace);
+    }
     let _ = fs::remove_dir_all(&oracle_out);
     let _ = fs::remove_dir_all(&scribe_out);
 
