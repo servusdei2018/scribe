@@ -103,7 +103,8 @@ fn fixture(addr: SocketAddr) -> std::path::PathBuf {
              `bad anchor <http://{addr}/anchor#missing>`_\n\n\
              `redirect <http://{addr}/redirect>`_\n\n\
              `broken <http://{addr}/broken>`_\n\n\
-             `ignored <http://{addr}/ignored>`_\n"
+             `ignored <http://{addr}/ignored>`_\n\n\
+             .. image:: http://{addr}/missing-image.png\n"
         ),
     )
     .expect("write index.rst");
@@ -135,7 +136,11 @@ fn linkcheck_checks_local_http_server_and_matches_oracle() {
     let report = LinkcheckBuilder::build(&opts, &config, &mut env).expect("linkcheck build");
 
     // Our own expectations (independent of the oracle).
-    assert_eq!(report.broken_count(), 2, "{:#?}", report.results);
+    // The external image must be collected too: scribe stores `.. image::`
+    // URIs on the node itself while docutils' post-transform uses
+    // `candidates['?']`, and both shapes have to reach the checker.
+    assert_eq!(report.broken_count(), 3, "{:#?}", report.results);
+    assert!(report.results.iter().any(|r| r.status == LinkStatus::Broken && r.uri.ends_with("/missing-image.png")));
     assert!(report.results.iter().any(|r| r.status == LinkStatus::Working && r.uri.ends_with("/good")));
     assert!(report.results.iter().any(|r| r.status == LinkStatus::Working && r.uri.ends_with("/anchor#target")));
     assert!(report.results.iter().any(|r| r.status == LinkStatus::Redirected && r.uri.ends_with("/redirect")));

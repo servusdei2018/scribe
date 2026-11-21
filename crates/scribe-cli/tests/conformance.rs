@@ -15,12 +15,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
 const ORACLE_RELATIVE: &str = ".oracle-venv/bin/sphinx-build";
 const FIXTURES_RELATIVE: &str = "sphinx/tests/roots";
@@ -91,7 +95,7 @@ const FIXTURES: &[Fixture] = &[
     Fixture { name: "test-basic", builder: "html", category: "builder", skip: None },
     Fixture { name: "test-root", builder: "html", category: "builder", skip: None },
     // --- explicitly skipped (unavailable features) --------------------------
-    Fixture { name: "test-linkcheck", builder: "html", category: "builder", skip: Some("requires outbound network access for URL checks") },
+    Fixture { name: "test-linkcheck", builder: "linkcheck", category: "builder", skip: None },
     Fixture { name: "test-ext-graphviz", builder: "html", category: "directive", skip: Some("requires the external `dot`/graphviz binary") },
     Fixture { name: "test-ext-autodoc", builder: "pseudoxml", category: "domain", skip: Some("import-heavy third-party Python extension fixture") },
 ];
@@ -206,14 +210,21 @@ enum Scaffold {
     /// missing-file diagnostic). The auxiliary `.rst` sources are excluded
     /// from standalone discovery, matching upstream's direct-string parse.
     Include,
+    /// Copy `test-linkcheck` and rewrite its `localhost:7777` URLs to the
+    /// in-process mock server's ephemeral `127.0.0.1:<port>` address.
+    Linkcheck(SocketAddr),
 }
 
 /// Returns the scaffold (if any) upstream's pytest harness supplies for a
 /// fixture. Extend this match when unskipping further testroot-based fixtures.
-fn scaffold_for(fixture: &Fixture) -> Option<Scaffold> {
+/// `mock_addr` is `Some` only when the caller has started a local HTTP server.
+fn scaffold_for(fixture: &Fixture, mock_addr: Option<SocketAddr>) -> Option<Scaffold> {
     match fixture.name {
         "test-directive-csv-table" => Some(Scaffold::CsvTable),
         "test-directive-include" => Some(Scaffold::Include),
+        "test-linkcheck" => Some(Scaffold::Linkcheck(
+            mock_addr.expect("test-linkcheck requires the mock HTTP server address"),
+        )),
         _ => None,
     }
 }
@@ -234,6 +245,113 @@ fn copy_test_root(source: &Path, destination: &Path) {
         } else {
             fs::copy(&path, &target).unwrap_or_else(|error| {
                 panic!("cannot copy {} to {}: {error}", path.display(), target.display())
+            });
+        }
+    }
+}
+
+// --- deterministic local HTTP harness -------------------------------------
+//
+// `test-linkcheck` upstream normally checks `http://localhost:7777/...`
+// against an ephemeral WSGI server started by pytest. To keep the harness
+// offline and reproducible, we run the same tiny HTTP service in-process on
+// an ephemeral localhost port and rewrite the fixture's URLs to that port in
+// a copied test root. Both the oracle and scribe build from that **same**
+// copied source tree, so neither engine gets a privileged view of the server.
+
+/// Owns the mock server thread. Dropping it signals the tokio accept loop to
+/// stop so no socket outlives the fixture evaluation.
+struct MockHttpServer {
+    addr: SocketAddr,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for MockHttpServer {
+    fn drop(&mut self) {
+        if let Some(sender) = self.shutdown.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+/// Serve the exact responses upstream's `DefaultsHandler` uses for the
+/// `test-linkcheck` testroot: `GET /` is a plain 200 page with no `top` or
+/// `does-not-exist` anchor, `/anchor.html` carries `id="found"`, HEAD on
+/// either succeeds, and every image path is a 404.
+async fn serve_mock_request(mut stream: TcpStream) {
+    let mut buffer = [0u8; 8192];
+    let read = stream.read(&mut buffer).await.unwrap_or(0);
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let first_line = request.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("/").split('?').next().unwrap_or("/");
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+
+    let (status, reason, body) = match path {
+        "" => (200, "OK", "ok\n\n"),
+        "anchor.html" => (
+            200,
+            "OK",
+            "<!DOCTYPE html><html><body><a id=\"found\"></a></body></html>",
+        ),
+        _ => (404, "Not Found", ""),
+    };
+    // Upstream's handler uses HTTP/1.1 with Content-Length on every response;
+    // HEAD responses have no body. Anchored links therefore need a GET, which
+    // is exactly how both engines exercise the mock.
+    let body = if method == "HEAD" { "" } else { body };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+fn spawn_mock_http_server() -> MockHttpServer {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("cannot build tokio runtime for mock HTTP server");
+        runtime.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("cannot bind ephemeral mock HTTP port");
+            addr_tx
+                .send(listener.local_addr().expect("mock HTTP local address"))
+                .expect("cannot publish mock HTTP address");
+            let mut shutdown = shutdown_rx;
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown => break,
+                    accepted = listener.accept() => {
+                        if let Ok((stream, _)) = accepted {
+                            tokio::spawn(serve_mock_request(stream));
+                        }
+                    }
+                }
+            }
+        });
+    });
+    let addr = addr_rx.recv().expect("mock HTTP server must publish its address");
+    MockHttpServer { addr, shutdown: Some(shutdown_tx) }
+}
+
+/// Rewrite the fixture's hard-coded `localhost:7777` URLs to the mock server.
+fn rewrite_mock_urls(directory: &Path, addr: SocketAddr) {
+    let replacement = format!("127.0.0.1:{}", addr.port());
+    let mut files = Vec::new();
+    collect_files(directory, "rst", &mut files);
+    files.push(directory.join("conf.py"));
+    for file in files {
+        let Ok(text) = fs::read_to_string(&file) else { continue };
+        let rewritten = text.replace("localhost:7777", &replacement);
+        if rewritten != text {
+            fs::write(&file, rewritten).unwrap_or_else(|error| {
+                panic!("cannot rewrite mock URLs in {}: {error}", file.display())
             });
         }
     }
@@ -304,8 +422,39 @@ fn prepare_scaffold(scaffold: Scaffold, fixture_root: &Path, tag: &str) -> PathB
             fs::write(workspace.join("index.rst"), index)
                 .unwrap_or_else(|error| panic!("cannot write scaffold index.rst: {error}"));
         }
+        Scaffold::Linkcheck(addr) => {
+            // Both engines consume this exact copy, with the very same URLs.
+            // Only the URL host/port changes; all linkcheck settings (anchors
+            // enabled, 0.25s timeout) remain those of the upstream testroot.
+            rewrite_mock_urls(&workspace, addr);
+        }
     }
     workspace
+}
+
+/// Extract the linkcheck builder's observable structure from `output.json`.
+///
+/// Each JSON line is one checked hyperlink. For this builder the equivalent of
+/// "element tag names" is the triple that describes the outcome — status,
+/// HTTP code and the human-readable detail — so the very same multiset Jaccard
+/// rubric applies without touching the scoring formula or `extract_tags`.
+fn extract_linkcheck_tags(text: &str) -> BTreeMap<String, usize> {
+    let mut tags = BTreeMap::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(status) = value.get("status").and_then(serde_json::Value::as_str) {
+            *tags.entry(format!("status:{status}")).or_insert(0) += 1;
+        }
+        if let Some(code) = value.get("code").and_then(serde_json::Value::as_i64) {
+            *tags.entry(format!("code:{code}")).or_insert(0) += 1;
+        }
+        if let Some(info) = value.get("info").and_then(serde_json::Value::as_str) {
+            *tags.entry(format!("info:{info}")).or_insert(0) += 1;
+        }
+    }
+    tags
 }
 
 /// Extract a multiset of element tag names from generated pseudoxml/HTML.
@@ -382,13 +531,25 @@ fn build_capture(binary: &Path, builder: &str, source: &Path, out: &Path) -> Bui
         }
     };
     let mut files = Vec::new();
-    let extension = if builder == "html" { "html" } else { "pseudoxml" };
+    let (extension, linkcheck) = match builder {
+        "html" => ("html", false),
+        // The linkcheck builder writes `output.json` / `output.txt` instead of
+        // a doctree or HTML page. Its observable structure is the multiset of
+        // per-link statuses (see `extract_linkcheck_tags`).
+        "linkcheck" => ("json", true),
+        _ => ("pseudoxml", false),
+    };
     collect_files(out, extension, &mut files);
     files.sort();
     let mut tags = BTreeMap::new();
     for file in files {
         if let Ok(text) = fs::read_to_string(&file) {
-            for (tag, count) in extract_tags(&text) {
+            let file_tags = if linkcheck {
+                extract_linkcheck_tags(&text)
+            } else {
+                extract_tags(&text)
+            };
+            for (tag, count) in file_tags {
                 *tags.entry(tag).or_insert(0) += count;
             }
         }
@@ -494,6 +655,13 @@ fn divergences(
     categories.into_iter().collect()
 }
 
+/// Upstream's linkcheck builder exits 1 whenever it reports broken links; the
+/// fixture intentionally contains five. Every other fixture must build with a
+/// clean exit status for the oracle run to be usable as a reference.
+fn expected_oracle_exit(fixture: &Fixture) -> i32 {
+    if fixture.name == "test-linkcheck" { 1 } else { 0 }
+}
+
 fn evaluate(fixture: &Fixture, oracle: &Path, scribe: &Path, root: &Path, slot: usize) -> FixtureResult {
     if let Some(reason) = fixture.skip {
         return FixtureResult {
@@ -515,9 +683,17 @@ fn evaluate(fixture: &Fixture, oracle: &Path, scribe: &Path, root: &Path, slot: 
 
     let fixture_root = root.join(FIXTURES_RELATIVE).join(fixture.name);
     let tag = format!("{}-{}", std::process::id(), slot);
+    // Linkcheck talks to an in-process ephemeral HTTP server. Its lifetime is
+    // tied to this fixture's evaluation so both builds see the same port.
+    let mock_server = if fixture.name == "test-linkcheck" {
+        Some(spawn_mock_http_server())
+    } else {
+        None
+    };
     // Copy scaffolded roots into an isolated workspace and build *both* engines
     // from that same tree; unscaffolded fixtures build straight from the root.
-    let workspace = scaffold_for(fixture).map(|s| prepare_scaffold(s, &fixture_root, &tag));
+    let scaffold = scaffold_for(fixture, mock_server.as_ref().map(|server| server.addr));
+    let workspace = scaffold.map(|s| prepare_scaffold(s, &fixture_root, &tag));
     let source = workspace.as_deref().unwrap_or(&fixture_root);
     let oracle_out = std::env::temp_dir().join(format!("scribe-conf-oracle-{tag}"));
     let scribe_out = std::env::temp_dir().join(format!("scribe-conf-scribe-{tag}"));
@@ -525,7 +701,7 @@ fn evaluate(fixture: &Fixture, oracle: &Path, scribe: &Path, root: &Path, slot: 
     let oracle_capture = build_capture(oracle, fixture.builder, source, &oracle_out);
     let scribe_capture = build_capture(scribe, fixture.builder, source, &scribe_out);
 
-    if oracle_capture.exit != 0 || oracle_capture.timed_out {
+    if oracle_capture.exit != expected_oracle_exit(fixture) || oracle_capture.timed_out {
         if let Some(workspace) = workspace.as_deref() {
             let _ = fs::remove_dir_all(workspace);
         }
@@ -665,7 +841,9 @@ fn format_report(results: &[FixtureResult], oracle_version: &str) -> String {
     out.push_str("## Rubric\n\n");
     out.push_str(
         "- **Structure score** = multiset Jaccard overlap of element tag names\n  \
-         (`pseudoxml` doctree tags or HTML tag names) between oracle and scribe.\n\
+         (`pseudoxml` doctree tags or HTML tag names) between oracle and scribe.\n  \
+          For `linkcheck`, the compared markers are per-link status/code/info\n  \
+          tokens from `output.json` (the builder's equivalent of DOM markers).\n\
          - **Warning score** = Jaccard overlap of normalized warning lines\n  \
          (absolute paths and the `scribe: warning:` prefix removed; sorted).\n\
          - **Fixture score** = `0.85 * structure + 0.15 * warnings`.\n\

@@ -148,10 +148,36 @@ impl LinkcheckBuilder {
         results.sort_by(|a, b| {
             (&a.filename, a.lineno, &a.uri).cmp(&(&b.filename, b.lineno, &b.uri))
         });
+        // Upstream logs a `WARNING: broken link: ...` for every broken link
+        // when verbosity is negative (`-q`). Scribe's CLI emits report warnings
+        // through `finish_build_warnings`, so surface them here with the same
+        // absolute source location and wording as Sphinx. This also removes the
+        // last stderr divergence for `test-linkcheck`.
+        let mut warnings = prepared.warnings;
+        for result in &results {
+            let location = options.source_dir.join(&result.filename);
+            match result.status {
+                LinkStatus::Broken => warnings.push(format!(
+                    "{}:{}: WARNING: broken link: {} ({})",
+                    location.display(),
+                    result.lineno,
+                    result.uri,
+                    result.info
+                )),
+                LinkStatus::Timeout => warnings.push(format!(
+                    "{}:{}: WARNING: timeout   {}{}",
+                    location.display(),
+                    result.lineno,
+                    result.uri,
+                    result.info
+                )),
+                _ => {}
+            }
+        }
         let report = LinkcheckReport {
             results,
             built_docnames: prepared.docnames,
-            warnings: prepared.warnings,
+            warnings,
         };
         write_report(&report, options, env)?;
         Ok(report)
@@ -206,6 +232,16 @@ pub fn collect_hyperlinks(
                             if uri.contains("://") {
                                 add_uri(&uri, &mut links);
                             }
+                        }
+                    }
+                    // Docutils' post-transform stores the image candidate in
+                    // `candidates['?']`. Scribe's RST writer keeps the raw URI
+                    // on the `image` node itself, so honour both layouts:
+                    // without this, `.. image::`/`.. figure::` URLs are never
+                    // checked and the report silently omits broken images.
+                    if let Some(uri) = node.attrs.get_str("uri").unwrap_or_default() {
+                        if !uri.is_empty() && uri.contains("://") {
+                            add_uri(uri, &mut links);
                         }
                     }
                 }
@@ -708,11 +744,27 @@ impl AsyncChecker {
                 }
             }
             if !status.is_success() {
-                last_error = format!("{} {}", status.as_u16(), status.canonical_reason().unwrap_or(""));
+                // `requests` (used upstream) renders unsuccessful responses as
+                // e.g. `404 Client Error: Not Found for url: http://...`. The
+                // `info` column is part of the observable linkcheck report and
+                // also feeds the warning emitted for broken links, so match it
+                // byte-for-byte rather than using a bare `404 Not Found`.
+                let code = status.as_u16();
+                let kind = if (400..500).contains(&code) {
+                    "Client Error"
+                } else if (500..600).contains(&code) {
+                    "Server Error"
+                } else {
+                    "Error"
+                };
+                last_error = format!(
+                    "{code} {kind}: {} for url: {current}",
+                    status.canonical_reason().unwrap_or("")
+                );
                 if !use_get {
                     continue;
                 }
-                return (LinkStatus::Broken, status.as_u16() as i64, last_error);
+                return (LinkStatus::Broken, i64::from(code), last_error);
             }
 
             // Success. Check the anchor against the final response body when

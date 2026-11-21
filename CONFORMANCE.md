@@ -21,6 +21,8 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 - **Structure score** = multiset Jaccard overlap of element tag names
   (`pseudoxml` doctree tags or HTML tag names) between oracle and scribe.
+  For `linkcheck`, the compared markers are per-link status/code/info
+  tokens from `output.json` (the builder's equivalent of DOM markers).
 - **Warning score** = Jaccard overlap of normalized warning lines
   (absolute paths and the `scribe: warning:` prefix removed; sorted).
 - **Fixture score** = `0.85 * structure + 0.15 * warnings`.
@@ -28,7 +30,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
   needing unavailable features are `skip` with a recorded reason.
 - **Aggregate parity** = mean fixture score over non-skipped fixtures.
 
-## Aggregate semantic parity: 100.0% over 36 applicable fixtures (36 pass, 0 partial, 0 fail, 3 skip)
+## Aggregate semantic parity: 100.0% over 37 applicable fixtures (37 pass, 0 partial, 0 fail, 2 skip)
 
 ## Per-fixture results
 
@@ -56,7 +58,7 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 | test-footnotes | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 41/41 | 0/0 | — |
 | test-glossary | pseudoxml | directive | pass | 1.000 | 1.000 | 1.000 | 11/11 | 0/0 | — |
 | test-highlight_options | html | directive | pass | 1.000 | 1.000 | 1.000 | 21/21 | 0/0 | — |
-| test-linkcheck | html | builder | skip | 0.000 | 0.000 | 0.000 | 0/0 | 0/0 | — |
+| test-linkcheck | linkcheck | builder | pass | 1.000 | 1.000 | 1.000 | 8/8 | 1/0 | — |
 | test-markup-citation | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 8/8 | 0/0 | — |
 | test-markup-rubric | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 4/4 | 0/0 | — |
 | test-maxlistdepth | pseudoxml | parser | pass | 1.000 | 1.000 | 1.000 | 9/9 | 0/0 | — |
@@ -78,7 +80,6 @@ Oracle: `sphinx-build 9.3.0+/035a07c32`
 
 - `test-ext-autodoc` (pseudoxml): import-heavy third-party Python extension fixture
 - `test-ext-graphviz` (html): requires the external `dot`/graphviz binary
-- `test-linkcheck` (html): requires outbound network access for URL checks
 
 ## Divergences by category
 
