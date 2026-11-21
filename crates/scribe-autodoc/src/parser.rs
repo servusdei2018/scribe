@@ -540,6 +540,33 @@ fn dedup_overloads(members: &mut Vec<Member>) {
             _ => None,
         })
         .collect();
+    // The concrete implementation is the source of the documented object's
+    // docstring even though its signature is replaced by the overloads. Lift
+    // that docstring onto the *first* overload before dropping the
+    // implementation, so the generated `desc_content` matches upstream without
+    // making every overload independently documentable.
+    let impl_docs: std::collections::BTreeMap<String, Option<String>> = members
+        .iter()
+        .filter_map(|candidate| match candidate {
+            Member::Function(info) if !info.is_overload && overloaded.contains(&info.qualname) => {
+                Some((info.qualname.clone(), info.docstring.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut filled = std::collections::BTreeSet::new();
+    for member in members.iter_mut() {
+        if let Member::Function(info) = member {
+            if info.is_overload
+                && info.docstring.is_none()
+                && filled.insert(info.qualname.clone())
+            {
+                if let Some(Some(doc)) = impl_docs.get(&info.qualname) {
+                    info.docstring = Some(doc.clone());
+                }
+            }
+        }
+    }
     members.retain(|member| match member {
         Member::Function(info) => !overloaded.contains(&info.qualname) || info.is_overload,
         _ => true,

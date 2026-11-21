@@ -97,7 +97,7 @@ const FIXTURES: &[Fixture] = &[
     // --- explicitly skipped (unavailable features) --------------------------
     Fixture { name: "test-linkcheck", builder: "linkcheck", category: "builder", skip: None },
     Fixture { name: "test-ext-graphviz", builder: "html", category: "directive", skip: None },
-    Fixture { name: "test-ext-autodoc", builder: "pseudoxml", category: "domain", skip: Some("import-heavy third-party Python extension fixture") },
+    Fixture { name: "test-ext-autodoc", builder: "pseudoxml", category: "domain", skip: None },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1068,6 +1068,11 @@ fn harness_selection_covers_all_categories_and_builders() {
     }
     let builders: BTreeSet<&str> = FIXTURES.iter().map(|f| f.builder).collect();
     assert!(builders.contains("pseudoxml") && builders.contains("html"));
-    assert!(FIXTURES.iter().any(|f| f.skip.is_some()), "selection must record at least one skip");
+    // Phase 65 closed the last gap: every selected fixture is now active.
+    assert!(FIXTURES.iter().all(|f| f.skip.is_none()), "selection must have no skips");
+    assert!(
+        FIXTURES.iter().any(|f| f.name == "test-ext-autodoc" && f.builder == "pseudoxml"),
+        "selection must include the autodoc fixture"
+    );
     assert!(FIXTURES.len() >= 30 && FIXTURES.len() <= 60, "selection size out of documented range");
 }

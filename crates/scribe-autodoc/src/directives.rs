@@ -201,11 +201,15 @@ struct ExtraOptions {
 
 /// Emits an `index` + skeleton `desc` pair, mirroring the Phase 12
 /// `py_object` emitter. `content` may append children to `desc_content`.
+///
+/// `signatures` normally holds one entry. A documenter returning several
+/// signatures (an `@overload` stack) emits a *single* `desc` with one
+/// `desc_signature` per entry, which is how upstream represents overloads.
 #[allow(clippy::too_many_arguments)] // mirrors the py:* skeleton emitter's context surface
 fn emit_object(
     ctx: &mut DirectiveContext<'_>,
     objtype: &'static str,
-    signature: &str,
+    signatures: &[String],
     module: &str,
     options: &AutoOptions,
     extra: &ExtraOptions,
@@ -213,6 +217,7 @@ fn emit_object(
     docstring_rst: Option<&str>,
     content: impl FnOnce(&mut DirectiveContext<'_>, NodeId) -> HandlerResult,
 ) -> HandlerResult {
+    let signature = signatures.first().map_or("", String::as_str);
     let index = ctx.add(NodeKind::Index, ctx.parent)?;
     if let Ok(node) = ctx.doc.get_mut(index) {
         node.attrs.set_str("entries", "[]");
@@ -225,6 +230,9 @@ fn emit_object(
         node.attrs.set_str("objtype", objtype);
         node.attrs.set_str("py:directive", format!("py:{objtype}"));
         node.attrs.set_str("py:signature", signature);
+        if signatures.len() > 1 {
+            node.attrs.set_str("py:signatures", serde_json::to_string(signatures).unwrap_or_default());
+        }
         node.attrs.set_str("py:options", options_json(Some(module), options, extra, imports));
         node.attrs.set_str("py:sig_base", (ctx.span.start as u64).to_string());
         node.attrs.set_bool("py:autodoc", true);
@@ -234,12 +242,24 @@ fn emit_object(
         node.attrs.set_bool("noindex", options.no_index);
         node.span = Some(ctx.span);
     }
-    let placeholder = ctx.add(NodeKind::DescSignature, desc)?;
-    if let Ok(node) = ctx.doc.get_mut(placeholder) {
-        node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "py".to_owned()]);
-        node.span = Some(ctx.span);
+    for _ in signatures {
+        let placeholder = ctx.add(NodeKind::DescSignature, desc)?;
+        if let Ok(node) = ctx.doc.get_mut(placeholder) {
+            node.attrs.set_list("classes", vec!["sig".to_owned(), "sig-object".to_owned(), "py".to_owned()]);
+            node.span = Some(ctx.span);
+        }
     }
     let content_id = ctx.add(NodeKind::DescContent, desc)?;
+    // Upstream renders a bare alias assignment as ``alias of :class:`~fq` ``
+    // so the referenced class becomes an xref. The static parser only knows the
+    // local spelling (`my_name = Foo`); resolve it through the module's import
+    // map here, where both pieces are available.
+    let expanded_alias = docstring_rst.and_then(|rst| {
+        let target = rst.trim().strip_prefix("alias of ")?;
+        let fq = imports.get(target)?;
+        Some(format!("alias of :class:`~{fq}`"))
+    });
+    let docstring_rst = expanded_alias.as_deref().or(docstring_rst);
     if let Some(rst) = docstring_rst {
         let rst = rst.trim();
         // A descriptor-factory classmethod's docstring is only an echo of its
@@ -350,7 +370,7 @@ fn emit_member(
     let docstring = member_docstring(member, options);
     let rst = convert(docstring, config);
     let objtype = member.objtype();
-    emit_object(ctx, objtype, &signature, module, options, &extra, imports, rst.as_deref(), |ctx, content| {
+    emit_object(ctx, objtype, &[signature], module, options, &extra, imports, rst.as_deref(), |ctx, content| {
         if let Member::Class(class) = member {
             // An explicit `:members: Inner` selects which members of the
             // *outer* class to document. Once `Inner` is being documented its
@@ -433,9 +453,11 @@ fn member_extra(member: &Member, options: &AutoOptions) -> ExtraOptions {
         Member::Attribute(info) => {
             // Sphinx shows `= value` only for documented attributes whose
             // value has a stable literal repr; calls / `None` / undocumented
-            // attributes (notably instance attributes) omit it.
+            // attributes (notably instance attributes) omit it. Pure aliases
+            // are documented as "alias of ..." instead, with no annotation.
             let show_value = !options.no_value
                 && info.docstring.as_ref().is_some_and(|d| !d.trim().is_empty())
+                && !info.docstring.as_deref().is_some_and(|d| d.trim_start().starts_with("alias of "))
                 && info.value.as_deref().is_some_and(|value| {
                     !value.contains('(') || value.contains("StringIO")
                 });
@@ -537,6 +559,17 @@ fn emit_module_docstring(
 /// Emits the `py:module` target marker so the domain sets module context and
 /// registers a module object (py-modindex).
 fn emit_module_target(ctx: &mut DirectiveContext<'_>, name: &str) -> HandlerResult {
+    // Upstream `PyModule.run` emits an `index` entry alongside the module
+    // target (a "module; <name>" pair), just like the hand-written `py:module`
+    // directive. Mirror that so autodoc's doctree matches.
+    let index = ctx.add(NodeKind::Index, ctx.parent)?;
+    if let Ok(node) = ctx.doc.get_mut(index) {
+        node.attrs.set_str(
+            "entries",
+            format!("['pair', 'module; {name}', 'module-{name}', '', None]"),
+        );
+        node.span = Some(ctx.span);
+    }
     let mut target = Node::new(NodeKind::Target);
     target.attrs.set_str("objtype", "module");
     target.attrs.set_str("py:signature", name);
@@ -544,7 +577,7 @@ fn emit_module_target(ctx: &mut DirectiveContext<'_>, name: &str) -> HandlerResu
     target.attrs.set_list("ids", vec![format!("module-{}", name)]);
     target.span = Some(ctx.span);
     let id = ctx.doc.add_node(target, Some(ctx.parent))?;
-    Ok(vec![id])
+    Ok(vec![index, id])
 }
 
 /// Trait implemented by the auto directives, providing the common name and
@@ -648,14 +681,21 @@ impl Directive for AutoDirective {
             });
         };
 
-        let mut ids = Vec::new();
-        for member in matches {
-        let class_name = match member {
+        // Upstream emits one `desc` per documented object and places every
+        // returned signature inside it. An `@overload` stack therefore yields a
+        // single `desc` with several `desc_signature` children and one shared
+        // `desc_content` (holding the implementation's docstring).
+        let primary = matches[0];
+        let class_name = match primary {
             Member::Function(_) | Member::Attribute(_) => object_path.rsplit_once('.').map(|(class, _)| class.to_owned()),
             Member::Class(_) => None,
         };
-        let extra = member_extra(member, &options);
-        let docstring: Option<String> = match member {
+        let signatures: Vec<String> = matches
+            .iter()
+            .map(|member| member_signature(member, class_name.as_deref()))
+            .collect();
+        let extra = member_extra(primary, &options);
+        let docstring: Option<String> = match primary {
             Member::Class(class) if options.class_doc_from == ClassDocFrom::Both => {
                 // Concatenate init and class docstrings as upstream does.
                 let mut combined = String::new();
@@ -670,22 +710,25 @@ impl Directive for AutoDirective {
                 }
                 Some(combined)
             }
-            _ => member_docstring(member, &options).map(str::to_owned),
+            _ => matches
+                .iter()
+                .filter_map(|member| member_docstring(member, &options))
+                .find(|doc| !doc.trim().is_empty())
+                .map(str::to_owned),
         };
         let rst = convert(docstring.as_deref(), config.as_ref());
         let objtype = if self.objtype == "exception" || self.objtype == "decorator" || self.objtype == "property" || self.objtype == "data" {
             self.objtype
         } else {
-            member.objtype()
+            primary.objtype()
         };
-        let signature = member_signature(member, class_name.as_deref());
         let imports = import_map(&module);
         let directive_content = ctx.content.to_owned();
-        ids.extend(emit_object(ctx, objtype, &signature, &module.name, &options, &extra, &imports, rst.as_deref(), |ctx, content_node| {
+        emit_object(ctx, objtype, &signatures, &module.name, &options, &extra, &imports, rst.as_deref(), |ctx, content_node| {
             if !directive_content.trim().is_empty() {
                 ctx.parse_block_text(&directive_content, content_node, ctx.line)?;
             }
-            if let Member::Class(class) = member {
+            if let Member::Class(class) = primary {
                 emit_class_children(ctx, class, &module.name, &options, config.as_ref(), &imports)?;
                 // `:show-inheritance:` renders a `Bases: …` paragraph ahead of
                 // the docstring body, as in the `Member`-driven emitter.
@@ -696,9 +739,7 @@ impl Directive for AutoDirective {
                 }
             }
             Ok(Vec::new())
-        })?);
-        }
-        Ok(ids)
+        })
     }
 }
 

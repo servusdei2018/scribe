@@ -588,7 +588,11 @@ fn tokenize_arglist(arglist: &str) -> Vec<ParamToken> {
             }
             continue;
         }
-        if part.ends_with(']') && !part.starts_with('[') {
+        // A trailing `]` only denotes an optional parameter when the part has
+        // no annotation (`x`) or a default (`x=1`). An annotation such as
+        // `x: tuple[int, str]` also ends in `]` but must be tokenized as a
+        // normal parameter so the subscript renders as annotation nodes.
+        if part.ends_with(']') && !part.starts_with('[') && !part.contains(':') && !part.contains('=') {
             result.push(ParamToken::Param {
                 name: part[..part.len() - 1].trim().to_owned(), annotation: String::new(), default: String::new(), var: 0,
             });
@@ -1054,9 +1058,51 @@ fn needs_arglist(objtype: &str) -> bool {
 }
 
 /// Builds the full `desc_signature` subtree under a skeleton `desc` node.
+///
+/// This is the single-signature form used by ordinary `py:*` directives and by
+/// the public API. Autodoc overloads share one `desc` node, so they use
+/// [`build_desc_signatures`] instead.
 pub fn build_desc_signature(
     doc: &mut Document,
     desc_id: NodeId,
+    signature: &str,
+    objtype: &str,
+    context: &SigContext,
+    options: &PyOptions,
+) -> DomainResult<SignatureInfo> {
+    build_desc_signature_at(doc, desc_id, 0, signature, objtype, context, options)
+}
+
+/// Builds every `desc_signature` under an autodoc skeleton `desc` node.
+///
+/// Upstream emits one `desc` node holding several `desc_signature` children
+/// when a documenter returns multiple signatures (e.g. `@overload` stacks).
+/// The index entry and read-context are derived from the first signature.
+pub fn build_desc_signatures(
+    doc: &mut Document,
+    desc_id: NodeId,
+    signatures: &[String],
+    objtype: &str,
+    context: &SigContext,
+    options: &PyOptions,
+) -> DomainResult<SignatureInfo> {
+    let mut info = None;
+    for (index, signature) in signatures.iter().enumerate() {
+        let built = build_desc_signature_at(doc, desc_id, index, signature, objtype, context, options)?;
+        if index == 0 {
+            info = Some(built);
+        }
+    }
+    info.ok_or_else(|| DomainError::InvalidData {
+        domain: "py".to_owned(),
+        detail: "autodoc skeleton has no signatures".to_owned(),
+    })
+}
+
+fn build_desc_signature_at(
+    doc: &mut Document,
+    desc_id: NodeId,
+    index: usize,
     signature: &str,
     objtype: &str,
     context: &SigContext,
@@ -1068,9 +1114,9 @@ pub fn build_desc_signature(
     })?;
     let span = doc.get(desc_id).ok().and_then(|node| node.span).unwrap_or(Span::new(0, 0));
     let placeholder = doc.get(desc_id).ok().and_then(|node| {
-        node.children.iter().copied().find(|&child| {
-            doc.get(child).is_ok_and(|child| child.kind == NodeKind::DescSignature)
-        })
+        node.children.iter().copied()
+            .filter(|&child| doc.get(child).is_ok_and(|child| child.kind == NodeKind::DescSignature))
+            .nth(index)
     });
     let source = doc.get(desc_id).ok().and_then(|node| node.source.clone());
     let mut builder = Builder { doc, span, source };
@@ -1599,7 +1645,7 @@ fn prepare_children(
             let _ = prepare_children(document, child, context);
             continue;
         };
-        let (signature, options, synopsis, platform, deprecated) = {
+        let (signature, options, synopsis, platform, deprecated, extra_signatures) = {
             let node = document.get(child)?;
             (
                 node.get_str("py:signature").ok().flatten().unwrap_or("").to_owned(),
@@ -1607,6 +1653,9 @@ fn prepare_children(
                 node.get_str("py:synopsis").ok().flatten().unwrap_or("").to_owned(),
                 node.get_str("py:platform").ok().flatten().unwrap_or("").to_owned(),
                 node.attrs.get_bool("py:deprecated").ok().flatten().unwrap_or(false),
+                node.get_str("py:signatures").ok().flatten().and_then(|raw| {
+                    serde_json::from_str::<Vec<String>>(raw).ok()
+                }).unwrap_or_default(),
             )
         };
 
@@ -1621,7 +1670,11 @@ fn prepare_children(
         }
 
         let outer = context.clone();
-        let signature_info = build_desc_signature(document, child, &signature, &objtype, &outer, &options)?;
+        let signature_info = if extra_signatures.is_empty() {
+            build_desc_signature(document, child, &signature, &objtype, &outer, &options)?
+        } else {
+            build_desc_signatures(document, child, &extra_signatures, &objtype, &outer, &options)?
+        };
         // Populate the sibling `index` node (upstream `add_target_and_index`).
         let index_id = document.get(child).ok().and_then(|node| node.attrs.get_node_id("py:index_id").ok().flatten());
         if let Some(index_id) = index_id {
