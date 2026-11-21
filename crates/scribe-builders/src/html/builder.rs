@@ -38,6 +38,7 @@ use scribe_rst::{
     DirectiveRegistry, ParseOptions,
 };
 use crate::build_common::{domain_warning_line, toctree_warning_lines};
+use crate::incremental::FragmentCache;
 use crate::register_code_directives;
 use scribe_theme::{RenderContext, Theme, ThemeError, ThemeManager};
 
@@ -178,6 +179,7 @@ pub fn build_with_flavor(
     env: &mut BuildEnvironment,
     flavor: &BuildFlavor,
 ) -> Result<BuildResult> {
+        profile::mark("build-enter");
         let source_dir = &options.source_dir;
         let outdir = &options.output_dir;
         if !source_dir.is_dir() {
@@ -205,13 +207,16 @@ pub fn build_with_flavor(
             freshenv: options.freshenv,
             write_all: options.force_all,
             cache_dir: Some(options.doctree_dir.clone().unwrap_or_else(|| outdir.join(".doctrees"))),
-            persist: true,
+            persist: !options.reuse_environment,
+            reuse_in_memory: options.reuse_environment,
             ..UpdateOptions::default()
         };
         let report = env
             .update(config, source_dir, &update_options)
             .map_err(HtmlError::Environment)?;
         profile::mark("discovery");
+        profile::mark("env-update-done");
+        profile::mark("after-update");
         let mut warnings: Vec<String> = report.warnings.clone();
 
         // Upstream's `env-get-outdated` / `env-get-updated` hooks run while the
@@ -281,7 +286,62 @@ pub fn build_with_flavor(
             docnames = env.found_docnames().iter().map(|s| (*s).to_owned()).collect();
         }
 
+        // ---- Phase 67: incremental rebuild decision -----------------------
+        // A warm rebuild is one where the environment came from the cache, no
+        // global input (config, parser generation, `-E`, `-a`, filename list,
+        // extension hook) forced a full pass, a complete set of cached search
+        // fragments exists, and every page's HTML is already on disk. In that
+        // case only `UpdateReport::files_to_rebuild()` (plus its dependent
+        // closure, already folded into `changed` by `BuildEnvironment::update`)
+        // is parsed and rendered; every other page is left byte-identical on
+        // disk and its search contribution is merged from the cached fragment.
+        let cache_dir = options
+            .doctree_dir
+            .clone()
+            .unwrap_or_else(|| outdir.join(".doctrees"));
+        let rebuild_set: BTreeSet<String> = report.files_to_rebuild();
+        let fragment_cache = FragmentCache::load(&cache_dir);
+        // `html_search_language` is not part of `RelevantConfig`, so guard the
+        // cached stemmed terms against a change here explicitly.
+        let effective_language = config
+            .get_str("language")
+            .filter(|lang| !lang.is_empty())
+            .unwrap_or("en");
+        let search_language = config
+            .get_str("html_search_language")
+            .filter(|lang| !lang.is_empty())
+            .unwrap_or(effective_language)
+            .to_owned();
+        let fragments_match_language = fragment_cache
+            .as_ref()
+            .is_some_and(|cache| cache.search_language == search_language);
+        let html_on_disk = docnames.iter().all(|name| {
+            outdir.join(flavor.output_path(name)).is_file()
+        });
+        let incremental = !options.freshenv
+            && !options.force_all
+            && !report.config_changed
+            && !report.forced_full
+            && options.filenames.is_empty()
+            && hook_docnames.is_empty()
+            && report.removed.is_empty()
+            && rebuild_set.len() < docnames.len()
+            && html_on_disk
+            && fragments_match_language
+            && fragment_cache
+                .as_ref()
+                .is_some_and(|cache| cache.covers(docnames.iter().map(String::as_str)));
+        let parse_docnames: Vec<String> = if incremental {
+            rebuild_set
+                .iter()
+                .filter(|name| env.found_docs.contains_key(*name))
+                .cloned()
+                .collect()
+        } else {
+            docnames.clone()
+        };
         // ---- builders / registries ----------------------------------------
+        profile::mark("before-theme");
         let mut theme_name = config.get_str("html_theme").unwrap_or("alabaster").to_owned();
         let manager = ThemeManager::with_config(config, Some(source_dir));
         // Some upstream fixtures use `{% extends "!layout.html" %}`, whose
@@ -306,8 +366,10 @@ pub fn build_with_flavor(
             }
             Err(error) => return Err(HtmlError::theme(error)),
         };
+        profile::mark("after-theme");
         let registry = DomainRegistry::builtin();
         registry.load_from_env(env);
+        profile::mark("after-domain-registry");
         // Load intersphinx inventories before any xref is resolved.  The
         // resolver is attached to the registry, so the frozen resolve seams
         // need no signature changes.
@@ -336,10 +398,11 @@ pub fn build_with_flavor(
         let mut todos = TodoCollector::default();
         let mut viewcode = ViewcodeCollector::default();
 
-        // ---- pass A: parse all documents ----------------------------------
+        // ---- pass A: parse all documents (or just the incremental set) -----
+        profile::mark("preparse");
         let mut parsed: BTreeMap<String, ParseOutcome> = BTreeMap::new();
         let mut source_paths: BTreeMap<String, (PathBuf, String)> = BTreeMap::new();
-        for docname in &docnames {
+        for docname in &parse_docnames {
             let Some(path) = env.found_docs.get(docname) else { continue };
             let Ok(raw) = fs::read_to_string(path) else {
                 warnings.push(format!("cannot read source for {docname}"));
@@ -490,6 +553,13 @@ pub fn build_with_flavor(
                 .with_domains(&registry)
                 .with_env(env);
             for (docname, outcome) in &parsed {
+                // On a warm incremental build the registry was restored from
+                // the cached domain inventories. Drop the rebuilt document's
+                // old objects before re-registering so an edit that removes or
+                // renames an object cannot leave a stale duplicate behind.
+                if incremental {
+                    registry.clear_doc(docname);
+                }
                 let domain_ctx = transform_ctx.domain_context(docname);
                 if let Err(error) = registry.process_document(&domain_ctx, docname, &outcome.document) {
                     warnings.push(format!("{docname}: domain registration failed: {error}"));
@@ -743,7 +813,7 @@ pub fn build_with_flavor(
 
         let mut prepared: Vec<(String, Document, RenderContext, HtmlContext)> = Vec::new();
         let compact = crate::i18n::compact_setting(config);
-        for docname in &docnames {
+        for docname in &parse_docnames {
             // Take ownership of the AST: after this point the document lives
             // only in `prepared` (one copy, not a `parsed` + `prepared` pair).
             let Some(mut outcome) = parsed.remove(docname) else { continue };
@@ -973,8 +1043,10 @@ pub fn build_with_flavor(
             .collect();
 
         // ---- assets / source dumps ----------------------------------------
+        profile::mark("before-assets");
         written.extend(copy_theme_assets(&theme, outdir)?);
         written.extend(render_asset_templates(&manager, &theme, config, outdir, &language, flavor.search)?);
+        profile::mark("after-asset-templates");
         let extra_static: Vec<PathBuf> = config.get_strings("html_static_path")
             .unwrap_or_default().into_iter().map(PathBuf::from).collect();
         written.extend(copy_extra_static(&extra_static, source_dir, outdir)?);
@@ -991,6 +1063,7 @@ pub fn build_with_flavor(
         }
 
         // ---- index / search / inventory / buildinfo -----------------------
+        profile::mark("before-index-pages");
         let mut gen_ctx = page_context(
             config.master_doc(),
             config,
@@ -1034,7 +1107,9 @@ pub fn build_with_flavor(
         let index_manager = &manager;
         written.extend(write_index_pages(index_manager, &gen_ctx, &registry, env, outdir, flavor)?);
 
-        // Phase 18: full-text search index, stemmer assets and search UI.
+        // Phase 18 + 67: full-text search index, stemmer assets and search UI.
+        // On an incremental build the per-document fragments come from the
+        // cache and only the rebuilt documents are recomputed.
         if flavor.search {
             written.extend(write_search_index(
                 &search_docs,
@@ -1044,6 +1119,8 @@ pub fn build_with_flavor(
                 &language,
                 outdir,
                 flavor,
+                &cache_dir,
+                incremental,
             )?);
         }
         // Phase 66: the search index is built; release the working documents
@@ -1097,8 +1174,10 @@ pub fn build_with_flavor(
                 env.set_domain_data(&name, value);
             }
         }
-        if let Some(cache_dir) = &update_options.cache_dir {
-            let _ = env.save(cache_dir);
+        if !options.reuse_environment {
+            if let Some(cache_dir) = &update_options.cache_dir {
+                let _ = env.save(cache_dir);
+            }
         }
 
         written.sort();
@@ -1133,7 +1212,12 @@ pub fn build_with_flavor(
             println!("build succeeded, {} warning(s).", warnings.len());
         }
 
-        Ok(BuildResult { written, built_docnames, warnings })
+        Ok(BuildResult {
+            written,
+            built_docnames,
+            removed_docnames: report.removed.iter().cloned().collect(),
+            warnings,
+        })
 }
 
 struct ParseOutcome {
@@ -2069,6 +2153,7 @@ fn asset_hash(_outdir: &Path, relative: &str, fallback: &str) -> String {
 /// `index_page` call site), in deterministic docname order. Objects come from
 /// every registered domain. The emitted JavaScript is the same
 /// `Search.setIndex({...})` payload the stock `searchtools.js` expects.
+#[allow(clippy::too_many_arguments)]
 fn write_search_index(
     prepared: &[(String, Document)],
     source_paths: &BTreeMap<String, (PathBuf, String)>,
@@ -2077,28 +2162,56 @@ fn write_search_index(
     language: &str,
     outdir: &Path,
     flavor: &BuildFlavor,
+    cache_dir: &Path,
+    incremental: bool,
 ) -> Result<Vec<PathBuf>> {
     let search_language = config
         .get_str("html_search_language")
         .filter(|lang| !lang.is_empty())
         .unwrap_or(language)
         .to_owned();
-    let mut index = SearchIndex::new(search_language, scribe_envversion());
-    for (docname, document, ..) in prepared {
+
+    // Phase 67: recompute only the rebuilt documents' fragments, then merge
+    // the complete set. `SearchIndex::build_fragment` produces exactly the
+    // bytes the old inline `feed_with_filename` path produced, so a warm build
+    // is byte-identical to a clean `-E` build.
+    let mut fragments = if incremental {
+        FragmentCache::load(cache_dir).unwrap_or_else(|| FragmentCache::new(&search_language))
+    } else {
+        FragmentCache::new(&search_language)
+    };
+    fragments.search_language = search_language.clone();
+    for (docname, document) in prepared {
         let title = document.metadata.title.clone().unwrap_or_default();
         let filename = source_paths
             .get(docname)
             .map(|(_, suffix)| format!("{docname}{suffix}"))
             .unwrap_or_else(|| format!("{docname}.rst"));
-        if title.is_empty() {
-            // Upstream feeds an empty doctree for untitled pages so their
-            // section titles do not leak into `alltitles`.
-            index.feed_with_filename(docname, &filename, "", &Document::new(None));
+        // Upstream feeds an empty doctree for untitled pages so their section
+        // titles do not leak into `alltitles`.
+        let empty_document = Document::new(None);
+        let (title, document): (&str, &Document) = if title.is_empty() {
+            ("", &empty_document)
         } else {
-            index.feed_with_filename(docname, &filename, &title, document);
-        }
+            (title.as_str(), document)
+        };
+        let fragment = SearchIndex::build_fragment(docname, &filename, title, document, &search_language);
+        fragments.search_fragments.insert(docname.clone(), fragment);
+    }
+
+    let mut index = SearchIndex::new(search_language, scribe_envversion());
+    for fragment in fragments.search_fragments.values() {
+        index.apply_fragment(fragment.clone());
     }
     index.add_domain_objects(registry);
+
+    // Persist the merged fragment set for the next incremental build. A cache
+    // write failure is non-fatal: the next build simply recomputes everything.
+    if let Err(error) = fragments.save(cache_dir) {
+        if std::env::var_os("SCRIBE_PROFILE").is_some() {
+            eprintln!("SCRIBE_PROFILE fragment-cache-save-failed: {error}");
+        }
+    }
 
     let path = outdir.join(if flavor.serializing { "searchindex.json" } else { "searchindex.js" });
     let payload = if flavor.serializing {
@@ -2283,7 +2396,7 @@ fn build_single_file(
     if !options.really_quiet {
         println!("build succeeded, {} warning(s).", warnings.len());
     }
-    Ok(BuildResult { written, built_docnames: order, warnings: warnings.to_vec() })
+    Ok(BuildResult { written, built_docnames: order, removed_docnames: Vec::new(), warnings: warnings.to_vec() })
 }
 
 

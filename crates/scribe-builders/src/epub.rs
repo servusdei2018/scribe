@@ -517,6 +517,6 @@ impl EpubBuilder {
             written.push(std::path::PathBuf::from(name));
         }
 
-        Ok(BuildResult { written, built_docnames: docnames, warnings })
+        Ok(BuildResult { written, built_docnames: docnames, removed_docnames: Vec::new(), warnings })
     }
 }

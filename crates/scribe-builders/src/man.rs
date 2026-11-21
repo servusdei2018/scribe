@@ -651,6 +651,6 @@ impl ManBuilder {
             built_docnames.push(spec.docname.clone());
         }
 
-        Ok(BuildResult { written, built_docnames, warnings })
+        Ok(BuildResult { written, built_docnames, removed_docnames: Vec::new(), warnings })
     }
 }

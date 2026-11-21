@@ -2010,6 +2010,7 @@ dependencies = [
  "rust-stemmers",
  "scribe-ast",
  "scribe-autodoc",
+ "scribe-cache",
  "scribe-config",
  "scribe-core",
  "scribe-domains",

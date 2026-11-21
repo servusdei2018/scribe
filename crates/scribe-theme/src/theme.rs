@@ -34,6 +34,37 @@ const MAX_ANCESTORS: usize = 10;
 /// so tests can point discovery at a temporary tree deterministically.
 static SITE_PACKAGES_DIRS: Lazy<Vec<PathBuf>> = Lazy::new(detect_site_packages_dirs);
 
+/// Theme directories discovered under site-packages, computed once per process.
+/// `ThemeManager::discover_environment_themes` clones this instead of
+/// re-walking the Python environment on every (incremental) build.
+static ENVIRONMENT_THEMES: Lazy<Vec<(String, PathBuf)>> = Lazy::new(|| {
+    let mut found = Vec::new();
+    for dir in SITE_PACKAGES_DIRS.iter() {
+        for entry in WalkDir::new(dir)
+            .follow_links(false)
+            .min_depth(1)
+            .max_depth(3)
+            .into_iter()
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                entry.file_type().is_dir()
+                    && !name.starts_with('.')
+                    && name != "__pycache__"
+            })
+            .flatten()
+        {
+            let path = entry.path();
+            if path.join("theme.toml").is_file() || path.join("theme.conf").is_file() {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    found.push((name.to_owned(), path.to_path_buf()));
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+});
+
 /// Best-effort detection of the active Python environment's site-packages.
 ///
 /// Never fails the build: an absent or misbehaving interpreter simply yields an
@@ -273,7 +304,16 @@ impl ThemeManager {
         }
         // Site-package themes have the lowest precedence: `add_named_theme`
         // keeps bundled and project-local themes in front.
-        manager.discover_environment_themes();
+        // Phase 67: a bundled theme never inherits from a site-packages theme,
+        // so walking the Python environment is pure overhead in that common
+        // case (it dominated warm rebuild latency). Third-party and project
+        // themes still get full discovery.
+        let theme_is_bundled = config
+            .get_str("html_theme")
+            .is_some_and(|name| BUNDLED_THEME_NAMES.contains(&name));
+        if !theme_is_bundled {
+            manager.discover_environment_themes();
+        }
 
         if user_templates {
             if let Some(paths) = config.get_strings("templates_path") {
@@ -333,28 +373,13 @@ impl ThemeManager {
     /// Discover third-party themes installed in the active Python
     /// environment's `site-packages`, including nested layouts used by
     /// `furo`, `pydata_sphinx_theme` and `sphinx_rtd_theme`.
+    ///
+    /// The filesystem walk is performed once per process and shared by every
+    /// `ThemeManager` (Phase 67). Incremental rebuilds therefore do not pay the
+    /// site-packages scan again; they clone the cached name→directory list.
     pub fn discover_environment_themes(&mut self) -> &mut Self {
-        for dir in SITE_PACKAGES_DIRS.iter() {
-            for entry in WalkDir::new(dir)
-                .follow_links(false)
-                .min_depth(1)
-                .max_depth(3)
-                .into_iter()
-                .filter_entry(|entry| {
-                    let name = entry.file_name().to_string_lossy();
-                    entry.file_type().is_dir()
-                        && !name.starts_with('.')
-                        && name != "__pycache__"
-                })
-                .flatten()
-            {
-                let path = entry.path();
-                if path.join("theme.toml").is_file() || path.join("theme.conf").is_file() {
-                    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-                        self.add_named_theme(name.to_owned(), path.to_path_buf());
-                    }
-                }
-            }
+        for (name, path) in ENVIRONMENT_THEMES.iter() {
+            self.add_named_theme(name.clone(), path.clone());
         }
         self
     }

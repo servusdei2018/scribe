@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// Version of the serialized environment snapshot. Bump whenever a field is
 /// added, removed or retyped; incompatible caches are then treated as cold.
-pub const ENV_FORMAT_VERSION: u32 = 3;
+pub const ENV_FORMAT_VERSION: u32 = 4;
 
 /// Cache key used for the top-level environment artifact.
 pub const ENV_CACHE_KEY: &str = "environment";
@@ -208,7 +208,12 @@ pub struct EnvironmentSnapshot {
     /// Per-document doctree snapshots.
     pub documents: Vec<DocumentSnapshot>,
     /// Phase 11: serialized domain inventories, sorted by domain name.
-    pub domain_data: Vec<(String, serde_json::Value)>,
+    ///
+    /// Stored as JSON *text* rather than `serde_json::Value` because bincode
+    /// cannot deserialize `Value` (it requires `deserialize_any`). Keeping the
+    /// text here makes the whole snapshot bincode-round-trippable, which is
+    /// what makes a warm incremental build possible at all.
+    pub domain_data: Vec<(String, String)>,
 }
 
 /// The global build environment.
@@ -708,7 +713,12 @@ impl BuildEnvironment {
             domain_data: self
                 .domain_data
                 .iter()
-                .map(|(domain, value)| (domain.clone(), value.clone()))
+                .map(|(domain, value)| {
+                    (
+                        domain.clone(),
+                        serde_json::to_string(value).unwrap_or_default(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -752,7 +762,15 @@ impl BuildEnvironment {
             .into_iter()
             .map(|document| (document.docname.clone(), document))
             .collect();
-        environment.domain_data = snapshot.domain_data.into_iter().collect();
+        environment.domain_data = snapshot
+            .domain_data
+            .into_iter()
+            .filter_map(|(domain, text)| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .map(|value| (domain, value))
+            })
+            .collect();
         Ok(environment)
     }
 
@@ -800,6 +818,11 @@ impl BuildEnvironment {
         let mut restored = false;
         if options.freshenv {
             *self = Self::new(source_dir);
+        } else if options.reuse_in_memory {
+            // A long-lived caller (scribe serve) already holds the authoritative
+            // live environment. Keep it and mark it restored so config-change
+            // detection compares against the previous build's values.
+            restored = true;
         } else if let Some(cache_dir) = &options.cache_dir {
             // A missing, corrupt or incompatible artifact means a cold build:
             // start from an empty environment rather than trusting stale
@@ -1012,6 +1035,11 @@ pub struct UpdateOptions {
     pub doctree_dir: Option<PathBuf>,
     /// Phase 27 seam: extra docs supplied by `env-get-outdated` hooks.
     pub extra_outdated: Vec<String>,
+    /// Phase 67: reuse the caller's already-populated in-memory environment
+    /// instead of reloading it from `cache_dir`. Long-lived processes such as
+    /// `scribe serve` set this so an incremental rebuild does not pay the
+    /// full environment-cache deserialisation on every change.
+    pub reuse_in_memory: bool,
 }
 
 /// Result of [`BuildEnvironment::update`].

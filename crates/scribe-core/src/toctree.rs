@@ -36,6 +36,11 @@ use crate::BuildEnvironment;
 
 /// Attribute written by the RST directive (see `scribe_rst::toctree`).
 const ATTR_ENTRY_REFS: &str = "entry_refs";
+/// Marker set by the toctree collector on a stored doctree's `toctree` node.
+/// It records that [`ATTR_ENTRY_REFS`] already holds resolved docnames (not
+/// the raw, document-relative references from the source), so a later
+/// incremental re-collection must not join them onto `docname` again.
+const ATTR_RESOLVED: &str = "scribe:toctree-resolved";
 /// Parallel explicit titles.
 const ATTR_ENTRY_TITLES: &str = "entry_titles";
 /// Parallel entry classifiers.
@@ -177,6 +182,8 @@ pub struct ParsedToctree {
     pub line: Option<u32>,
     /// Arena id of the `NodeKind::Toctree` node.
     pub node_id: NodeId,
+    /// Whether `entry_refs` were already resolved by a previous collection.
+    pub already_resolved: bool,
 }
 
 /// A recoverable toctree diagnostic, rendered with miette.
@@ -702,6 +709,7 @@ pub fn collect_toctrees_with_sources(
                     span: node.span,
                     line: node.source.as_ref().and_then(|source| source.line),
                     node_id: id,
+                    already_resolved: false,
                 };
                 let resolved = resolve_entries(parsed, &found, &spec, &suffixes, &mut warnings);
                 toctrees.push(resolved);
@@ -781,6 +789,7 @@ pub fn collect_toctrees_with_sources(
                     node.set_list(ATTR_ENTRY_REFS, writeback.refs.clone());
                     node.set_list(ATTR_ENTRY_TITLES, writeback.titles.clone());
                     node.set_list(ATTR_ENTRY_KINDS, writeback.kinds.clone());
+                    node.attrs.set_bool(ATTR_RESOLVED, true);
                 }
             }
             if let Some(targets) = toctree_targets.get(&writeback.docname) {
@@ -901,6 +910,7 @@ fn decode_toctree(id: NodeId, node: &Node, owner: &str) -> ParsedToctree {
         span,
         line,
         node_id: id,
+        already_resolved: bool_attr(node, ATTR_RESOLVED),
     }
 }
 
@@ -975,13 +985,26 @@ fn resolve_entries(
                     continue;
                 }
                 let mut docname = raw_docname.clone();
-                for suffix in suffixes {
-                    if docname.ends_with(suffix) {
-                        docname.truncate(docname.len() - suffix.len());
-                        break;
+                if tree.already_resolved {
+                    // The stored doctree came from a previous collection: its
+                    // refs are absolute docnames. Joining them onto `docname`
+                    // again would produce `a/b/a/b/c` and silently drop every
+                    // entry on an incremental rebuild.
+                    for suffix in suffixes {
+                        if docname.ends_with(suffix) {
+                            docname.truncate(docname.len() - suffix.len());
+                            break;
+                        }
                     }
+                } else {
+                    for suffix in suffixes {
+                        if docname.ends_with(suffix) {
+                            docname.truncate(docname.len() - suffix.len());
+                            break;
+                        }
+                    }
+                    docname = docname_join(&tree.docname, &docname);
                 }
-                docname = docname_join(&tree.docname, &docname);
                 if !found.contains(&docname) {
                     warnings.push(ToctreeWarning::new(
                         "scribe::toc::missing_document",
@@ -1071,6 +1094,7 @@ pub fn materialize_resolved_entries(
         node.set_list(ATTR_ENTRY_REFS, refs.clone());
         node.set_list(ATTR_ENTRY_TITLES, titles);
         node.set_list(ATTR_ENTRY_KINDS, kinds);
+        node.attrs.set_bool(ATTR_RESOLVED, true);
         node.set_list(ATTR_ENTRIES, tree.includefiles.clone());
         node.set_list(ATTR_INCLUDEFIES, tree.includefiles.clone());
         updated += 1;
@@ -1370,6 +1394,7 @@ fn collect_toc_children(
                 span: node.span,
                 line: node.source.as_ref().and_then(|source| source.line),
                 node_id: NodeId::NULL,
+                already_resolved: false,
             }));
         }
         NodeKind::Only => {
@@ -1429,6 +1454,7 @@ fn assign_section_numbers(
                 span: node.span,
                 line: node.source.as_ref().and_then(|source| source.line),
                 node_id: id,
+                already_resolved: false,
             };
             let mut stack = vec![0i64; max_stack];
             let mut level = 0usize;

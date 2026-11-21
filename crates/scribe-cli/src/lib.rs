@@ -327,6 +327,7 @@ fn run_gettext_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let result = scribe_builders::GettextBuilder::build(&builder_options, config, &mut environment)
         .map_err(|source| Report::new(OutputBuilderFailed {
@@ -362,6 +363,7 @@ fn run_doctest_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let result = scribe_builders::DoctestBuilder::build(&builder_options, config, &mut environment)
         .map_err(|source| Report::new(DoctestFailed { source }))?;
@@ -435,6 +437,7 @@ fn run_output_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let result = match options.builder.as_str() {
         "epub" | "epub3" => scribe_builders::EpubBuilder::build(&builder_options, config, &mut environment),
@@ -481,6 +484,7 @@ fn run_doc_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let result = match options.builder.as_str() {
         "xml" => scribe_builders::XmlBuilder::build(&builder_options, config, &mut environment),
@@ -526,6 +530,7 @@ fn run_linkcheck_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let report = scribe_builders::LinkcheckBuilder::build(&builder_options, config, &mut environment)
         .map_err(|source| Report::new(OutputBuilderFailed {
@@ -571,6 +576,7 @@ fn run_html_build(options: &BuildOptions, config: &Config) -> Result<()> {
         bridge: Some(std::sync::Arc::new(
             scribe_core::InteropBridge::from_config(config, &options.source_dir),
         )),
+        reuse_environment: false,
     };
     let result = match options.builder.as_str() {
         "dirhtml" => scribe_builders::DirectoryHTMLBuilder::build(&builder_options, config, &mut environment),
@@ -616,10 +622,28 @@ pub fn build_config(
         overrides.insert("nitpicky".to_owned(), "1".to_owned());
     }
 
+    let conf_dir = options.conf_dir().map(Path::to_path_buf).unwrap_or_default();
+    // Phase 67: when `conf.py` consists solely of literal assignments the
+    // in-Rust static parser produces exactly the same values as executing it
+    // with Python, without spawning an interpreter (~50 ms saved per CLI
+    // invocation). If any statement is dynamic we keep the Python-first
+    // strategy, preserving upstream semantics for complex configuration.
+    let strategy = {
+        let conf_py = conf_dir.join("conf.py");
+        if conf_py.is_file()
+            && scribe_config::parse_static_conf_py(&conf_py)
+                .is_ok_and(|outcome| outcome.warnings.is_empty())
+        {
+            scribe_config::BridgeStrategy::Static
+        } else {
+            scribe_config::BridgeStrategy::Auto
+        }
+    };
     let request = LoadRequest {
-        conf_dir: options.conf_dir().map(Path::to_path_buf).unwrap_or_default(),
+        conf_dir,
         overrides,
         tags: options.tags.clone(),
+        strategy,
         ..LoadRequest::default()
     };
     load_config_with(request)

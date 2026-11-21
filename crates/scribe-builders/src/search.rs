@@ -33,6 +33,7 @@ use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
 use scribe_ast::{Document, NodeId, NodeKind};
 use scribe_domains::{DomainRegistry, ObjectEntry};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
 /// Snowball English stop words, vendored verbatim from Sphinx's
@@ -218,6 +219,30 @@ struct WordStore {
     title_words: Vec<String>,
 }
 
+/// A per-document contribution to the global [`SearchIndex`].
+///
+/// This is the "delta chunk" persisted in `scribe-cache` by incremental
+/// builds. It stores the *already stemmed and filtered* terms for one document
+/// so that reassembling the global index is a pure `BTreeMap` merge (no
+/// re-tokenising or re-stemming of unchanged documents).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchIndexFragment {
+    /// Sphinx docname this fragment belongs to.
+    pub docname: String,
+    /// Document title (empty string for untitled pages).
+    pub title: String,
+    /// Source filename including its suffix (`.rst`, `.txt`, …).
+    pub filename: String,
+    /// Section titles: `(title, optional anchor)`.
+    pub all_titles: Vec<(String, Option<String>)>,
+    /// Stemmed, filtered body terms (title terms already removed).
+    pub body_terms: Vec<String>,
+    /// Stemmed, filtered title terms.
+    pub title_terms: Vec<String>,
+    /// Explicit `.. index::` entries: `(lower-cased entry, anchor, "main"|"")`.
+    pub index_entries: Vec<(String, String, String)>,
+}
+
 /// The client-side search index.
 ///
 /// Construct with [`SearchIndex::new`], feed every document with
@@ -271,52 +296,80 @@ impl SearchIndex {
         title: &str,
         document: &Document,
     ) {
-        self.titles.insert(docname.to_owned(), title.to_owned());
-        self.filenames.insert(docname.to_owned(), filename.to_owned());
+        let fragment = Self::build_fragment(docname, filename, title, document, &self.language);
+        self.apply_fragment(fragment);
+    }
 
+    /// Compute one document's search-index contribution without touching the
+    /// global index. The returned fragment is byte-identical to what
+    /// [`feed_with_filename`](Self::feed_with_filename) would have produced,
+    /// so it can be cached and later merged with [`apply_fragment`](Self::apply_fragment)
+    /// on an incremental build without re-tokenising the source.
+    #[must_use]
+    pub fn build_fragment(
+        docname: &str,
+        filename: &str,
+        title: &str,
+        document: &Document,
+        language: &str,
+    ) -> SearchIndexFragment {
         let mut store = WordStore::default();
         collect_words(document, document.root, &mut store);
-        self.all_titles.insert(docname.to_owned(), store.titles);
-
-        let language = self.language.as_str();
+        let all_titles = store.titles;
 
         // Title words: stem and, if the stem is filtered, fall back to the
         // original token (upstream's "stemmer must not remove words" rule).
+        let mut title_terms = BTreeSet::new();
         for word in store.title_words {
             let stemmed = stem_word(&word, language);
             if !is_filtered(&stemmed, language) {
-                self.title_mapping
-                    .entry(stemmed)
-                    .or_default()
-                    .insert(docname.to_owned());
+                title_terms.insert(stemmed);
             } else if !is_filtered(&word, language) {
-                self.title_mapping
-                    .entry(word)
-                    .or_default()
-                    .insert(docname.to_owned());
+                title_terms.insert(word);
             }
         }
 
         // Body words: a token already present in this document's title index
-        // is not repeated in the body index.
+        // is not repeated in the body index. The check is scoped to *this*
+        // document, which is exactly what the global `feed_with_filename`
+        // achieved via `title_mapping.get(stemmed).contains(docname)`.
+        let mut body_terms = BTreeSet::new();
         for word in store.words {
             let mut stemmed = stem_word(&word, language);
             if is_filtered(&stemmed, language) && !is_filtered(&word, language) {
                 stemmed = word;
             }
-            let already_in_title = self
-                .title_mapping
-                .get(&stemmed)
-                .is_some_and(|docs| docs.contains(docname));
-            if !is_filtered(&stemmed, language) && !already_in_title {
-                self.mapping
-                    .entry(stemmed)
-                    .or_default()
-                    .insert(docname.to_owned());
+            if !is_filtered(&stemmed, language) && !title_terms.contains(&stemmed) {
+                body_terms.insert(stemmed);
             }
         }
 
-        self.collect_index_entries(docname, document);
+        SearchIndexFragment {
+            docname: docname.to_owned(),
+            title: title.to_owned(),
+            filename: filename.to_owned(),
+            all_titles,
+            body_terms: body_terms.into_iter().collect(),
+            title_terms: title_terms.into_iter().collect(),
+            index_entries: collect_index_entries_from(docname, document),
+        }
+    }
+
+    /// Merge a precomputed fragment into the global index.
+    pub fn apply_fragment(&mut self, fragment: SearchIndexFragment) {
+        let docname = fragment.docname;
+        self.titles.insert(docname.clone(), fragment.title);
+        self.filenames.insert(docname.clone(), fragment.filename);
+        self.all_titles.insert(docname.clone(), fragment.all_titles);
+        for term in fragment.body_terms {
+            self.mapping.entry(term).or_default().insert(docname.clone());
+        }
+        for term in fragment.title_terms {
+            self.title_mapping.entry(term).or_default().insert(docname.clone());
+        }
+        for (entry, id, main) in fragment.index_entries {
+            self.index_entries.entry(entry).or_default().push((docname.clone(), id, main));
+        }
     }
 
     /// Add a single object without domain metadata. The domain is inferred
@@ -620,38 +673,49 @@ impl SearchIndex {
         (objects, objtypes, objnames)
     }
 
-    /// Extract explicit index entries from `NodeKind::Index` nodes.
-    fn collect_index_entries(&mut self, docname: &str, document: &Document) {
-        for id in document.preorder_ids() {
-            let Ok(node) = document.get(id) else { continue };
-            if node.kind != NodeKind::Index {
+}
+
+/// Extract explicit `.. index::` entries from a doctree as fragment rows.
+///
+/// This is the shared implementation behind both [`SearchIndex::feed`] (full
+/// builds) and [`SearchIndex::build_fragment`] (cached incremental chunks).
+fn collect_index_entries_from(docname: &str, document: &Document) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for id in document.preorder_ids() {
+        let Ok(node) = document.get(id) else { continue };
+        if node.kind != NodeKind::Index {
+            continue;
+        }
+        let raw = node.attrs.get("entries");
+        let entries: Vec<String> = match raw {
+            Some(scribe_ast::AttributeValue::List(values)) => values.clone(),
+            Some(scribe_ast::AttributeValue::Str(text)) => {
+                serde_json::from_str(text).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        for entry in entries {
+            // Upstream tuple: (entry_type, value, target_id, main, category).
+            // scribe stores these as `;`-separated five-column strings.
+            let fields: Vec<&str> = entry.split(';').collect();
+            if fields.len() < 2 {
                 continue;
             }
-            let raw = node.attrs.get("entries");
-            let entries: Vec<String> = match raw {
-                Some(scribe_ast::AttributeValue::List(values)) => values.clone(),
-                Some(scribe_ast::AttributeValue::Str(text)) => {
-                    serde_json::from_str(text).unwrap_or_default()
-                }
-                _ => Vec::new(),
-            };
-            for entry in entries {
-                // Upstream tuple: (entry_type, value, target_id, main, category).
-                // scribe stores these as `;`-separated five-column strings.
-                let fields: Vec<&str> = entry.split(';').collect();
-                if fields.len() < 2 {
-                    continue;
-                }
-                let value = fields[1].trim();
-                if value.is_empty() {
-                    continue;
-                }
-                let entry_id = fields.get(2).map(|s| s.trim()).unwrap_or("");
-                let main = fields.get(3).is_some_and(|s| s.trim() == "main");
-                self.add_index_entry(docname, value, entry_id, main);
+            let value = fields[1].trim();
+            if value.is_empty() {
+                continue;
             }
+            let entry_id = fields.get(2).map(|s| s.trim()).unwrap_or("");
+            let main = fields.get(3).is_some_and(|s| s.trim() == "main");
+            out.push((
+                value.to_lowercase(),
+                entry_id.to_owned(),
+                if main { "main" } else { "" }.to_owned(),
+            ));
         }
     }
+    let _ = docname;
+    out
 }
 
 /// Recursively collect words and titles from a doctree, honoring upstream's
@@ -792,4 +856,63 @@ pub fn parse_js_index(source: &str) -> Option<Value> {
     let body = source.strip_prefix(JS_INDEX_PREFIX)?;
     let body = body.strip_suffix(JS_INDEX_SUFFIX)?;
     serde_json::from_str(body).ok()
+}
+
+#[cfg(test)]
+mod fragment_tests {
+    use super::{scribe_envversion, SearchIndex, SearchIndexFragment};
+    use scribe_ast::{Document, NodeKind};
+
+    fn doc(title: &str, section: &str, body: &str) -> Document {
+        let mut document = Document::new(Some("doc".to_owned()));
+        let main = document.add(NodeKind::Title, Some(document.root)).expect("title");
+        document.new_text(title, Some(main)).expect("title text");
+        let section_id = document.add(NodeKind::Section, Some(document.root)).expect("section");
+        if let Ok(node) = document.get_mut(section_id) {
+            node.attrs.set_list("ids", vec!["sec-1".to_owned()]);
+        }
+        let sec_title = document.add(NodeKind::Title, Some(section_id)).expect("section title");
+        document.new_text(section, Some(sec_title)).expect("section title text");
+        let para = document.add(NodeKind::Paragraph, Some(section_id)).expect("paragraph");
+        document.new_text(body, Some(para)).expect("body text");
+        document.metadata.title = Some(title.to_owned());
+        document
+    }
+
+    #[test]
+    fn fragment_merge_is_byte_identical_to_direct_feed() {
+        let documents: Vec<(String, Document)> = vec![
+            ("alpha".to_owned(), doc("Alpha", "Intro", "the quick brown fox jumps")),
+            ("beta".to_owned(), doc("Beta", "Details", "alpha beta gamma delta")),
+            ("gamma".to_owned(), doc("Gamma", "More", "repeated repeated words words")),
+        ];
+
+        // Reference: the original inline feed path.
+        let mut reference = SearchIndex::new("en", scribe_envversion());
+        for (name, document) in &documents {
+            let title = document.metadata.title.clone().unwrap_or_default();
+            reference.feed_with_filename(name, &format!("{name}.rst"), &title, document);
+        }
+
+        // Phase 67: precomputed fragments merged in docname order.
+        let fragments: Vec<SearchIndexFragment> = documents
+            .iter()
+            .map(|(name, document)| {
+                let title = document.metadata.title.clone().unwrap_or_default();
+                SearchIndex::build_fragment(
+                    name,
+                    &format!("{name}.rst"),
+                    &title,
+                    document,
+                    "en",
+                )
+            })
+            .collect();
+        let mut merged = SearchIndex::new("en", scribe_envversion());
+        for fragment in fragments {
+            merged.apply_fragment(fragment);
+        }
+
+        assert_eq!(merged.to_js(), reference.to_js());
+    }
 }

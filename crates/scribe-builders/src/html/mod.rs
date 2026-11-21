@@ -65,6 +65,9 @@ pub struct BuilderOptions {
     /// Optional third-party interop bridge (event bus + Python/Wasm plugins).
     /// `None` keeps the pre-Phase-27 behaviour byte-for-byte.
     pub bridge: Option<std::sync::Arc<InteropBridge>>,
+    /// Phase 67: reuse the caller's live `BuildEnvironment` without reloading
+    /// it from the on-disk cache. Used by `scribe serve` for fast rebuilds.
+    pub reuse_environment: bool,
 }
 
 impl Default for BuilderOptions {
@@ -80,6 +83,7 @@ impl Default for BuilderOptions {
             worker_count: 1,
             really_quiet: false,
             bridge: None,
+            reuse_environment: false,
         }
     }
 }
@@ -94,6 +98,8 @@ pub struct BuilderResult {
     pub written: Vec<PathBuf>,
     /// Docnames whose pages were (re)written.
     pub built_docnames: Vec<String>,
+    /// Docnames removed from the source tree this build (Phase 67).
+    pub removed_docnames: Vec<String>,
     /// Non-fatal warnings gathered during the build.
     pub warnings: Vec<String>,
 }

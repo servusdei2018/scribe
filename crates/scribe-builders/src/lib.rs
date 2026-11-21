@@ -38,6 +38,7 @@ pub mod error;
 pub mod highlight;
 pub mod html;
 pub mod i18n;
+pub mod incremental;
 pub mod latex;
 pub mod linkcheck;
 pub mod man;
@@ -91,9 +92,10 @@ pub use pygments_css::{available_styles, pygments_css};
 pub use search::{
     algorithm_for, is_filtered, parse_js_index, scribe_envversion, search_language_stemming_code,
     search_language_stop_words_json, stem_word, stopwords_for, tokenize, SearchIndex,
-    BASE_STEMMER_JS, ENGLISH_STEMMER_JS, ENGLISH_STOPWORDS, IDENTITY_STEMMER_JS, JS_INDEX_PREFIX,
-    JS_INDEX_SUFFIX,
+    SearchIndexFragment, BASE_STEMMER_JS, ENGLISH_STEMMER_JS, ENGLISH_STOPWORDS,
+    IDENTITY_STEMMER_JS, JS_INDEX_PREFIX, JS_INDEX_SUFFIX,
 };
+pub use incremental::{FragmentCache, SEARCH_FRAGMENTS_KEY};
 
 use scribe_rst::DirectiveRegistry;
 

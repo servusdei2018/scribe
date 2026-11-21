@@ -22,7 +22,7 @@ pub mod inject;
 pub mod mapping;
 pub mod mime;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::options::{BuildOptions, ColorChoice, ConfigOverride, Jobs};
 use crate::{build_config, BuilderFailed};
 use scribe_config::Config;
-use scribe_core::{BuildEnvironment, InteropBridge, UpdateOptions};
+use scribe_core::{BuildEnvironment, InteropBridge};
 
 use http::HttpServer;
 use mapping::{classify_path, is_relevant_event, ChangeKind};
@@ -225,53 +225,40 @@ fn effective_suffixes(config: &Config) -> Vec<String> {
     }
 }
 
-/// Compute the authoritative rebuild set with Phase 08 `BuildEnvironment`.
-/// Uses `persist: false` so probing never disturbs the on-disk cache that the
-/// subsequent builder run consumes.
-fn rebuild_set(
+/// Run the deterministic HTML-family builder against a *live* environment.
+///
+/// Phase 67: the caller keeps one `BuildEnvironment` for the whole server
+/// lifetime. The initial build uses `freshenv` and persists the cache; later
+/// rebuilds reuse the in-memory environment and the builder's incremental path
+/// re-parses / re-renders only `UpdateReport::files_to_rebuild()`, merging the
+/// cached per-document search fragments for every other page.
+fn perform_build(
     options: &BuildOptions,
     config: &Config,
+    builder: &str,
     fresh: bool,
-) -> Result<(BTreeSet<String>, BTreeSet<String>), Report> {
-    let mut env = BuildEnvironment::with_config(&options.source_dir, config);
-    let update_options = UpdateOptions {
-        freshenv: fresh,
-        cache_dir: Some(options.doctree_dir()),
-        persist: false,
-        doctree_dir: Some(options.doctree_dir()),
-        ..UpdateOptions::default()
-    };
-    let report = env
-        .update(config, &options.source_dir, &update_options)
-        .map_err(|error| Report::new(ServeError::Build { context: "incremental", message: error.to_string() }))?;
-    Ok((report.files_to_rebuild(), report.removed))
-}
-
-/// Run the deterministic HTML-family builder. The builder itself calls
-/// `BuildEnvironment::update`, so unchanged reads are skipped by the Phase 08
-/// cache; see ARCHITECTURE.md §34 for the project-wide-artifact rationale.
-fn perform_build(options: &BuildOptions, config: &Config, builder: &str, fresh: bool) -> Result<(), Report> {
-    let mut env = BuildEnvironment::with_config(&options.source_dir, config);
+    force: bool,
+    env: &mut BuildEnvironment,
+) -> Result<scribe_builders::html::BuildResult, Report> {
     let builder_options = scribe_builders::html::BuildOptions {
         source_dir: options.source_dir.clone(),
         output_dir: options.output_dir.clone(),
         builder_name: builder.to_owned(),
-        force_all: false,
+        force_all: force && !fresh,
         freshenv: fresh,
         doctree_dir: options.doctreedir.clone(),
         filenames: Vec::new(),
         worker_count: options.worker_count(),
         really_quiet: true,
         bridge: Some(Arc::new(InteropBridge::from_config(config, &options.source_dir))),
+        reuse_environment: !fresh,
     };
     let result = match builder {
-        "dirhtml" => scribe_builders::DirectoryHTMLBuilder::build(&builder_options, config, &mut env),
-        "singlehtml" => scribe_builders::SingleFileHTMLBuilder::build(&builder_options, config, &mut env),
-        _ => scribe_builders::html::StandaloneHtmlBuilder::build(&builder_options, config, &mut env),
+        "dirhtml" => scribe_builders::DirectoryHTMLBuilder::build(&builder_options, config, env),
+        "singlehtml" => scribe_builders::SingleFileHTMLBuilder::build(&builder_options, config, env),
+        _ => scribe_builders::html::StandaloneHtmlBuilder::build(&builder_options, config, env),
     };
-    result
-        .map(|_| ())
-        .map_err(|source| Report::new(BuilderFailed { builder: builder.to_owned(), source }))
+    result.map_err(|source| Report::new(BuilderFailed { builder: builder.to_owned(), source }))
 }
 
 async fn serve_async(
@@ -287,10 +274,13 @@ async fn serve_async(
     let output_dir = build_options.output_dir.clone();
 
     // ---- initial full build ------------------------------------------------
-    let (initial_docs, _) = rebuild_set(&build_options, &config, true)?;
+    // Phase 67: one live environment is kept for the whole server lifetime so
+    // subsequent rebuilds skip the environment-cache reload and save.
+    let mut env = BuildEnvironment::with_config(&build_options.source_dir, &config);
     let started = Instant::now();
-    perform_build(&build_options, &config, &args.builder, true)
+    let initial = perform_build(&build_options, &config, &args.builder, true, false, &mut env)
         .map_err(|error| Report::new(ServeError::Build { context: "initial", message: error.to_string() }))?;
+    let initial_docs = initial.built_docnames;
     if !quiet {
         println!(
             "[scribe] initial build: {} page(s) in {:.2?}",
@@ -391,23 +381,17 @@ async fn serve_async(
                     }
                 }
 
-                let (rebuild, removed) = match rebuild_set(&build_options, &config, false) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        eprintln!("[scribe] cannot compute rebuild set: {error}");
-                        continue;
-                    }
-                };
-                if rebuild.is_empty() && removed.is_empty() && !force {
-                    continue;
-                }
-
                 let started = Instant::now();
-                match perform_build(&build_options, &config, &args.builder, false) {
-                    Ok(()) => {
+                match perform_build(&build_options, &config, &args.builder, false, force, &mut env) {
+                    Ok(result) => {
+                        let rebuild: Vec<String> = result.built_docnames;
+                        let removed = result.removed_docnames;
                         for docname in &removed {
                             let path = output_dir.join(format!("{docname}.html"));
                             let _ = tokio::fs::remove_file(path).await;
+                        }
+                        if rebuild.is_empty() && removed.is_empty() && !force {
+                            continue;
                         }
                         // Only emit a reload after a successful rebuild. An
                         // empty page list makes the client reload the current

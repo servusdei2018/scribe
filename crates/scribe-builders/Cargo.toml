@@ -13,6 +13,7 @@ scribe-ast.workspace = true
 scribe-config.workspace = true
 scribe-rst.workspace = true
 scribe-core.workspace = true
+scribe-cache.workspace = true
 scribe-domains.workspace = true
 scribe-theme.workspace = true
 scribe-autodoc.workspace = true

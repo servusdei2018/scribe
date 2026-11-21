@@ -72,7 +72,7 @@ impl ChangesBuilder {
 
         let mut written = Vec::new();
         if changesets.is_empty() {
-            return Ok(BuildResult { written, built_docnames: docnames, warnings });
+            return Ok(BuildResult { written, built_docnames: docnames, removed_docnames: Vec::new(), warnings });
         }
 
         let ctx = ChangesContext::from_config(config, version, &parsed, changesets);
@@ -112,7 +112,7 @@ impl ChangesBuilder {
         emit("changes", &options.output_dir, Path::new("basic.css"), BASIC_CSS, &mut written)?;
         emit("changes", &options.output_dir, Path::new("default.css"), DEFAULT_CSS, &mut written)?;
 
-        Ok(BuildResult { written, built_docnames: docnames, warnings })
+        Ok(BuildResult { written, built_docnames: docnames, removed_docnames: Vec::new(), warnings })
     }
 }
 

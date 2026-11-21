@@ -178,7 +178,7 @@ fn build_docs(
         written.push(relative);
     }
 
-    Ok(BuildResult { written, built_docnames: docnames, warnings })
+    Ok(BuildResult { written, built_docnames: docnames, removed_docnames: Vec::new(), warnings })
 }
 
 /// Render a document as real Docutils XML.
