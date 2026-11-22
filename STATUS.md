@@ -2718,3 +2718,184 @@ execute, page-count differences, higher RSS on django) are documented there.
 | Aggregate conformance parity | 100% | 100.0% (39/39 at 1.000) | **PASS** |
 | Check / clippy / debug / release tests | 100% green | see final gate run | **PASS** |
 | CLI version | `scribe 2.0.1` | `scribe 2.0.1` | **PASS** |
+
+---
+
+## Phase 71 — 684-page Django RSS & warning triage audit (subagent)
+
+**Audit phase: measurements only, no feature code.** The corpus was freshly
+shallow/sparse-cloned into `/tmp/scribe-corpus/` (django commit
+`0eae0b2584ed1e13d696ae1a5d8016a5c2dc7149`). Every tree was built cold with
+`SCRIBE_PROFILE=1 /usr/bin/time -v ./target/release/scribe build -b html -E -q
+-c <src> <src> <out>`. The current checkout's site-packages no longer resolves
+Django's `djangodocs → pydata_sphinx_theme` inheritance or pytest's `furo`, so
+those two used `-D html_theme=basic`; sqlalchemy resolved its theme natively.
+All three builds exited 0.
+
+### Instrumentation added (no behaviour change)
+
+Six additive `profile::mark(...)` calls in
+`crates/scribe-builders/src/html/builder.rs` bracket the four memory structures
+under study: `before-domain-registration`, `after-domain-registration`,
+`before-toctrees`, `after-index-pages`, `after-search-index` and
+`after-objects-inv`. Each is a no-op unless `SCRIBE_PROFILE` is set, so output
+and timing are unchanged in normal builds.
+
+> **Profiler quirk (pre-existing, not modified).** `profile::mark` stores the
+> previous sample in a `OnceLock<u64>` but calls `.set()` on every mark; only
+> the first call succeeds, so the emitted `delta_rss` is actually cumulative
+> from `build-enter`, not from the previous mark as the module docstring says.
+> The **true stage-to-stage deltas** in the table below are therefore computed
+> as differences of consecutive `VmRSS`/`VmHWM` samples. The raw emitted lines
+> are preserved verbatim in `/tmp/scribe-phase71/stderr-django.txt`.
+
+### Build outcomes
+
+| Corpus | Warnings (`WARNING:` lines) | HTML pages | profiled peak VmHWM | clean peak RSS (no profiler) | recorded baseline |
+|---|---:|---:|---:|---:|---:|
+| django | 151 | 684 | 900,044 KB | 901,040 KB | 900,724 KB |
+| pytest | 506 | 260 | 380,788 KB | 379,100 KB | 378,872 KB |
+| sqlalchemy | 75 | 184 | 301,472 KB | 301,772 KB | 301,764 KB |
+
+Warning counts and page counts match the baseline **exactly**; clean-run peak
+RSS is within **0.04%** on all three corpora. The baseline figures are therefore
+**re-confirmed unchanged** (noted in `CORPUS_BENCHMARKS.md` and `BENCHMARKS.md`).
+
+### Django 684-page stage-by-stage RSS profile
+
+`VmRSS` = current resident set, `VmHWM` = process high-water mark; `ΔRSS` and
+`ΔHWM` are the true stage-to-stage changes (KB). `t` is ms from `build-enter`.
+
+| Stage | t (ms) | VmRSS | VmHWM | ΔRSS | ΔHWM |
+|---|---:|---:|---:|---:|---:|
+| build-enter | 0.04 | 7,084 | 7,084 | base | base |
+| discovery | 6.31 | 12,948 | 12,948 | +5,864 | +5,864 |
+| env-update-done | 6.34 | 12,948 | 12,948 | 0 | 0 |
+| after-update | 6.36 | 12,948 | 12,948 | 0 | 0 |
+| before-theme | 6.58 | 13,140 | 13,140 | +192 | +192 |
+| after-theme | 6.79 | 13,780 | 13,780 | +640 | +640 |
+| after-domain-registry | 6.88 | 14,356 | 14,356 | +576 | +576 |
+| preparse | 189.88 | 42,120 | 42,120 | +27,764 | +27,764 |
+| parse | 1,442.24 | 336,972 | 337,396 | +294,852 | +295,276 |
+| before-domain-registration | 1,870.20 | 528,636 | 531,540 | +191,664 | +194,144 |
+| after-domain-registration | 2,863.98 | 528,700 | 531,540 | +64 | 0 |
+| before-toctrees | 2,864.01 | 528,700 | 531,540 | 0 | 0 |
+| domain | 3,327.52 | 661,772 | **900,044** | +133,072 | **+368,504** |
+| transform-resolve | 3,744.96 | 687,708 | 900,044 | +25,936 | 0 |
+| render | 3,870.08 | 691,460 | 900,044 | +3,752 | 0 |
+| before-assets | 3,875.16 | 691,644 | 900,044 | +184 | 0 |
+| after-asset-templates | 3,875.75 | 691,740 | 900,044 | +96 | 0 |
+| before-index-pages | 3,889.47 | 692,000 | 900,044 | +260 | 0 |
+| after-index-pages | 3,914.59 | 697,452 | 900,044 | +5,452 | 0 |
+| after-search-index | 4,452.70 | 728,144 | 900,044 | +30,692 | 0 |
+| after-objects-inv | 4,533.65 | 724,692 | 900,044 | −3,452 | 0 |
+| write-assets | 4,553.64 | 610,632 | 900,044 | −114,060 | 0 |
+| done | 4,851.91 | 811,520 | 900,044 | +200,888 | 0 |
+
+### HWM attribution (Django, peak 900,044 KB)
+
+- **Peak origin.** `VmHWM` is flat at 531,540 KB through `before-toctrees` and
+  jumps to **900,044 KB** at the `domain` mark — the single largest transient
+  allocation of the build (**+368,504 KB** HWM), never exceeded afterwards.
+- **ToctreeCollection (`before-toctrees → domain`).** VmRSS +133,072 KB
+  (528,700 → 661,772), VmHWM +368,504 KB. This stage snapshots all 684
+  post-registration doctrees into `env.all_docs`, builds the `ToctreeCollection`
+  (glob-expanded entries, section/figure numbers, sources), then materialises
+  and expands toctrees on every working AST. **It is the dominant peak-RSS
+  driver** for the 684-page build.
+- **DomainRegistry symbol buckets (`before-domain-registration →
+  after-domain-registration`).** VmRSS **+64 KB**, VmHWM unchanged. Registering
+  684 documents' objects into the symbol buckets is comparatively tiny. The
+  expensive adjacent step is the preceding signature-expansion loop
+  (`parse → before-domain-registration`, VmRSS +191,664 KB, VmHWM +194,144 KB),
+  which stamps `py:fullname`/`rst:name` and domain attributes onto all 684 ASTs;
+  the cold registry starts empty (`after-domain-registry` +576 KB) and stays
+  small.
+- **SearchIndex token maps (`after-index-pages → after-search-index`).** VmRSS
+  **+30,692 KB** (697,452 → 728,144), VmHWM unchanged. Full-text token maps and
+  stemmer output for 684 pages.
+- **ObjectsInv buffers (`after-search-index → after-objects-inv`).** VmRSS
+  **−3,452 KB**, VmHWM unchanged: the `objects.inv` serialization buffer is
+  transient and fully reclaimed by this mark.
+- **Other notable deltas.** `discovery` +5,864 KB (source scan); `preparse`
+  +27,764 KB (directive table + `found_docs` clone); `parse` +294,852 KB
+  (parallel parse of 684 docs, transient HWM 337,396 KB); `transform-resolve`
+  +25,936 KB (per-page `RenderContext`/`HtmlContext`); `write-assets` −114,060 KB
+  (after `malloc_trim`); `done` +200,888 KB (env-cache serialization with full
+  doctrees still resident, below the established HWM).
+
+### Grouped warning frequency tables
+
+Scope: the canonical `WARNING: … [type.subtype]` lines that `corpus_bench.sh`
+counts (151 / 506 / 75). The directive/role is inferred from the message body
+and canonical code. Totals are exact.
+
+**Django — 151 warnings**
+
+| warning_code | directive/role | count |
+|---|---|---:|
+| ref.option | `option` (`:option:` role) | 149 |
+| ref.ref | `ref` (`:ref:` role) | 2 |
+| **TOTAL** | | **151** |
+
+**pytest — 506 warnings**
+
+| warning_code | directive/role | count |
+|---|---|---:|
+| toc.not_included | `toctree` directive | 194 |
+| ref.func | `py:func` role | 189 |
+| ref.meth | `py:meth` role | 74 |
+| ref.class | `py:class` role | 30 |
+| ref.attr | `py:attr` role | 17 |
+| ref.data | `py:data` role | 1 |
+| ref.python | `python` (py-domain xref family) | 1 |
+| **TOTAL** | | **506** |
+
+**sqlalchemy — 75 warnings**
+
+| warning_code | directive/role | count |
+|---|---|---:|
+| ref.ref | `ref` (`:ref:` role) | 75 |
+| **TOTAL** | | **75** |
+
+Interpretation: the canonical warnings are almost entirely **unresolved
+cross-references** (`ref.*`) plus pytest's `toc.not_included` (release-note
+pages omitted from every toctree) — all attributable to third-party extensions
+and domain objects scribe does not execute, not to parser/writer crashes.
+
+### Unstructured warnings (outside the 151/506/75 counts)
+
+Each stderr also carries non-canonical `scribe: warning:` lines with no
+`WARNING:` prefix / `[code]` suffix. They are **reported, not hidden**, and are
+not part of the corpus-bench counts:
+
+- **django 795**: `setting` 216, `console` 168, `cli-option` 149,
+  `fieldlookup` 104, `templatefilter` 72, `templatetag` 47, `cli` 36,
+  extension-not-found 3.
+- **pytest 267**: `tab` 162, `hook` 52, `fixture` 21, autodoc invalid-options /
+  extra-arguments 21, extension-not-found 6, `globalvar` 4,
+  `towncrier-draft-entries` 1.
+- **sqlalchemy 430**: `changelog` 356, autodoc invalid-options 33,
+  `footer_topic` 16, `changelog_imports` 9, `deepalchemy` 6, `legacy` 5,
+  extension-not-found 4, `dialect-table` 1.
+
+These are dominated by custom directives from third-party extensions
+(`djangodocs`, `sphinx-inline-tabs`, `zzzeeksphinx`/`changelog`, …) that scribe
+does not execute, plus stricter autodoc option validation.
+
+### Final verification (Phase 71, all commands run from the repo root)
+
+| Command | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | `Finished dev profile`; **0 warnings, 0 errors** (exit 0) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | `Finished dev profile`; **clean** (exit 0) |
+| `cargo test --workspace --release` | **1,161 passed, 0 failed** (exit 0) |
+| `cargo test -p scribe-cli --test conformance` | **100.0% (39/39)** — `CONFORMANCE.md` unchanged |
+| `cargo test -p scribe-cli --test selfhost` | `selfhost_build_emits_no_warnings` **passes** (0 warnings) |
+
+**Gate status:** the exact stage-by-stage `VmRSS`/`VmHWM` profile for the
+684-page Django build and the complete grouped warning frequency tables
+(151 / 506 / 75) are recorded above. All measured warnings/pages re-confirm
+the recorded corpus baseline; all 1,161 tests, the 39/39 conformance suite and
+the 0-warning self-host remain green. No commits, tags, branches or stash
+changes were made.

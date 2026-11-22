@@ -624,6 +624,9 @@ pub fn build_with_flavor(
         }
         // Register every document's objects before resolving any xref so
         // cross-document references resolve against the complete inventory.
+        // Phase 71: bracket this block so the DomainRegistry symbol buckets can
+        // be attributed in the opt-in RSS profile (no-op unless SCRIBE_PROFILE).
+        profile::mark("before-domain-registration");
         {
             let transform_ctx = TransformContext::new(Some(config), Some(&tags), "html", "html")
                 .with_domains(&registry)
@@ -650,10 +653,14 @@ pub fn build_with_flavor(
                 }
             }
         }
+        profile::mark("after-domain-registration");
         // These doctree-mutating passes are specific to the standalone HTML
         // builder. dirhtml/singlehtml keep their own toctree inlining/anchor
         // rewriting pipelines and must see the raw `toctree` nodes.
         let full_nav = !flavor.singlefile && !flavor.directory_style;
+        // Phase 71: bracket toctree snapshot/collection/expansion so the
+        // ToctreeCollection buffers can be attributed in the RSS profile.
+        profile::mark("before-toctrees");
         let toctrees = if full_nav {
             // Assign implicit `idN` targets to captioned code blocks *before*
             // snapshotting the doctrees, so the numfig pass numbers all of them
@@ -1196,6 +1203,7 @@ pub fn build_with_flavor(
         // bundled default.
         let index_manager = &manager;
         written.extend(write_index_pages(index_manager, &gen_ctx, &registry, env, outdir, flavor)?);
+        profile::mark("after-index-pages");
 
         // Phase 18 + 67: full-text search index, stemmer assets and search UI.
         // On an incremental build the per-document fragments come from the
@@ -1212,6 +1220,7 @@ pub fn build_with_flavor(
                 &cache_dir,
                 incremental,
             )?);
+            profile::mark("after-search-index");
         }
         // Phase 66: the search index is built; release the working documents
         // before the environment cache is serialized so the two large live sets
@@ -1223,6 +1232,7 @@ pub fn build_with_flavor(
             written.extend(write_serializing_extras(config, &target_uris, outdir)?);
         } else {
             write_objects_inv(&registry, config, &target_uris, outdir, &mut written)?;
+            profile::mark("after-objects-inv");
         }
 
         // ---- Phase 20 extension assets -----------------------------------

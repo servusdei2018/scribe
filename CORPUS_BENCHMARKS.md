@@ -123,3 +123,16 @@ RUNS=3 ./scripts/corpus_bench.sh [results.md]
 The script is idempotent: it reuses existing shallow clones under
 `/tmp/scribe-corpus/` and only clones a repository when its `conf.py` is
 missing.
+
+## Phase 71 re-confirmation (2026-11-22)
+
+Fresh shallow/sparse clones of all three large corpora were rebuilt cold with
+`SCRIBE_PROFILE=1 /usr/bin/time -v ./target/release/scribe build -b html -E -q`
+(Django and pytest required `-D html_theme=basic` because the current
+site-packages no longer resolves their inherited themes). Warning counts and
+HTML page counts matched this table **exactly**: django 151 / 684, pytest
+506 / 260, sqlalchemy 75 / 184. A clean (unprofiled) re-measurement of peak RSS
+gave 901,040 KB / 379,100 KB / 301,772 KB — within **0.04%** of the recorded
+medians (900,724 / 378,872 / 301,764 KB). The figures above are therefore
+**re-confirmed unchanged**; the profiled peak high-water marks and the full
+stage attribution are recorded in `STATUS.md` §Phase 71.

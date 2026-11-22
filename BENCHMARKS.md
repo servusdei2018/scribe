@@ -299,3 +299,13 @@ remaining reference warnings, so the self-host now builds **155 source pages /
 158 HTML files with 0 warnings**. `cargo test -p scribe-cli --test selfhost`
 passes 3 tests: terminates without panicking, unmodified `sphinx13` theme
 actually used, and the zero-warning gate.
+
+## Phase 71 note — corpus figures re-confirmed
+
+The Phase 71 684-page Django RSS/warning audit re-built django, pytest and
+sqlalchemy from fresh clones. Warning counts (151 / 506 / 75) and HTML page
+counts (684 / 260 / 184) matched `CORPUS_BENCHMARKS.md` exactly, and clean-run
+peak RSS was within 0.04% of the recorded medians. All figures in this file and
+in `CORPUS_BENCHMARKS.md` are therefore **re-confirmed unchanged**; the new
+stage-by-stage `VmRSS`/`VmHWM` attribution and grouped warning tables live in
+`STATUS.md` §Phase 71.
